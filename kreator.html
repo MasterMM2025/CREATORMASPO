@@ -1,0 +1,1350 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kreator PDF – Katalog produktów</title>
+  <link rel="stylesheet" href="kreator.css?v=20260228-rmbg-sidebar03">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style></style>
+  
+  <!-- DODANO: QUILL.JS -->
+  <link href="https://cdn.quilljs.com/1.3.7/quill.snow.css" rel="stylesheet">
+</head>
+<body>
+
+  <!-- GÓRNY PASEK -->
+  <div class="header-bar">
+    <div class="header-left">
+      <a class="header-logo" id="homeLogo" href="kreator.html" data-start-url="kreator.html" aria-label="Strona startowa">
+        <svg width="26" height="26" viewBox="0 0 26 26" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Logo">
+          <circle cx="13" cy="13" r="12" fill="#00c4b4"/>
+          <path d="M8 7h4.2c3 0 5.1 1.9 5.1 4.6 0 2.8-2.1 4.7-5.1 4.7H8V7zm3 2.6v4.1h1.2c1.3 0 2.1-.8 2.1-2.1 0-1.2-.8-2-2.1-2H11z" fill="#ffffff"/>
+        </svg>
+      </a>
+      <div class="header-title" id="projectTitle">Katalog produktów</div>
+    </div>
+    <div class="header-center"></div>
+    <div class="header-right">
+      <button class="header-page-settings-toggle" id="pageSettingsToggleBtn" type="button" aria-label="Ustawienia strony" aria-expanded="false" title="Ustawienia strony">
+        <img
+          class="header-page-settings-toggle__icon-image"
+          src="https://firebasestorage.googleapis.com/v0/b/pdf-creator-f7a8b.firebasestorage.app/o/CREATOR%20BASIC%2Fstyl%20strony%2Ftlo%20strony.png?alt=media&token=8dd10904-b10f-4503-bc76-4449453b766b"
+          alt=""
+          aria-hidden="true"
+        >
+      </button>
+      <button class="share-btn" id="downloadProjectBtn"><i class="fas fa-download"></i> Pobierz projekt</button>
+    </div>
+  </div>
+
+  <!-- SIDEBAR Z IKONAMI -->
+  <div class="sidebar">
+    <!-- Nowy projekt -->
+    <div class="sidebar-item" id="newProjectBtn" title="Nowy projekt">
+      <i class="fas fa-file"></i>
+      <span class="sidebar-label">Nowy projekt</span>
+    </div>
+
+    <!-- Szybki kreator -->
+    <div class="sidebar-item" id="quickCreatorBtn" title="Szybki kreator">
+      <i class="fas fa-bolt"></i>
+      <span class="sidebar-label">Szybki kreator</span>
+    </div>
+
+    <!-- Wybierz styl -->
+    <div class="sidebar-item" id="chooseStyleBtn" title="Wybierz styl">
+      <i class="fas fa-palette"></i>
+      <span class="sidebar-label">Wybierz styl</span>
+    </div>
+
+    <div class="sidebar-item" id="addCatalogProductsBtn" title="Dodaj produkty do katalogu">
+      <i class="fas fa-box-open"></i>
+      <span class="sidebar-label">Dodaj produkty do katalogu</span>
+    </div>
+
+    <!-- Elementy zapisane -->
+    <div class="sidebar-item" title="Elementy zapisane">
+      <i class="fas fa-save"></i>
+      <span class="sidebar-label">Elementy zapisane</span>
+    </div>
+
+    <!-- Dodaj tekst -->
+    <div class="sidebar-item" id="sidebarAddText" title="Dodaj tekst">
+      <i class="fas fa-font"></i>
+      <span class="sidebar-label">Dodaj tekst</span>
+    </div>
+
+    <!-- Dodaj zdjęcia -->
+    <div class="sidebar-item" id="sidebarAddImage" title="Dodaj zdjęcia">
+      <i class="fas fa-images"></i>
+      <span class="sidebar-label">Dodaj zdjęcia</span>
+    </div>
+    <!-- (usunięte: Import PSD) -->
+
+    <!-- Dodaj element -->
+    <div class="sidebar-item" id="addElementBtn" title="Dodaj element">
+      <i class="fas fa-shapes"></i>
+      <span class="sidebar-label">Dodaj element</span>
+    </div>
+
+    <!-- Przesyłanie danych -->
+    <div class="sidebar-item" title="Przesyłanie danych">
+      <i class="fas fa-cloud-upload-alt"></i>
+      <span class="sidebar-label">Przesyłanie danych</span>
+    </div>
+ <!-- Rysowanie -->
+   <div class="sidebar-item" title="Kształty">
+  <i class="fas fa-draw-polygon"></i>
+  <span class="sidebar-label">Kształty</span>
+</div>
+
+
+
+    <!-- Separator -->
+    <div class="sidebar-separator"></div>
+
+    <div class="sidebar-item" title="Kod EAN">
+      <i class="fas fa-barcode"></i>
+      <span class="sidebar-label">Kod EAN</span>
+    </div>
+    <div class="sidebar-item" title="Kod QR">
+  <i class="fas fa-qrcode"></i>
+  <span class="sidebar-label">Kod QR</span>
+</div>
+
+    <!-- (usunięte: Opcje PDF / Cena / Ramki) -->
+  </div>
+
+  <!-- MAIN CONTENT -->
+  <div class="main-content">
+    <!-- START VIEW: zapisane projekty -->
+    <div id="startProjectsView" style="display:none;">
+      <div class="start-hero">
+        <div class="start-hero-title">Co dziś stworzysz?</div>
+        <div class="start-hero-sub">Wróć do ostatnich katalogów albo zacznij nowy projekt w kilka minut.</div>
+        <div style="margin-top:14px;">
+          <button id="startCreateProjectBtn" class="share-btn" style="padding:10px 16px;">
+            <i class="fas fa-plus"></i> Utwórz nowy projekt
+          </button>
+        </div>
+      </div>
+      <h2 class="panel-title start-title"><i class="fas fa-folder-open"></i> Ostatnie projekty</h2>
+      <div id="startProjectsList"></div>
+    </div>
+
+    <!-- EDITOR VIEW -->
+    <div id="editorView">
+    <div class="improved-panel" id="importPanel">
+      <div class="panel-header">
+        <h2 class="panel-title"><i class="fas fa-upload"></i> Import i ustawienia</h2>
+      </div>
+
+      <div class="panel-body">
+      <!-- EXCEL -->
+      <div class="import-row">
+        <div class="file-section">
+          <label for="excelFile" class="file-label-wrapper">
+            <span id="fileLabel">Nie wybrano pliku</span>
+            <input type="file" id="excelFile" accept=".xls,.xlsx,.csv">
+          </label>
+        </div>
+        <button class="btn-primary" id="importExcelBtn"><i class="fas fa-file-excel"></i> Importuj Excel</button>
+      </div>
+
+      <!-- UPLOAD KARTY -->
+      <div class="upload-grid">
+        <!-- BANER -->
+        <div class="upload-card">
+          <div class="upload-zone" id="bannerUpload">
+            <i class="fas fa-image"></i>
+            <p>Przeciągnij baner tutaj lub <span class="file-label" onclick="document.getElementById('bannerFileInput').click()">kliknij, aby wybrać</span></p>
+            <input type="file" id="bannerFileInput" accept="image/*">
+          </div>
+          <div id="bannerPreview" class="upload-preview"></div>
+        </div>
+
+        <!-- TŁO -->
+        <div class="upload-card">
+          <div class="upload-zone" id="backgroundUpload">
+            <i class="fas fa-fill-drip"></i>
+            <p>Przeciągnij tło tutaj lub <span class="file-label" onclick="document.getElementById('backgroundFileInput').click()">kliknij, aby wybrać</span></p>
+            <input type="file" id="backgroundFileInput" accept="image/*">
+          </div>
+          <div id="backgroundPreview" class="upload-preview"></div>
+        </div>
+
+        <!-- OKŁADKA -->
+        <div class="upload-card">
+          <div class="upload-zone" id="coverUpload">
+            <i class="fas fa-book"></i>
+            <p>Przeciągnij okładkę tutaj lub <span class="file-label" onclick="document.getElementById('coverFileInput').click()">kliknij, aby wybrać</span></p>
+            <input type="file" id="coverFileInput" accept="image/*">
+          </div>
+          <div id="coverPreview" class="upload-preview"></div>
+        </div>
+
+        <!-- ZDJĘCIA -->
+        <div class="upload-card">
+          <div class="upload-zone" id="uploadArea">
+            <i class="fas fa-images"></i>
+            <p>Przeciągnij zdjęcia tutaj lub <span class="file-label" onclick="document.getElementById('imageInput').click()">kliknij, aby wybrać</span></p>
+            <input type="file" id="imageInput" accept="image/*" multiple>
+          </div>
+        </div>
+
+        <!-- DODAJ PUSTĄ STRONĘ -->
+        <div class="upload-card">
+          <div class="upload-zone" id="blankPageTile">
+            <i class="fas fa-file-circle-plus"></i>
+            <p>Dodaj stronę o tych samych wymiarach co strony z katalogu</p>
+            <button class="btn-primary" id="addBlankPageBtn" type="button">
+              <i class="fas fa-plus"></i> Dodaj pustą stronę
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- IMPORT ZDJĘĆ -->
+      <div class="import-row" style="margin-top: 12px; justify-content: center;">
+        <button class="btn-primary" id="importImagesBtn"><i class="fas fa-upload"></i> Importuj zdjęcia</button>
+      </div>
+
+      <!-- PDF BUTTONS – TYLKO Generuj PDF i Ustawienia katalogu -->
+      <div class="pdf-buttons toolbar-actions">
+
+    <button id="pdfButton" class="btn-primary" disabled>
+        <i class="fas fa-file-pdf"></i> Generuj PDF
+    </button>
+    
+    <button id="canvaPdfButton" class="btn-primary">
+        <i class="fas fa-file-export"></i> Export do Canva
+    </button>
+
+    <button id="catalogSettingsBtn" class="btn-primary">
+        <i class="fas fa-cog"></i> Ustawienia katalogu
+    </button>
+
+    <button id="saveProjectBtn" class="btn-primary">
+        <i class="fas fa-save"></i> Zapisz projekt
+    </button>
+</div>
+
+      </div>
+
+      <div class="panel-toggle-bottom">
+        <button class="panel-toggle" id="importPanelToggle" aria-label="Zwiń panel" title="Zwiń panel">
+          <span class="panel-toggle-icon">▴</span>
+          <span class="panel-toggle-text">Zwiń</span>
+        </button>
+      </div>
+    </div>
+
+    <div id="pagesContainer"></div>
+    </div>
+  </div>
+
+  <!-- SZYBKI KREATOR -->
+  <div id="quickCreatorModal" class="quick-modal" style="display:none;">
+    <div class="quick-modal-card">
+      <div class="quick-modal-header">
+        <h3>Szybki kreator</h3>
+        <button id="quickCreatorClose" class="quick-close">×</button>
+      </div>
+
+      <div class="quick-section">
+        <div class="quick-label">Układ</div>
+        <div class="quick-row">
+          <label class="quick-radio"><input type="radio" name="quickLayout" value="layout6" checked><span>Layout 6</span></label>
+          <label class="quick-radio"><input type="radio" name="quickLayout" value="layout8"><span>Layout 8</span></label>
+        </div>
+      </div>
+
+      <div class="quick-section">
+        <div class="quick-label">Import</div>
+        <div class="quick-grid">
+          <button id="quickExcelBtn" class="quick-btn" data-step="excel">Import Excel</button>
+          <button id="quickImagesBtn" class="quick-btn" data-step="images">Import zdjęć</button>
+          <button id="quickCoverBtn" class="quick-btn" data-step="cover">Import okładka</button>
+          <button id="quickBannerBtn" class="quick-btn" data-step="banner">Import baner</button>
+          <button id="quickBgBtn" class="quick-btn" data-step="bg">Import tło</button>
+        </div>
+        <div class="quick-hint">Zdjęcia importują się automatycznie po wyborze plików.</div>
+      </div>
+
+      <div class="quick-section">
+        <div class="quick-label">Ustawienia tekstów</div>
+        <div class="quick-grid-2">
+          <div>
+            <label class="quick-field">Waluta</label>
+            <select id="quickCurrency">
+              <option value="euro">€</option>
+              <option value="gbp">£</option>
+              <option value="pln">zł</option>
+            </select>
+          </div>
+          <div>
+            <label class="quick-field">Czcionka</label>
+            <select id="quickFont">
+              <option value="Arial">Arial</option>
+              <option value="Inter">Inter</option>
+              <option value="Poppins">Poppins</option>
+              <option value="Montserrat">Montserrat</option>
+              <option value="Google Sans Flex">Google Sans Flex</option>
+            </select>
+          </div>
+          <div>
+            <label class="quick-field">Nazwa – rozmiar</label>
+            <input id="quickNameSize" type="number" min="6" max="40" value="12">
+          </div>
+          <div>
+            <label class="quick-field">Nazwa – kolor</label>
+            <input id="quickNameColor" type="color" value="#111111">
+          </div>
+          <div>
+            <label class="quick-field">Cena – rozmiar</label>
+            <input id="quickPriceSize" type="number" min="8" max="60" value="24">
+          </div>
+          <div>
+            <label class="quick-field">Cena – kolor</label>
+            <input id="quickPriceColor" type="color" value="#000000">
+          </div>
+          <div>
+            <label class="quick-field">Indeks – rozmiar</label>
+            <input id="quickIndexSize" type="number" min="6" max="30" value="14">
+          </div>
+          <div>
+            <label class="quick-field">Indeks – kolor</label>
+            <input id="quickIndexColor" type="color" value="#111111">
+          </div>
+          <div>
+            <label class="quick-field">Ranking – rozmiar</label>
+            <input id="quickRankSize" type="number" min="6" max="30" value="12">
+          </div>
+          <div>
+            <label class="quick-field">Ranking – kolor</label>
+            <input id="quickRankColor" type="color" value="#111111">
+          </div>
+        </div>
+      </div>
+
+      <div class="quick-actions">
+        <button id="quickApplyBtn" class="quick-apply">Utwórz katalog</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- UNDO/REDO BUTTONS -->
+  <div id="undoRedoControls" style="position:fixed;top:80px;right:20px;z-index:10000;display:flex;gap:8px;">
+    <button id="undoBtn" type="button" title="Cofnij (Ctrl/Cmd+Z)" style="background:#fff;padding:8px 12px;border:1px solid #ddd;border-radius:6px;cursor:pointer;opacity:0.5;" disabled>
+      <i class="fas fa-undo"></i>
+    </button>
+    <button id="redoBtn" type="button" title="Przywróć (Ctrl/Cmd+Y lub Cmd+Shift+Z)" style="background:#fff;padding:8px 12px;border:1px solid #ddd;border-radius:6px;cursor:pointer;opacity:0.5;" disabled>
+      <i class="fas fa-redo"></i>
+    </button>
+  </div>
+
+  <!-- POBIERZ PROJEKT -->
+  <div id="downloadProjectModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:1000000; align-items:center; justify-content:center;">
+    <div style="width:520px; background:#fff; border-radius:16px; padding:20px; box-shadow:0 12px 40px rgba(0,0,0,0.25); font-family:Inter,Arial;">
+      <h3 style="margin:0 0 12px 0;">Pobierz projekt</h3>
+      <label>Nazwa pliku:</label>
+      <input id="downloadProjectName" type="text" placeholder="np. Rumunia_2026" style="width:100%; padding:8px; margin:6px 0 12px 0; border:1px solid #ccc; border-radius:8px;">
+
+      <div style="margin:4px 0 12px 0;">
+        <div style="font-size:13px; font-weight:600; margin-bottom:6px;">Zakres stron</div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+          <label class="download-page-option">
+            <input type="radio" name="downloadPageMode" value="all" checked>
+            <span>Wszystkie</span>
+          </label>
+          <label class="download-page-option">
+            <input type="radio" name="downloadPageMode" value="custom">
+            <span>Wybrane</span>
+          </label>
+          <input id="downloadPageInput" type="text" placeholder="np. 1,3,5-7"
+                 style="flex:1; min-width:180px; padding:8px; border:1px solid #ccc; border-radius:8px;" disabled>
+        </div>
+        <div style="font-size:12px;color:#6b7280;margin-top:6px;">Kliknij opcję, a pole zakresu włączy się automatycznie.</div>
+      </div>
+
+      <div style="display:flex; gap:10px; margin-bottom:12px;">
+        <button id="downloadPdfBtn" class="btn-primary" style="flex:1; background:#2563eb;"><i class="fas fa-file-pdf"></i> PDF</button>
+        <button id="downloadCanvaBtn" class="btn-primary" style="flex:1; background:#10b981;"><i class="fas fa-file-export"></i> Canva</button>
+      </div>
+
+      <div style="font-size:12px; color:#6b7280; margin-bottom:14px;">
+        Chcesz zapisać projekt na później? Użyj przycisku „Zapisz projekt”.
+      </div>
+      <div style="display:flex; gap:10px; justify-content:flex-end;">
+        <button id="downloadProjectSave" style="padding:8px 12px; border:none; border-radius:8px; background:#e5e7eb; cursor:pointer;">Zapisz projekt</button>
+        <button id="downloadProjectClose" style="padding:8px 12px; border:none; border-radius:8px; background:#111827; color:#fff; cursor:pointer;">Zamknij</button>
+      </div>
+    </div>
+  </div>
+
+ <!-- ====================== BIBLIOTEKI ZEWNĘTRZNE ====================== -->
+
+<!-- jsPDF -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>window.jsPDF = window.jspdf.jsPDF;</script>
+
+<!-- XLSX -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<!-- Konva -->
+<script src="https://unpkg.com/konva@9/konva.min.js"></script>
+<script src="konva-guard.js?v=20260301-kguard01"></script>
+<!-- Konva SVG EXPORT (Canva support) -->
+<script src="https://unpkg.com/konva-svg@1.0.0/konva-svg.min.js"></script>
+
+<!-- Fabric -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+
+<!-- JsBarcode -->
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+
+<!-- ONNX Runtime -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+
+<!-- Quill -->
+<script src="https://cdn.quilljs.com/1.3.7/quill.min.js"></script>
+
+<!-- Rysowanie -->
+ <script src="https://unpkg.com/konva-free-draw@1.0.0/konva-free-draw.min.js"></script>
+
+
+<!-- 🔥 POPRAWNA I JEDYNA Inicjalizacja Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
+
+import {
+    getFirestore,
+    collection,
+    addDoc,
+    getDocs,
+    query,
+    doc,
+    getDoc,
+    deleteDoc
+} from "https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore.js";
+
+import {
+    getStorage
+} from "https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js";
+
+// 🔥 KONFIG FIREBASE
+const firebaseConfig = {
+    apiKey: "AIzaSyDwzVRS5W2lklGMLcZJn-YPCK9OtBQZ7bI",
+    authDomain: "pdf-creator-f7a8b.firebaseapp.com",
+    projectId: "pdf-creator-f7a8b",
+    storageBucket: "pdf-creator-f7a8b.appspot.com",
+    messagingSenderId: "606744201676",
+    appId: "1:606744201676:web:6f8c1b2c323fbaf6f3b569",
+    measurementId: "G-QVPYM3G99P"
+};
+
+// 🔥 INICJALIZACJA
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const storage = getStorage(app, "gs://pdf-creator-f7a8b.firebasestorage.app");
+// ---------------------------------------------------------------
+// 🔥 DRUGA APLIKACJA FIREBASE – PDF-CREATOR-V2 (tylko zapisy projektów)
+// ---------------------------------------------------------------
+const firebaseConfig2 = {
+  apiKey: "AIzaSyCc8MTmJF7qi3Vk9v1SwMTy6yzSo444f98",
+  authDomain: "pdf-creator-v2.firebaseapp.com",
+  projectId: "pdf-creator-v2",
+  storageBucket: "pdf-creator-v2.firebasestorage.app",
+  messagingSenderId: "758727102700",
+  appId: "1:758727102700:web:3e9a211a0132a0200b55c9"
+};
+
+// 🔥 Tworzymy DRUGĄ aplikację Firebase
+const app2 = initializeApp(firebaseConfig2, "secondary");
+
+// 🔥 Firestore z DRUGIEGO projektu
+const db2 = getFirestore(app2);
+// 🔥 Storage z DRUGIEGO projektu (na projekty)
+const storage2 = getStorage(app2, "gs://pdf-creator-v2.firebasestorage.app");
+
+// 🔥 Zapisujemy globalnie, saveall.js będzie tego używać
+window.firestoreV2 = db2;
+window.firebaseStorageV2 = storage2;
+
+console.log("🔥 PDF-CREATOR-V2 Firestore READY!");
+
+// 🔥 GLOBALNE
+window.firebaseApp = app;
+window.firebaseDB = db;
+window.firebaseStorage = storage;
+
+// 🔥 EXPORTUJEMY FUNKCJE FIRESTORE DO GLOBALA
+window.FS_collection = collection;
+window.FS_addDoc = addDoc;
+window.FS_getDocs = getDocs;
+window.FS_query = query;
+
+window.FS_doc = doc;
+window.FS_getDoc = getDoc;
+window.FS_deleteDoc = deleteDoc;
+
+console.log("🔥 Firebase + Firestore poprawnie zainicjalizowane!");
+
+const DEFAULT_APP_FONTS = [
+  "Arial",
+  "Inter",
+  "Roboto",
+  "Verdana",
+  "Georgia",
+  "Tahoma",
+  "Helvetica",
+  "Trebuchet MS",
+  "Times New Roman",
+  "Courier New",
+  "Poppins",
+  "Montserrat"
+];
+
+window.APP_FONT_JSON_URL = "https://firebasestorage.googleapis.com/v0/b/pdf-creator-f7a8b.firebasestorage.app/o/fonts%2FFONT.json?alt=media&token=b8aef0c4-91c7-4025-b273-281ff0f05f81";
+window.APP_DEFAULT_FONTS = [...DEFAULT_APP_FONTS];
+window.APP_AVAILABLE_FONTS = [...DEFAULT_APP_FONTS];
+
+window.getAvailableFonts = function getAvailableFonts() {
+  return Array.isArray(window.APP_AVAILABLE_FONTS) ? [...window.APP_AVAILABLE_FONTS] : [...DEFAULT_APP_FONTS];
+};
+
+function normalizeFontName(name) {
+  const raw = String(name || "").trim();
+  if (!raw) return "";
+  const noQuery = raw.split("?")[0];
+  const tail = noQuery.split("/").pop() || noQuery;
+  return tail.replace(/\.(ttf|otf|woff2?|eot)$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function mergeUniqueFonts(base, extra) {
+  const out = [];
+  const seen = new Set();
+  [...(base || []), ...(extra || [])].forEach((item) => {
+    const v = String(item || "").trim();
+    if (!v) return;
+    const key = v.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(v);
+  });
+  return out;
+}
+
+function ensureFontFace(fontName, fontUrl) {
+  const family = normalizeFontName(fontName);
+  const srcUrl = String(fontUrl || "").trim();
+  if (!family || !srcUrl) return;
+  const id = `dynamic-font-face-${family.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  if (document.getElementById(id)) return;
+  const styleEl = document.createElement("style");
+  styleEl.id = id;
+  styleEl.textContent = `
+    @font-face {
+      font-family: "${family}";
+      src: url("${srcUrl}") format("truetype");
+      font-style: normal;
+      font-weight: 100 1000;
+      font-display: swap;
+    }
+  `;
+  document.head.appendChild(styleEl);
+}
+
+window.loadDynamicFonts = async function loadDynamicFonts() {
+  const url = String(window.APP_FONT_JSON_URL || "").trim();
+  if (!url) return window.getAvailableFonts();
+  const fallbackUrlNoToken = "https://firebasestorage.googleapis.com/v0/b/pdf-creator-f7a8b.firebasestorage.app/o/fonts%2FFONT.json?alt=media";
+  const urlsToTry = [url, fallbackUrlNoToken].filter((u, i, arr) => u && arr.indexOf(u) === i);
+  try {
+    let raw = null;
+    let lastErr = null;
+    for (const candidate of urlsToTry) {
+      try {
+        const res = await fetch(candidate, { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        raw = await res.json();
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!raw) throw lastErr || new Error("Brak danych FONT.json");
+    const entries = Array.isArray(raw) ? raw : [];
+    const dynamicNames = [];
+    const pickValue = (obj, keys = []) => {
+      if (!obj || typeof obj !== "object") return "";
+      for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(obj, key) && obj[key]) return obj[key];
+      }
+      const map = {};
+      Object.keys(obj).forEach((k) => { map[String(k).toLowerCase()] = obj[k]; });
+      for (const key of keys) {
+        const v = map[String(key).toLowerCase()];
+        if (v) return v;
+      }
+      return "";
+    };
+    entries.forEach((entry) => {
+      const isRawUrl = typeof entry === "string";
+      const fontUrl = String(
+        isRawUrl
+          ? entry
+          : pickValue(entry, ["url", "link", "href", "downloadUrl", "download_url", "src", "file"])
+      ).trim();
+      if (!fontUrl) return;
+      const nameFromUrl = decodeURIComponent(fontUrl.split("?")[0].split("/").pop() || "");
+      const explicitName = isRawUrl ? "" : pickValue(entry, ["name", "font", "family", "label", "title"]);
+      const fontName = normalizeFontName(explicitName || nameFromUrl);
+      if (!fontName) return;
+      ensureFontFace(fontName, fontUrl);
+      dynamicNames.push(fontName);
+    });
+    window.APP_AVAILABLE_FONTS = mergeUniqueFonts(DEFAULT_APP_FONTS, dynamicNames);
+  } catch (err) {
+    console.warn("⚠️ Nie udało się wczytać FONT.json:", err);
+    window.APP_AVAILABLE_FONTS = [...DEFAULT_APP_FONTS];
+  }
+  window.dispatchEvent(new CustomEvent("appFontsReady", { detail: { fonts: window.getAvailableFonts() } }));
+  return window.getAvailableFonts();
+};
+
+window.APP_FONT_LOADER_PROMISE = window.loadDynamicFonts();
+</script>
+
+
+
+
+
+<!-- ============================================== -->
+<!-- 🔥 2. TERAZ dopiero Twoje wszystkie skrypty     -->
+<!--    (wszystkie będą miały dostęp do firebaseDB) -->
+<!-- ============================================== -->
+
+<script src="edytor.js"></script>
+<script src="removebg.js?v=20260228-rmbg-local10"></script>
+<script src="importdanych.js?v=20260301-history17"></script>
+<script src="autosave/project-history-store.js?v=20260301-autosave08"></script>
+<script src="autosave/project-history-ui.js?v=20260301-autosave08"></script>
+<script src="autosave/project-history-bridge.js?v=20260301-autosave08"></script>
+<script src="autosave/autosave.js?v=20260301-autosave09"></script>
+<script src="styl-elegancki.js"></script>
+<script src="styles/styl-wlasny/registry.js?v=20260227-rmbg19"></script>
+<script src="styles/styl-wlasny/price-badges/kolko-czerwone.js?v=20260227-rmbg19"></script>
+<script src="styles/styl-wlasny/price-badges/kolko-czerwone-tnz.js?v=20260227-rmbg19"></script>
+<script src="styles/styl-wlasny/price-badges/kolko-granatowe.js?v=20260227-rmbg19"></script>
+<script src="styles/styl-wlasny/price-badges/kolko-granatowe-bez-ramki.js?v=20260227-rmbg19"></script>
+<script src="styles/styl-wlasny/module-layouts/styl-numer-1.js?v=20260228-rmbg30"></script>
+<script src="styles/styl-wlasny/module-layouts/styl-numer-2.js?v=20260228-rmbg34"></script>
+<script src="styles/styl-wlasny/module-layouts/styl-numer-3.js?v=20260228-rmbg03"></script>
+<script src="styl-wlasny.js?v=20260301-excel-import10"></script>
+<script src="baner.js"></script>
+
+<!-- jeśli plik używa importów – musi być module -->
+<script type="module" src="importdanych-1.js?v=20260301-elements-fast6"></script>
+
+<script src="edycja.js?v=20260228-rmbg04"></script>
+<script src="edycja-1.js?v=20260228-rmbg08"></script>
+<script src="okladka.js"></script>
+<script src="dodajstrone.js?v=20260228-rmbg22"></script>
+<script src="eangenerator.js"></script>
+<script src="qrcodegenerator.js"></script>
+<script src="rysowanie.js?v=20260301-shapehistory01"></script>
+
+
+<!-- 🔥 3. Save/load system -->
+<script type="module" src="saveall.js?v=20260301-history22"></script>
+
+  <!-- INICJALIZACJA -->
+  <script>
+    // === PREVIEW UPLOADÓW (POD KARTĄ) ===
+    function setupUpload(zoneId, inputId, previewId) {
+      const zone = document.getElementById(zoneId);
+      const input = document.getElementById(inputId);
+      const preview = document.getElementById(previewId);
+
+      if (!zone || !input || !preview) return;
+
+      input.addEventListener('change', () => {
+        const file = input.files[0];
+        if (!file) {
+          preview.innerHTML = '';
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = e => {
+          const img = document.createElement('img');
+          img.src = e.target.result;
+          img.style.cssText = 'max-width:100%; max-height:80px; margin-top:8px; border-radius:6px;';
+          preview.innerHTML = '';
+          preview.appendChild(img);
+        };
+        reader.readAsDataURL(file);
+      });
+
+      ['dragover', 'dragenter'].forEach(e => zone.addEventListener(e, ev => ev.preventDefault()));
+      zone.addEventListener('drop', ev => {
+        ev.preventDefault();
+        const file = ev.dataTransfer.files[0];
+        if (file && file.type.startsWith('image/')) {
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          input.files = dt.files;
+          input.dispatchEvent(new Event('change'));
+        }
+      });
+    }
+
+    // === INICJALIZACJA ===
+    document.addEventListener('DOMContentLoaded', () => {
+      setupUpload('bannerUpload', 'bannerFileInput', 'bannerPreview');
+      setupUpload('backgroundUpload', 'backgroundFileInput', 'backgroundPreview');
+      setupUpload('coverUpload', 'coverFileInput', 'coverPreview');
+
+      const importExcelBtn = document.getElementById('importExcelBtn');
+      const importImagesBtn = document.getElementById('importImagesBtn');
+      const addBlankPageBtn = document.getElementById('addBlankPageBtn');
+      const pdfButton = document.getElementById('pdfButton');
+      const catalogSettingsBtn = document.getElementById('catalogSettingsBtn');
+const canvaPdfButton = document.getElementById('canvaPdfButton');
+      const applyFontPreviewToSelect = (selectEl, fallback = 'Arial') => {
+        if (!selectEl) return;
+        const setFace = (el, family) => {
+          if (!el) return;
+          el.style.fontFamily = `"${family}", Arial, sans-serif`;
+        };
+        Array.from(selectEl.options || []).forEach((opt) => {
+          const family = String(opt?.value || opt?.textContent || fallback).trim() || fallback;
+          setFace(opt, family);
+        });
+        const selected = String(selectEl.value || fallback).trim() || fallback;
+        setFace(selectEl, selected);
+      };
+      const getAppFonts = () => {
+        const list = (typeof window.getAvailableFonts === 'function') ? window.getAvailableFonts() : [];
+        return Array.isArray(list) && list.length ? list : ['Arial', 'Inter', 'Roboto', 'Verdana', 'Georgia', 'Tahoma'];
+      };
+      const renderFontSelectOptions = (selectEl, preferredValue) => {
+        if (!selectEl) return;
+        const fonts = getAppFonts();
+        const current = String(preferredValue || selectEl.value || 'Arial').trim() || 'Arial';
+        selectEl.innerHTML = fonts.map((font) => `<option value="${font}">${font}</option>`).join('');
+        if (fonts.includes(current)) selectEl.value = current;
+        else selectEl.value = fonts[0] || 'Arial';
+        applyFontPreviewToSelect(selectEl);
+      };
+
+      if (importExcelBtn) {
+        importExcelBtn.onclick = () => {
+          if (typeof importExcelMultiPage === 'function') importExcelMultiPage();
+          else console.error('importExcelMultiPage nie załadowane');
+        };
+      }
+
+      if (importImagesBtn) {
+        importImagesBtn.onclick = () => {
+          if (typeof importImagesFromFiles === 'function') importImagesFromFiles();
+          else console.error('importImagesFromFiles nie załadowane');
+        };
+      }
+
+      if (addBlankPageBtn) {
+        addBlankPageBtn.onclick = () => {
+          if (typeof window.createNewPage === 'function') {
+            window.createNewPage();
+            window.projectOpen = true;
+            window.projectDirty = true;
+            if (pdfButton) pdfButton.disabled = false;
+            if (typeof window.createZoomSlider === 'function') window.createZoomSlider();
+          } else {
+            console.error('createNewPage nie załadowane');
+          }
+        };
+      }
+
+      // Pobierz projekt
+      const downloadBtn = document.getElementById('downloadProjectBtn');
+      const downloadModal = document.getElementById('downloadProjectModal');
+      const downloadClose = document.getElementById('downloadProjectClose');
+      const downloadSave = document.getElementById('downloadProjectSave');
+      const downloadPdf = document.getElementById('downloadPdfBtn');
+      const downloadCanva = document.getElementById('downloadCanvaBtn');
+      const downloadName = document.getElementById('downloadProjectName');
+      const downloadPageInput = document.getElementById('downloadPageInput');
+      const downloadPageRadios = document.querySelectorAll('input[name="downloadPageMode"]');
+
+      function setDownloadPageMode(mode) {
+        if (!downloadPageInput) return;
+        const isCustom = mode === 'custom';
+        downloadPageInput.disabled = !isCustom;
+        if (!isCustom) downloadPageInput.value = '';
+        document.querySelectorAll('.download-page-option').forEach(label => {
+          const radio = label.querySelector('input[type="radio"]');
+          label.classList.toggle('active', radio && radio.checked);
+        });
+      }
+
+      downloadPageRadios.forEach(r => {
+        r.addEventListener('change', () => setDownloadPageMode(r.value));
+      });
+
+      function getDownloadPageSelection() {
+        const mode = document.querySelector('input[name="downloadPageMode"]:checked')?.value || 'all';
+        if (mode !== 'custom') return null;
+        const pages = parsePageInput(downloadPageInput?.value || '');
+        if (!pages.length) {
+          if (typeof window.showAppToast === 'function') {
+            window.showAppToast('Wpisz poprawny zakres stron, np. 1,3,5-7', 'error');
+          } else {
+            alert('Wpisz poprawny zakres stron, np. 1,3,5-7');
+          }
+          return 'invalid';
+        }
+        return pages;
+      }
+
+      if (downloadBtn) {
+        downloadBtn.onclick = () => {
+          if (downloadModal) downloadModal.style.display = 'flex';
+          if (downloadName && window.currentProjectName) {
+            downloadName.value = window.currentProjectName.replace(/\s+/g, "_");
+          }
+          setDownloadPageMode('all');
+        };
+      }
+      const pageSettingsToggleBtn = document.getElementById('pageSettingsToggleBtn');
+      if (pageSettingsToggleBtn) {
+        pageSettingsToggleBtn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (typeof window.toggleActivePageSettingsMenu === 'function') {
+            window.toggleActivePageSettingsMenu(pageSettingsToggleBtn);
+          }
+        };
+      }
+      if (downloadClose) downloadClose.onclick = () => downloadModal.style.display = 'none';
+      if (downloadSave) downloadSave.onclick = () => document.getElementById('saveProjectBtn')?.click();
+
+      if (downloadPdf) {
+        downloadPdf.onclick = () => {
+          const selection = getDownloadPageSelection();
+          if (selection === 'invalid') return;
+          if (typeof window.generatePDF === 'function') {
+            window.generatePDF(selection || undefined);
+          }
+        };
+      }
+      if (downloadCanva) {
+        downloadCanva.onclick = () => {
+          const selection = getDownloadPageSelection();
+          if (selection === 'invalid') return;
+          if (typeof window.generateCanvaPDF === 'function') {
+            window.generateCanvaPDF(selection || undefined);
+          }
+        };
+      }
+
+      // Szybki kreator
+      const quickModal = document.getElementById('quickCreatorModal');
+      const quickOpen = document.getElementById('quickCreatorBtn');
+      const quickClose = document.getElementById('quickCreatorClose');
+      const quickExcelBtn = document.getElementById('quickExcelBtn');
+      const quickImagesBtn = document.getElementById('quickImagesBtn');
+      const quickCoverBtn = document.getElementById('quickCoverBtn');
+      const quickBannerBtn = document.getElementById('quickBannerBtn');
+      const quickBgBtn = document.getElementById('quickBgBtn');
+      const quickApplyBtn = document.getElementById('quickApplyBtn');
+      const excelInput = document.getElementById('excelFile');
+      const imageInput = document.getElementById('imageInput');
+      let quickSettingsDirty = false;
+      let quickPriceTouched = false;
+      let quickBaseline = null;
+      let quickInit = false;
+
+      function setQuickState(btn, ok) {
+        if (!btn) return;
+        btn.classList.remove('done', 'error');
+        btn.classList.add(ok ? 'done' : 'error');
+      }
+
+      function setStepState(step, ok) {
+        const map = {
+          excel: quickExcelBtn,
+          images: quickImagesBtn,
+          cover: quickCoverBtn,
+          banner: quickBannerBtn,
+          bg: quickBgBtn
+        };
+        setQuickState(map[step], !!ok);
+      }
+      window.quickStatusUpdate = setStepState;
+
+      function updateLayoutUI() {
+        document.querySelectorAll('input[name="quickLayout"]').forEach(radio => {
+          const label = radio.closest('.quick-radio');
+          if (label) label.classList.toggle('active', radio.checked);
+        });
+        if (!quickPriceTouched) {
+          const selectedLayout = document.querySelector('input[name="quickLayout"]:checked')?.value || 'layout6';
+          const priceMult = selectedLayout === 'layout6' ? 1.8 : 1.15;
+          const priceInput = document.getElementById('quickPriceSize');
+          if (priceInput) priceInput.value = Math.round(24 * priceMult);
+        }
+      }
+
+      function markQuickDirty() {
+        if (quickInit) return;
+        quickSettingsDirty = true;
+      }
+
+      if (quickOpen) {
+        quickOpen.onclick = () => {
+          if (typeof window.openQuickCreator === 'function') {
+            window.openQuickCreator();
+            return;
+          }
+          if (quickModal) quickModal.style.display = 'flex';
+          quickInit = true;
+          quickPriceTouched = false;
+          // Domyślnie czerwone X, ale jeśli już wybrano pliki – ustaw zielone
+          setQuickState(quickExcelBtn, excelInput?.files && excelInput.files.length > 0);
+          setQuickState(quickImagesBtn, imageInput?.files && imageInput.files.length > 0);
+          setQuickState(quickCoverBtn, document.getElementById('coverFileInput')?.files?.length > 0);
+          setQuickState(quickBannerBtn, document.getElementById('bannerFileInput')?.files?.length > 0);
+          setQuickState(quickBgBtn, document.getElementById('backgroundFileInput')?.files?.length > 0);
+          updateLayoutUI();
+          // ustaw wartości domyślne (żeby szybki kreator = normalny efekt)
+          const selectedLayout = document.querySelector('input[name="quickLayout"]:checked')?.value || 'layout6';
+          const priceMult = selectedLayout === 'layout6' ? 1.8 : 1.15;
+          const defaults = (window.pages && window.pages.length > 0) ? window.pages[0].settings : {
+            currency: 'euro',
+            fontFamily: 'Arial',
+            nameSize: 12,
+            priceSize: Math.round(24 * priceMult),
+            indexSize: 14,
+            nameColor: '#111111',
+            priceColor: '#000000',
+            indexColor: '#111111',
+            rankSize: 12,
+            rankColor: '#111111'
+          };
+          document.getElementById('quickCurrency').value = defaults.currency || 'euro';
+          renderFontSelectOptions(document.getElementById('quickFont'), defaults.fontFamily || 'Arial');
+          document.getElementById('quickNameSize').value = defaults.nameSize || 12;
+          document.getElementById('quickNameColor').value = defaults.nameColor || '#111111';
+          document.getElementById('quickPriceSize').value = defaults.priceSize || 24;
+          document.getElementById('quickPriceColor').value = defaults.priceColor || '#000000';
+          document.getElementById('quickIndexSize').value = defaults.indexSize || 14;
+          document.getElementById('quickIndexColor').value = defaults.indexColor || '#111111';
+          document.getElementById('quickRankSize').value = defaults.rankSize || 12;
+          document.getElementById('quickRankColor').value = defaults.rankColor || '#111111';
+          quickBaseline = {
+            currency: document.getElementById('quickCurrency').value,
+            fontFamily: document.getElementById('quickFont').value,
+            nameSize: document.getElementById('quickNameSize').value,
+            nameColor: document.getElementById('quickNameColor').value,
+            priceSize: document.getElementById('quickPriceSize').value,
+            priceColor: document.getElementById('quickPriceColor').value,
+            indexSize: document.getElementById('quickIndexSize').value,
+            indexColor: document.getElementById('quickIndexColor').value,
+            rankSize: document.getElementById('quickRankSize').value,
+            rankColor: document.getElementById('quickRankColor').value
+          };
+          quickSettingsDirty = false;
+          quickInit = false;
+        };
+      }
+      if (quickClose) quickClose.onclick = () => quickModal.style.display = 'none';
+
+      if (quickExcelBtn) {
+        quickExcelBtn.onclick = () => {
+          const layout = document.querySelector('input[name="quickLayout"]:checked')?.value || 'layout6';
+          window.quickCreatorLayout = layout;
+          window.quickCreatorExcelPick = true;
+          if (excelInput) excelInput.click();
+        };
+      }
+
+      document.querySelectorAll('input[name="quickLayout"]').forEach(r => {
+        r.addEventListener('change', updateLayoutUI);
+      });
+
+      // Zmiana pól w ustawieniach = dirty
+      ['quickCurrency','quickFont','quickNameSize','quickNameColor','quickPriceSize','quickPriceColor','quickIndexSize','quickIndexColor','quickRankSize','quickRankColor']
+        .forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.addEventListener('input', markQuickDirty);
+        });
+      const quickFontEl = document.getElementById('quickFont');
+      if (quickFontEl) {
+        renderFontSelectOptions(quickFontEl, quickFontEl.value || 'Arial');
+        quickFontEl.addEventListener('change', () => applyFontPreviewToSelect(quickFontEl));
+      }
+      window.addEventListener('appFontsReady', () => {
+        const current = quickFontEl?.value || 'Arial';
+        renderFontSelectOptions(quickFontEl, current);
+      });
+      const quickPriceInput = document.getElementById('quickPriceSize');
+      if (quickPriceInput) {
+        quickPriceInput.addEventListener('input', () => {
+          if (!quickInit) quickPriceTouched = true;
+        });
+      }
+      if (excelInput) {
+        excelInput.addEventListener('change', () => {
+          if (window.quickCreatorLayout) {
+            if (typeof importExcelMultiPage === 'function') importExcelMultiPage();
+          }
+          window.quickCreatorExcelPick = false;
+          if (quickExcelBtn) {
+            setQuickState(quickExcelBtn, excelInput.files && excelInput.files.length > 0);
+          }
+        });
+      }
+      if (quickImagesBtn && imageInput) {
+        quickImagesBtn.onclick = () => imageInput.click();
+        imageInput.addEventListener('change', () => {
+          if (imageInput.files && imageInput.files.length > 0) {
+            setQuickState(quickImagesBtn, true);
+            window.quickImageFiles = Array.from(imageInput.files);
+            if (window.allProducts && window.allProducts.length > 0 && typeof window.importImagesFromFiles === 'function') {
+              window.importImagesFromFiles(window.quickImageFiles);
+            }
+          }
+        });
+      }
+      if (quickCoverBtn) {
+        quickCoverBtn.onclick = () => document.getElementById('coverFileInput')?.click();
+        document.getElementById('coverFileInput')?.addEventListener('change', (e) => {
+          setQuickState(quickCoverBtn, e.target.files && e.target.files.length > 0);
+        });
+      }
+      if (quickBannerBtn) {
+        quickBannerBtn.onclick = () => document.getElementById('bannerFileInput')?.click();
+        document.getElementById('bannerFileInput')?.addEventListener('change', (e) => {
+          setQuickState(quickBannerBtn, e.target.files && e.target.files.length > 0);
+        });
+      }
+      if (quickBgBtn) {
+        quickBgBtn.onclick = () => document.getElementById('backgroundFileInput')?.click();
+        document.getElementById('backgroundFileInput')?.addEventListener('change', (e) => {
+          setQuickState(quickBgBtn, e.target.files && e.target.files.length > 0);
+        });
+      }
+
+      if (quickApplyBtn) {
+        quickApplyBtn.onclick = () => {
+          if (typeof window.showBusyOverlay === 'function') {
+            window.showBusyOverlay('Tworzenie katalogu…');
+          }
+          if (typeof window.showEditorView === 'function') {
+            window.showEditorView();
+          }
+          const currentSnapshot = {
+            currency: document.getElementById('quickCurrency')?.value || 'euro',
+            fontFamily: document.getElementById('quickFont')?.value || 'Arial',
+            nameSize: document.getElementById('quickNameSize')?.value || '12',
+            nameColor: document.getElementById('quickNameColor')?.value || '#111111',
+            priceSize: document.getElementById('quickPriceSize')?.value || '24',
+            priceColor: document.getElementById('quickPriceColor')?.value || '#000000',
+            indexSize: document.getElementById('quickIndexSize')?.value || '14',
+            indexColor: document.getElementById('quickIndexColor')?.value || '#111111',
+            rankSize: document.getElementById('quickRankSize')?.value || '12',
+            rankColor: document.getElementById('quickRankColor')?.value || '#111111'
+          };
+          const changed = !quickBaseline || Object.keys(currentSnapshot).some(k => String(currentSnapshot[k]) !== String(quickBaseline[k]));
+          if (changed && typeof window.applyQuickSettings === 'function') {
+            const payload = {};
+            const current = {
+              currency: document.getElementById('quickCurrency')?.value || 'euro',
+              fontFamily: document.getElementById('quickFont')?.value || 'Arial',
+              nameSize: document.getElementById('quickNameSize')?.value || '12',
+              nameColor: document.getElementById('quickNameColor')?.value || '#111111',
+              priceSize: document.getElementById('quickPriceSize')?.value || '24',
+              priceColor: document.getElementById('quickPriceColor')?.value || '#000000',
+              indexSize: document.getElementById('quickIndexSize')?.value || '14',
+              indexColor: document.getElementById('quickIndexColor')?.value || '#111111',
+              rankSize: document.getElementById('quickRankSize')?.value || '12',
+              rankColor: document.getElementById('quickRankColor')?.value || '#111111'
+            };
+            if (!quickPriceTouched) {
+              const selectedLayout = document.querySelector('input[name="quickLayout"]:checked')?.value || 'layout6';
+              const priceMult = selectedLayout === 'layout6' ? 1.8 : 1.15;
+              current.priceSize = String(Math.round(24 * priceMult));
+              const priceInput = document.getElementById('quickPriceSize');
+              if (priceInput) priceInput.value = current.priceSize;
+            }
+            const base = quickBaseline || {};
+            if (String(current.currency) !== String(base.currency)) payload.currency = current.currency;
+            if (String(current.fontFamily) !== String(base.fontFamily)) payload.fontFamily = current.fontFamily;
+            if (String(current.nameSize) !== String(base.nameSize)) payload.nameSize = parseInt(current.nameSize, 10);
+            if (String(current.nameColor) !== String(base.nameColor)) payload.nameColor = current.nameColor;
+            if (String(current.priceSize) !== String(base.priceSize)) payload.priceSize = parseInt(current.priceSize, 10);
+            if (String(current.priceColor) !== String(base.priceColor)) payload.priceColor = current.priceColor;
+            if (String(current.indexSize) !== String(base.indexSize)) payload.indexSize = parseInt(current.indexSize, 10);
+            if (String(current.indexColor) !== String(base.indexColor)) payload.indexColor = current.indexColor;
+            if (String(current.rankSize) !== String(base.rankSize)) payload.rankSize = parseInt(current.rankSize, 10);
+            if (String(current.rankColor) !== String(base.rankColor)) payload.rankColor = current.rankColor;
+            if (Object.keys(payload).length > 0) {
+              window.applyQuickSettings(payload);
+            }
+            if (typeof window.fixProductImageDrag === 'function') {
+              window.fixProductImageDrag();
+            }
+          }
+          const hasProducts = Array.isArray(window.allProducts) && window.allProducts.length > 0;
+          const hasPages = Array.isArray(window.pages) && window.pages.length > 0;
+          if ((!hasPages) && (!hasProducts)) {
+            if (typeof window.showAppToast === 'function') {
+              window.showAppToast('Najpierw zaimportuj Excel', 'error');
+            }
+          }
+          if (hasProducts && hasPages) {
+            if (excelInput) excelInput.value = '';
+            if (imageInput) imageInput.value = '';
+            window.quickImageFiles = null;
+          }
+          const coverInput = document.getElementById('coverFileInput');
+          const bannerInput = document.getElementById('bannerFileInput');
+          const bgInput = document.getElementById('backgroundFileInput');
+          if (hasProducts && hasPages) {
+            if (coverInput) coverInput.value = '';
+            if (bannerInput) bannerInput.value = '';
+            if (bgInput) bgInput.value = '';
+            setQuickState(quickExcelBtn, false);
+            setQuickState(quickImagesBtn, false);
+            setQuickState(quickCoverBtn, false);
+            setQuickState(quickBannerBtn, false);
+            setQuickState(quickBgBtn, false);
+            quickPriceTouched = false;
+          }
+          quickModal.style.display = 'none';
+          if (typeof window.hideBusyOverlay === 'function') {
+            setTimeout(() => window.hideBusyOverlay(), 400);
+          }
+        };
+      }
+
+   // Zmień ten fragment:
+if (pdfButton) {
+  pdfButton.onclick = () => {
+    if (typeof window.generatePDF === 'function') {
+      window.generatePDF();
+    } else {
+      console.error('generatePDF nie jest dostępne');
+    }
+  };
+}
+function parsePageInput(input) {
+  if (!input) return [];
+  const parts = input.split(',').map(s => s.trim()).filter(Boolean);
+  const pages = new Set();
+  parts.forEach(part => {
+    if (part.includes('-')) {
+      const [a, b] = part.split('-').map(s => parseInt(s.trim(), 10));
+      if (Number.isFinite(a) && Number.isFinite(b)) {
+        const start = Math.min(a, b);
+        const end = Math.max(a, b);
+        for (let i = start; i <= end; i++) pages.add(i);
+      }
+    } else {
+      const n = parseInt(part, 10);
+      if (Number.isFinite(n)) pages.add(n);
+    }
+  });
+  return Array.from(pages);
+}
+
+function showCanvaExportDialog() {
+  return new Promise(resolve => {
+    const totalPages = (window.pages && window.pages.length) ? window.pages.length : 0;
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+      position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100000;
+    `;
+    const modal = document.createElement('div');
+    modal.style.cssText = `
+      width: 420px; max-width: 92vw; background: #fff; border-radius: 12px;
+      padding: 16px; box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+      font-family: Arial;
+    `;
+    modal.innerHTML = `
+      <h3 style="margin:0 0 6px 0;">Eksport do Canva</h3>
+      <div style="font-size:13px;color:#555;margin-bottom:12px;">
+        Aktualnie stron: <strong>${totalPages}</strong>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+        <button id="canvaAllBtn" style="flex:1;min-width:140px;background:#0b74c8;color:#fff;border:none;padding:8px 10px;border-radius:8px;font-weight:600;">Pobierz wszystkie</button>
+        <button id="canvaCustomBtn" style="flex:1;min-width:140px;background:#f2f4f7;border:1px solid #d0d5dd;padding:8px 10px;border-radius:8px;font-weight:600;">Wybierz ręcznie</button>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+        <input type="radio" name="canvaExportMode" value="all" checked>
+        <span>Wszystkie strony</span>
+      </label>
+      <label style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+        <input type="radio" name="canvaExportMode" value="custom">
+        <span>Tylko wybrane strony</span>
+      </label>
+      <input id="canvaPageInput" type="text" placeholder="np. 1,3,5-7"
+        style="width:100%;padding:8px 10px;border:1px solid #ccc;border-radius:8px;">
+      <div style="display:flex;gap:8px;margin-top:14px;">
+        <button id="canvaExportOk" style="flex:1;background:#0b74c8;color:#fff;border:none;padding:9px;border-radius:8px;font-weight:600;">Zapisz</button>
+        <button id="canvaExportCancel" style="flex:1;background:#f0f0f0;border:1px solid #ccc;padding:9px;border-radius:8px;">Anuluj</button>
+      </div>
+    `;
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const input = modal.querySelector('#canvaPageInput');
+    const ok = modal.querySelector('#canvaExportOk');
+    const cancel = modal.querySelector('#canvaExportCancel');
+    const allBtn = modal.querySelector('#canvaAllBtn');
+    const customBtn = modal.querySelector('#canvaCustomBtn');
+
+    const setMode = (mode) => {
+      const radio = modal.querySelector(`input[name="canvaExportMode"][value="${mode}"]`);
+      if (radio) radio.checked = true;
+      input.disabled = (mode !== 'custom');
+    };
+    setMode('all');
+
+    allBtn.onclick = () => {
+      overlay.remove();
+      resolve(null);
+    };
+    customBtn.onclick = () => {
+      setMode('custom');
+      input.focus();
+    };
+
+    ok.onclick = () => {
+      const mode = modal.querySelector('input[name="canvaExportMode"]:checked')?.value;
+      if (mode === 'custom') {
+        const pages = parsePageInput(input.value);
+        if (!pages.length) {
+          alert("Wpisz poprawny zakres stron, np. 1,3,5-7");
+          return;
+        }
+        if (totalPages > 0) {
+          const filtered = pages.filter(p => p >= 1 && p <= totalPages);
+          if (!filtered.length) {
+            alert("Zakres poza liczbą stron.");
+            return;
+          }
+          overlay.remove();
+          resolve(filtered);
+          return;
+        }
+        overlay.remove();
+        resolve(pages);
+      } else {
+        overlay.remove();
+        resolve(null);
+      }
+    };
+    cancel.onclick = () => {
+      overlay.remove();
+      resolve('cancel');
+    };
+  });
+}
+
+if (canvaPdfButton) {
+  canvaPdfButton.onclick = async () => {
+    if (typeof window.generateCanvaPDF !== 'function') {
+      console.error('generateCanvaPDF nie jest dostępne');
+      return;
+    }
+    const selection = await showCanvaExportDialog();
+    if (selection === 'cancel') return;
+    window.generateCanvaPDF(selection || undefined);
+  };
+}
+
+
+      const excelFile = document.getElementById('excelFile');
+      if (excelFile) {
+        excelFile.addEventListener('change', () => {
+          const name = excelFile.files[0]?.name || 'Nie wybrano pliku';
+          const label = document.getElementById('fileLabel');
+          if (label) label.textContent = name;
+        });
+      }
+
+      window.addEventListener('excelImported', () => {
+        if (pdfButton) pdfButton.disabled = false;
+      });
+
+      if (typeof Quill === 'undefined') {
+        console.error('QUILL.JS NIE ZAŁADOWANY!');
+      } else {
+        console.log('QUILL.JS DZIAŁA!');
+      }
+    });
+  </script>
+<!-- 🔥 MODAL: ZAPISZ PROJEKT -->
+<div id="saveProjectModal" 
+     style="
+        display:none; 
+        position:fixed;
+        top:0; left:0;
+        width:100%; height:100%;
+        background:rgba(0,0,0,0.45);
+        z-index:999999;
+        justify-content:center;
+        align-items:center;
+     ">
+  
+  <div style="
+      width:360px;
+      background:white;
+      padding:24px;
+      border-radius:12px;
+      box-shadow:0 10px 40px rgba(0,0,0,0.25);
+      font-family:Inter, Arial;
+  ">
+      <h2 style="margin-top:0; font-size:20px; font-weight:600;">
+        Zapisz projekt
+      </h2>
+
+      <label>Nazwa projektu:</label>
+      <input id="projectNameInput"
+             type="text"
+             placeholder="np. Rumunia grudzień 2025"
+             style="width:100%; padding:8px; margin:6px 0 12px 0;
+                    border:1px solid #ccc; border-radius:6px;">
+
+      <label>Data utworzenia:</label>
+      <input id="projectDateInput"
+             type="date"
+             style="width:100%; padding:8px; margin:6px 0 20px 0;
+                    border:1px solid #ccc; border-radius:6px;">
+
+      <div style="display:flex; gap:10px; justify-content:flex-end;">
+          <button id="cancelSaveBtn" 
+                  style="padding:8px 14px; border:none; border-radius:6px; background:#ddd;">
+            Anuluj
+          </button>
+
+          <button id="confirmSaveBtn"
+                  style="padding:8px 14px; border:none; border-radius:6px; background:#0077ff; color:white;">
+            Zapisz
+          </button>
+      </div>
+  </div>
+
+</div>
+
+</body>
+</html>
