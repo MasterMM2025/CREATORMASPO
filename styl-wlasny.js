@@ -2744,6 +2744,26 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       return;
     }
 
+    const resolvedUrl = product?.id ? customResolvedImageUrls.get(product.id) : null;
+    if (resolvedUrl) {
+      box.innerHTML = `<img src="${resolvedUrl}" alt="Zdjęcie produktu" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:7px;transition:transform .16s ease;transform-origin:center center;cursor:zoom-in;position:relative;z-index:1;">`;
+      const imgEl = box.querySelector("img");
+      if (imgEl) {
+        imgEl.onmouseenter = () => {
+          imgEl.style.transform = "scale(1.9)";
+          imgEl.style.zIndex = "3";
+        };
+        imgEl.onmouseleave = () => {
+          imgEl.style.transform = "scale(1)";
+          imgEl.style.zIndex = "1";
+        };
+      }
+      box.style.color = "#0f172a";
+      currentPreviewImageUrl = resolvedUrl;
+      renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+      return;
+    }
+
     box.textContent = "szukam...";
     box.style.color = "#94a3b8";
     const stamp = `${product?.id || ""}-${Date.now()}`;
@@ -2778,6 +2798,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         };
       }
       current.style.color = "#0f172a";
+      if (product?.id) customResolvedImageUrls.set(product.id, url);
       currentPreviewImageUrl = url;
       renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
     });
@@ -2806,7 +2827,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     }
 
     if (entries.length === 1) {
-      const escaped = escapeHtml(entries[0].url || "");
+      const escaped = escapeHtml(entries[0].url || getEffectivePreviewImageUrl() || "");
       track.innerHTML = `<img src="${escaped}" alt="Zdjęcie produktu 1" style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform:scale(1.08);transform-origin:left top;">`;
       return;
     }
@@ -5014,6 +5035,13 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       customDraftModules = [...createdDrafts, ...(Array.isArray(customDraftModules) ? customDraftModules : [])];
       customDraftModules = customDraftModules.slice(0, 240);
       renderDraftModulesList();
+      const firstDraftForPreview = createdDrafts.find((d) => {
+        if (String(d?.previewImageUrl || "").trim()) return true;
+        return Array.isArray(d?.familyProducts) && d.familyProducts.some((fp) => String(fp?.url || "").trim());
+      }) || createdDrafts[0];
+      if (firstDraftForPreview) {
+        restoreDraftToEditor(firstDraftForPreview);
+      }
       showCustomImportProgress("Finalizowanie podglądu importu...", 100);
       await waitMs(220);
       hideCustomImportProgress();
