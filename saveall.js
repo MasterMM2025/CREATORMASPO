@@ -492,6 +492,11 @@ function pruneTransientDirectAttrsForSave(attrs, kind = "") {
     if (kind === "image") {
         // `src` zapisujemy osobno w payload.src – tu tylko duplikaty i ciężkie pola out.
         delete out.originalSrc;
+        delete out.editorSrc;
+        delete out.thumbSrc;
+        delete out.originalSrcBankKey;
+        delete out.editorSrcBankKey;
+        delete out.thumbSrcBankKey;
         delete out.barcodeOriginalSrc;
         delete out.originalSrcBeforeRmbg;
         delete out.image;
@@ -562,6 +567,652 @@ function normalizeSavedCrop(crop, imgWidth, imgHeight) {
 
     return { x, y, width, height };
 }
+
+const PROJECT_LAZY_HYDRATE_INITIAL_PAGES = 3;
+const PROJECT_POST_REPAIR_STYLE_DELAYS = [0, 80, 220];
+const PROJECT_POST_REPAIR_PRICE_DELAYS = [0, 80, 220, 520, 980];
+
+function collectTargetPages(targetPages) {
+    if (Array.isArray(targetPages)) {
+        return targetPages.filter((p) => !!(p && p.layer && p.transformerLayer));
+    }
+    if (targetPages && targetPages.layer && targetPages.transformerLayer) {
+        return [targetPages];
+    }
+    return (Array.isArray(window.pages) ? window.pages : []).filter((p) => !!(p && p.layer && p.transformerLayer));
+}
+
+function getInitialHydratedPagesLimit(opts = {}, totalPages = 0) {
+    const total = Math.max(0, Number(totalPages) || 0);
+    if (total <= 0) return 0;
+
+    if (opts && (opts.lazyHydration === false || opts.disableLazyHydration === true)) {
+        return total;
+    }
+
+    const source = String((opts && opts.source) || "").trim().toLowerCase();
+    if (source === "history" || source === "undo" || source === "redo") {
+        return total;
+    }
+
+    let requested = Number(opts && opts.initialHydratedPages);
+    if (!Number.isFinite(requested)) {
+        requested = Number(window.__projectLazyHydrateInitialPages);
+    }
+    if (!Number.isFinite(requested)) {
+        requested = PROJECT_LAZY_HYDRATE_INITIAL_PAGES;
+    }
+
+    const normalized = Math.max(1, Math.round(requested));
+    return Math.min(total, normalized);
+}
+
+function markPageDeferredHydration(page, payload) {
+    if (!page) return;
+    page.__deferredHydrationPayload = payload || null;
+    page.__deferredHydrationDone = !payload;
+    page.__deferredHydrationPromise = null;
+    page.__deferredHydrationError = null;
+}
+
+function pageHasDeferredHydration(page) {
+    return !!(page && page.__deferredHydrationPayload);
+}
+
+function isPageHydrationContextActive(page) {
+    if (!page || !page.layer || !page.stage) return false;
+    if (page.__projectLoadStamp && window.__projectLoadStamp && page.__projectLoadStamp !== window.__projectLoadStamp) {
+        return false;
+    }
+    if (typeof page.stage.isDestroyed === "function" && page.stage.isDestroyed()) {
+        return false;
+    }
+    return true;
+}
+
+function restoreDirectTextStylesForPages(targetPages) {
+    try {
+        const pagesList = collectTargetPages(targetPages);
+        pagesList.forEach((page) => {
+            const layer = page && page.layer;
+            if (!layer || !layer.find || !window.Konva) return;
+            const directTexts = layer.find((n) =>
+                n instanceof Konva.Text &&
+                n.getAttr &&
+                !!n.getAttr("directModuleId") &&
+                !!n.getAttr("_directSavedFill")
+            );
+            directTexts.forEach((t) => {
+                try {
+                    const fill = t.getAttr("_directSavedFill");
+                    const ff = t.getAttr("_directSavedFontFamily");
+                    const fs = t.getAttr("_directSavedFontStyle");
+                    const td = t.getAttr("_directSavedTextDecoration");
+                    if (fill && typeof t.fill === "function") t.fill(fill);
+                    if (ff && typeof t.fontFamily === "function") t.fontFamily(ff);
+                    if (fs && typeof t.fontStyle === "function") t.fontStyle(fs);
+                    if (typeof t.textDecoration === "function") t.textDecoration(td || "");
+                } catch (_e) {}
+            });
+            layer.batchDraw?.();
+            page.transformerLayer?.batchDraw?.();
+        });
+    } catch (_e) {}
+}
+
+function stabilizePriceGroupsForPages(targetPages) {
+    try {
+        const pagesList = collectTargetPages(targetPages);
+        const directHooks = window.CustomStyleDirectHooks || {};
+        const bindDirectPriceGroupEditor = typeof directHooks.bindDirectPriceGroupEditor === "function"
+            ? directHooks.bindDirectPriceGroupEditor
+            : null;
+
+        const realignLegacyPriceGroup = (priceGroup) => {
+            if (!priceGroup || !priceGroup.getChildren || !window.Konva) return;
+            const texts = (priceGroup.getChildren() || []).filter((n) => n instanceof Konva.Text);
+            if (texts.length < 2) return;
+
+            const pickByText = (pattern) => texts.find((t) => pattern.test(String(t.text?.() || "")));
+            const unitNode = pickByText(/\/\s*(SZT|KG|L|ML|G|OPAK)/i) || pickByText(/^\s*[£€$]\s*\/\s*/i);
+            const mainNode = texts.slice().sort((a, b) => Number(b.fontSize?.() || 0) - Number(a.fontSize?.() || 0))[0] || null;
+            const decNode = texts.find((t) => t !== mainNode && t !== unitNode) || texts.find((t) => t !== mainNode) || null;
+            if (!mainNode || !decNode || !unitNode) return;
+
+            const gap = 4;
+            const baseX = Number(mainNode.x?.() || 0);
+            const baseY = Number(mainNode.y?.() || 0);
+            const mainW = Number(mainNode.width?.() || 0);
+            const mainH = Number(mainNode.height?.() || 0);
+            const decH = Number(decNode.height?.() || 0);
+
+            decNode.x(baseX + mainW + gap);
+            decNode.y(baseY + (mainH * 0.10));
+            unitNode.x(baseX + mainW + gap);
+            unitNode.y(baseY + (decH * 1.5));
+
+            if (typeof unitNode.measureSize === "function" && typeof unitNode.width === "function") {
+                const measured = unitNode.measureSize(unitNode.text?.() || "");
+                const minW = Math.max(36, Math.ceil((Number(measured?.width) || 0) + 8));
+                if (Number(unitNode.width?.() || 0) < minW) unitNode.width(minW);
+            }
+        };
+
+        pagesList.forEach((page) => {
+            const layer = page && page.layer;
+            if (!layer || typeof layer.find !== "function" || !window.Konva) return;
+
+            const priceGroups = layer.find((n) =>
+                n instanceof Konva.Group &&
+                n.getAttr &&
+                n.getAttr("isPriceGroup")
+            );
+
+            priceGroups.forEach((group) => {
+                try {
+                    if (bindDirectPriceGroupEditor && group.getAttr("directModuleId")) {
+                        bindDirectPriceGroupEditor(group, page);
+                    } else {
+                        realignLegacyPriceGroup(group);
+                    }
+                } catch (_err) {}
+            });
+
+            layer.batchDraw?.();
+            page.transformerLayer?.batchDraw?.();
+        });
+    } catch (_e) {}
+}
+
+function restoreDirectModuleSelectabilityForPages(targetPages) {
+    try {
+        const fixSelectability = window.CustomStyleDirectHooks && window.CustomStyleDirectHooks.restoreDirectModuleNodeSelectabilityOnPage;
+        if (typeof fixSelectability !== "function") return;
+        collectTargetPages(targetPages).forEach((p) => {
+            try { fixSelectability(p); } catch (_e) {}
+        });
+    } catch (_e) {}
+}
+
+function runPostLoadRepairsForPages(targetPages, opts = {}) {
+    const pagesList = collectTargetPages(targetPages);
+    if (!pagesList.length) return;
+
+    restoreDirectTextStylesForPages(pagesList);
+    stabilizePriceGroupsForPages(pagesList);
+    restoreDirectModuleSelectabilityForPages(pagesList);
+
+    if (opts.schedule === false) return;
+
+    PROJECT_POST_REPAIR_STYLE_DELAYS.forEach((ms) => {
+        setTimeout(() => restoreDirectTextStylesForPages(pagesList), ms);
+    });
+    PROJECT_POST_REPAIR_PRICE_DELAYS.forEach((ms) => {
+        setTimeout(() => stabilizePriceGroupsForPages(pagesList), ms);
+    });
+
+    try {
+        if (document?.fonts?.ready && typeof document.fonts.ready.then === "function") {
+            document.fonts.ready.then(() => {
+                stabilizePriceGroupsForPages(pagesList);
+                setTimeout(() => stabilizePriceGroupsForPages(pagesList), 120);
+            }).catch(() => {});
+        }
+    } catch (_e) {}
+}
+
+async function restoreDirectNodeRecursiveFromPayload(payload, page, layer) {
+    if (!payload || !window.Konva) return null;
+    if (!isPageHydrationContextActive(page)) return null;
+
+    if (payload.type === "textNode") {
+        const t = new Konva.Text({
+            x: payload.x ?? 0,
+            y: payload.y ?? 0,
+            width: payload.width,
+            height: payload.height,
+            scaleX: payload.scaleX || 1,
+            scaleY: payload.scaleY || 1,
+            rotation: payload.rotation || 0,
+            text: payload.text || "",
+            fontSize: payload.fontSize || 12,
+            fontFamily: payload.fontFamily || "Arial",
+            fill: payload.fill || "#000",
+            fontStyle: payload.fontStyle || "normal",
+            align: payload.align || "left",
+            lineHeight: payload.lineHeight || 1.2,
+            draggable: payload.draggable !== false,
+            listening: payload.listening !== false
+        });
+        if (typeof t.textDecoration === "function" && payload.textDecoration) {
+            t.textDecoration(payload.textDecoration);
+        }
+        if (payload.attrs) t.setAttrs(payload.attrs);
+        if (payload.attrs && payload.attrs.directModuleId) {
+            t.setAttr("_directSavedFill", payload.fill || t.fill() || "#000000");
+            t.setAttr("_directSavedFontFamily", payload.fontFamily || t.fontFamily() || "Arial");
+            t.setAttr("_directSavedFontStyle", payload.fontStyle || t.fontStyle() || "normal");
+            t.setAttr("_directSavedTextDecoration", payload.textDecoration || (t.textDecoration ? t.textDecoration() : ""));
+        }
+        const editFn = window.enableEditableText || window.enableTextEditing;
+        if (typeof editFn === "function" && (t.getAttr("isName") || t.getAttr("isIndex") || t.getAttr("isProductText") || t.getAttr("isCustomPackageInfo"))) {
+            try { editFn(t, page); } catch (_e) {}
+        }
+        return t;
+    }
+
+    if (payload.type === "rectNode") {
+        const r = new Konva.Rect({
+            x: payload.x ?? 0,
+            y: payload.y ?? 0,
+            width: payload.width || 0,
+            height: payload.height || 0,
+            scaleX: payload.scaleX || 1,
+            scaleY: payload.scaleY || 1,
+            rotation: payload.rotation || 0,
+            fill: payload.fill,
+            opacity: payload.opacity ?? 1,
+            stroke: payload.stroke,
+            strokeWidth: payload.strokeWidth,
+            draggable: payload.draggable === true,
+            listening: payload.listening !== false
+        });
+        if (payload.attrs) r.setAttrs(payload.attrs);
+        return r;
+    }
+
+    if (payload.type === "imageNode" && (payload.src || (payload.attrs && payload.attrs.editorSrc) || (payload.attrs && payload.attrs.thumbSrc))) {
+        return await new Promise((resolve) => {
+            if (!isPageHydrationContextActive(page)) {
+                resolve(null);
+                return;
+            }
+            const renderSrc =
+                String(payload?.attrs?.editorSrc || "").trim() ||
+                String(payload.src || payload?.attrs?.thumbSrc || "").trim();
+            const thumbSrc =
+                String(payload?.attrs?.thumbSrc || "").trim() ||
+                renderSrc;
+            const img = new Image();
+            img.onload = () => {
+                if (!isPageHydrationContextActive(page)) {
+                    resolve(null);
+                    return;
+                }
+                const safeCrop = normalizeSavedCrop(payload.crop, img.naturalWidth, img.naturalHeight);
+                const k = new Konva.Image({
+                    x: payload.x ?? 0,
+                    y: payload.y ?? 0,
+                    image: img,
+                    width: payload.width || img.naturalWidth,
+                    height: payload.height || img.naturalHeight,
+                    scaleX: payload.scaleX || 1,
+                    scaleY: payload.scaleY || 1,
+                    rotation: payload.rotation || 0,
+                    draggable: payload.draggable !== false,
+                    listening: payload.listening !== false,
+                    opacity: payload.opacity ?? 1
+                });
+                if (safeCrop && typeof k.crop === "function") {
+                    k.crop(safeCrop);
+                }
+                if (payload.attrs) k.setAttrs(payload.attrs);
+                const payloadSlotRaw = Number(
+                    payload && payload.attrs && payload.attrs.slotIndex !== undefined
+                        ? payload.attrs.slotIndex
+                        : null
+                );
+                const payloadHasSlot = Number.isFinite(payloadSlotRaw);
+                const payloadIsUserImage = !!(payload && payload.attrs && payload.attrs.isUserImage);
+                const payloadIsProductImage = !!(payload && payload.attrs && payload.attrs.isProductImage) && payloadHasSlot && !payloadIsUserImage;
+                if (k.setAttr) {
+                    k.setAttr("slotIndex", payloadHasSlot ? payloadSlotRaw : null);
+                    k.setAttr("isProductImage", payloadIsProductImage);
+                    k.setAttr("isUserImage", payloadIsUserImage || !payloadHasSlot);
+                }
+                if (typeof k.imageSmoothingEnabled === "function") k.imageSmoothingEnabled(true);
+                if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                    window.applyImageVariantsToKonvaNode(k, {
+                        original: payload.src,
+                        editor: renderSrc || payload.src,
+                        thumb: thumbSrc || renderSrc || payload.src
+                    });
+                } else {
+                    if (k.setAttr) k.setAttr("originalSrc", payload.src);
+                    if (k.setAttr) k.setAttr("editorSrc", renderSrc || payload.src);
+                    if (k.setAttr) k.setAttr("thumbSrc", thumbSrc || renderSrc || payload.src);
+                }
+                if (typeof window.setupProductImageDrag === "function" && (k.getAttr("isProductImage") || k.getAttr("directModuleId"))) {
+                    try { window.setupProductImageDrag(k, layer); } catch (_e) {}
+                }
+                resolve(k);
+            };
+            img.onerror = () => resolve(null);
+            img.crossOrigin = "Anonymous";
+            img.src = renderSrc || payload.src;
+        });
+    }
+
+    if (payload.type === "groupNode") {
+        const g = new Konva.Group({
+            x: payload.x ?? 0,
+            y: payload.y ?? 0,
+            scaleX: payload.scaleX || 1,
+            scaleY: payload.scaleY || 1,
+            rotation: payload.rotation || 0,
+            draggable: payload.draggable !== false,
+            listening: payload.listening !== false,
+            name: payload.name || ""
+        });
+        if (payload.attrs) g.setAttrs(payload.attrs);
+        const children = Array.isArray(payload.children) ? payload.children : [];
+        for (const childPayload of children) {
+            const childNode = await restoreDirectNodeRecursiveFromPayload(childPayload, page, layer);
+            if (childNode) g.add(childNode);
+        }
+        if (g.getAttr && g.getAttr("isPriceGroup")) {
+            const bindFn = window.CustomStyleDirectHooks && window.CustomStyleDirectHooks.bindDirectPriceGroupEditor;
+            if (typeof bindFn === "function") {
+                try { bindFn(g, page); } catch (_e) {}
+            }
+        }
+        return g;
+    }
+
+    return null;
+}
+
+async function restoreSavedObjectsForPage(page, pagePayload) {
+    if (!page || !page.layer) return;
+    if (!isPageHydrationContextActive(page)) return;
+    const layer = page.layer;
+    const objects = Array.isArray(pagePayload && pagePayload.objects) ? pagePayload.objects : [];
+
+    for (const obj of objects) {
+        if (!isPageHydrationContextActive(page)) return;
+        if (!obj || !obj.type) continue;
+
+        if (obj.type === "directGroup" && obj.data) {
+            const directGroup = await restoreDirectNodeRecursiveFromPayload(obj.data, page, layer);
+            if (directGroup) layer.add(directGroup);
+            continue;
+        }
+
+        if (obj.type === "directNode" && obj.data) {
+            const directNode = await restoreDirectNodeRecursiveFromPayload(obj.data, page, layer);
+            if (directNode) layer.add(directNode);
+            continue;
+        }
+
+        if (obj.type === "genericGroup" && obj.data) {
+            const genericGroup = await restoreDirectNodeRecursiveFromPayload(obj.data, page, layer);
+            if (genericGroup) layer.add(genericGroup);
+            continue;
+        }
+
+        if (obj.type === "background") {
+            const bg = layer.findOne((n) => n.getAttr("isPageBg"));
+            if (bg) bg.fill(obj.fill);
+            continue;
+        }
+
+        if (obj.type === "text") {
+            const t = new Konva.Text({
+                x: obj.x,
+                y: obj.y,
+                text: obj.text || "",
+                width: obj.width,
+                height: obj.height,
+                fontSize: obj.fontSize,
+                fontFamily: obj.fontFamily,
+                fill: obj.fill,
+                fontStyle: obj.fontStyle || "normal",
+                align: obj.align || "left",
+                lineHeight: obj.lineHeight || 1.2,
+                rotation: obj.rotation,
+                draggable: true
+            });
+            t.setAttrs({
+                isName: obj.isName || false,
+                isPrice: obj.isPrice || false,
+                isIndex: obj.isIndex || false,
+                slotIndex: obj.slotIndex
+            });
+            layer.add(t);
+            const editFn = window.enableEditableText || window.enableTextEditing;
+            if (typeof editFn === "function") editFn(t, page);
+            continue;
+        }
+
+    if (obj.type === "image" && (obj.src || obj.editorSrc || obj.thumbSrc)) {
+            await new Promise((res) => {
+                if (!isPageHydrationContextActive(page)) {
+                    res();
+                    return;
+                }
+                const renderSrc = String(obj.editorSrc || obj.src || obj.thumbSrc || "").trim();
+                const thumbSrc = String(obj.thumbSrc || renderSrc || obj.src || "").trim();
+                const img = new Image();
+                img.onload = () => {
+                    if (!isPageHydrationContextActive(page)) {
+                        res();
+                        return;
+                    }
+                    const safeCrop = normalizeSavedCrop(obj.crop, img.naturalWidth, img.naturalHeight);
+                    const slotIndexRaw = Number(obj.slotIndex);
+                    const hasSlot = Number.isFinite(slotIndexRaw);
+                    const isUserImage = !!obj.isUserImage;
+                    const isProductImage = !!obj.isProductImage && hasSlot && !isUserImage;
+                    const k = new Konva.Image({
+                        x: obj.x,
+                        y: obj.y,
+                        image: img,
+                        width: obj.width || img.naturalWidth,
+                        height: obj.height || img.naturalHeight,
+                        scaleX: obj.scaleX || 1,
+                        scaleY: obj.scaleY || 1,
+                        rotation: obj.rotation || 0,
+                        draggable: true
+                    });
+                    if (safeCrop && typeof k.crop === "function") {
+                        k.crop(safeCrop);
+                    }
+                    k.setAttr("slotIndex", hasSlot ? slotIndexRaw : null);
+                    if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                        window.applyImageVariantsToKonvaNode(k, {
+                            original: obj.src,
+                            editor: renderSrc || obj.src,
+                            thumb: thumbSrc || renderSrc || obj.src
+                        });
+                    } else {
+                        k.setAttr("originalSrc", obj.src);
+                        k.setAttr("editorSrc", renderSrc || obj.src);
+                        k.setAttr("thumbSrc", thumbSrc || renderSrc || obj.src);
+                    }
+                    k.setAttr("isProductImage", isProductImage);
+                    k.setAttr("isUserImage", isUserImage || !hasSlot);
+                    k.setAttr("isOverlayElement", obj.isOverlayElement || false);
+                    k.setAttr("isTNZBadge", obj.isTNZBadge || false);
+                    k.setAttr("isCountryBadge", obj.isCountryBadge || false);
+                    if (typeof k.imageSmoothingEnabled === "function") {
+                        k.imageSmoothingEnabled(true);
+                    }
+                    layer.add(k);
+                    if (typeof window.addImageShadow === "function") {
+                        window.addImageShadow(layer, k);
+                    }
+                    res();
+                };
+                img.onerror = () => res();
+                img.crossOrigin = "Anonymous";
+                img.src = renderSrc || obj.src;
+            });
+            continue;
+        }
+
+        if (obj.type === "priceGroup") {
+            const g = new Konva.Group({
+                x: obj.x ?? 0,
+                y: obj.y ?? 0,
+                scaleX: obj.scaleX || 1,
+                scaleY: obj.scaleY || 1,
+                rotation: obj.rotation || 0,
+                draggable: obj.draggable !== false,
+                listening: true,
+                name: obj.name || "priceGroup"
+            });
+            g.setAttrs({
+                isProductText: true,
+                isPrice: true,
+                isPriceGroup: true,
+                slotIndex: obj.slotIndex ?? null
+            });
+
+            const parts = Array.isArray(obj.parts) ? obj.parts : [];
+            parts.forEach((part) => {
+                const t = new Konva.Text({
+                    x: part.x ?? 0,
+                    y: part.y ?? 0,
+                    text: part.text || "",
+                    width: part.width,
+                    height: part.height,
+                    fontSize: part.fontSize || 12,
+                    fontFamily: part.fontFamily || "Arial",
+                    fill: part.fill || "#000000",
+                    fontStyle: part.fontStyle || "normal",
+                    align: part.align || "left",
+                    lineHeight: part.lineHeight || 1.2
+                });
+                g.add(t);
+            });
+
+            layer.add(g);
+            continue;
+        }
+
+        if (obj.type === "barcode" && obj.original) {
+            await new Promise((res) => {
+                if (!isPageHydrationContextActive(page)) {
+                    res();
+                    return;
+                }
+                const img = new Image();
+                img.onload = () => {
+                    if (!isPageHydrationContextActive(page)) {
+                        res();
+                        return;
+                    }
+                    const k = new Konva.Image({
+                        x: obj.x,
+                        y: obj.y,
+                        image: img,
+                        scaleX: obj.scaleX || 1,
+                        scaleY: obj.scaleY || 1,
+                        rotation: obj.rotation || 0,
+                        draggable: true
+                    });
+                    k.setAttrs({
+                        isBarcode: true,
+                        slotIndex: obj.slotIndex,
+                        barcodeOriginalSrc: obj.original,
+                        barcodeColor: obj.color
+                    });
+                    layer.add(k);
+                    res();
+                };
+                img.onerror = () => res();
+                img.src = obj.original;
+            });
+            continue;
+        }
+
+        if (obj.type === "box") {
+            const box = new Konva.Rect({
+                x: obj.x,
+                y: obj.y,
+                width: obj.width,
+                height: obj.height,
+                fill: obj.fill !== undefined ? obj.fill : "#ffffff",
+                stroke: obj.stroke || "rgba(0,0,0,0.06)",
+                strokeWidth: obj.strokeWidth ?? 1,
+                cornerRadius: obj.cornerRadius ?? 10,
+                shadowColor: obj.shadowColor || "rgba(0,0,0,0.18)",
+                shadowBlur: obj.shadowBlur ?? 30,
+                shadowOffset: { x: obj.shadowOffsetX ?? 0, y: obj.shadowOffsetY ?? 12 },
+                shadowOpacity: obj.shadowOpacity ?? 0.8,
+                draggable: true,
+                visible: obj.visible !== false,
+                listening: obj.listening !== false
+            });
+
+            box.setAttr("isBox", true);
+            box.setAttr("slotIndex", obj.slotIndex ?? null);
+            box.setAttr("isShape", !!obj.isShape);
+            box.setAttr("isPreset", !!obj.isPreset);
+            if (obj.selectable !== undefined) box.setAttr("selectable", obj.selectable);
+            box.setAttr("isHiddenByCatalogStyle", !!obj.isHiddenByCatalogStyle);
+
+            box.scaleX(obj.scaleX || 1);
+            box.scaleY(obj.scaleY || 1);
+
+            layer.add(box);
+            continue;
+        }
+    }
+
+    layer.batchDraw?.();
+}
+
+async function ensurePageHydrated(page, opts = {}) {
+    if (!page || !page.layer) return false;
+    if (!isPageHydrationContextActive(page)) return false;
+    if (!pageHasDeferredHydration(page)) {
+        page.__deferredHydrationDone = true;
+        return false;
+    }
+    if (page.__deferredHydrationPromise) {
+        return page.__deferredHydrationPromise;
+    }
+
+    const payload = page.__deferredHydrationPayload;
+    const trackedPromise = (async () => {
+        try {
+            await restoreSavedObjectsForPage(page, payload);
+            page.__deferredHydrationPayload = null;
+            page.__deferredHydrationDone = true;
+            page.__deferredHydrationError = null;
+            runPostLoadRepairsForPages([page], { schedule: true });
+            return true;
+        } catch (err) {
+            page.__deferredHydrationError = err;
+            if (opts.throwOnError) throw err;
+            try {
+                console.warn("Deferred page hydration failed", err);
+            } catch (_e) {}
+            return false;
+        } finally {
+            if (page.__deferredHydrationPromise === trackedPromise) {
+                page.__deferredHydrationPromise = null;
+            }
+        }
+    })();
+
+    page.__deferredHydrationPromise = trackedPromise;
+    return trackedPromise;
+}
+
+window.ensurePageHydrated = ensurePageHydrated;
+window.hasDeferredPageHydration = pageHasDeferredHydration;
+window.ensureAllPagesHydrated = async function(targetPages, opts = {}) {
+    const pagesList = collectTargetPages(targetPages);
+    if (!pagesList.length) return;
+    for (const page of pagesList) {
+        await ensurePageHydrated(page, {
+            ...opts,
+            throwOnError: true
+        });
+    }
+};
 
 function serializeDirectNodeRecursive(node) {
     if (!node || !window.Konva) return null;
@@ -637,7 +1288,11 @@ function serializeDirectNodeRecursive(node) {
             listening: node.listening ? node.listening() : true,
             opacity: node.opacity ? node.opacity() : 1,
             crop,
-            src: (node.getAttr && node.getAttr("originalSrc")) || (node.image && node.image() && node.image().src) || null,
+            src: (
+                (typeof window.getNodeImageSource === "function")
+                    ? window.getNodeImageSource(node, "original")
+                    : ((node.getAttr && node.getAttr("originalSrc")) || (node.image && node.image() && node.image().src))
+            ) || null,
             attrs
         };
     }
@@ -678,6 +1333,21 @@ function collectProjectData() {
     };
 
     window.pages.forEach(page => {
+        const deferredPayload = page && page.__deferredHydrationPayload;
+        if (deferredPayload && typeof deferredPayload === "object" && Array.isArray(deferredPayload.objects)) {
+            let deferredObjects = deferredPayload.objects;
+            try {
+                deferredObjects = JSON.parse(JSON.stringify(deferredPayload.objects));
+            } catch (_e) {
+                deferredObjects = Array.isArray(deferredPayload.objects) ? deferredPayload.objects.slice() : [];
+            }
+            project.pages.push({
+                number: page.number,
+                objects: deferredObjects
+            });
+            return;
+        }
+
         const objects = [];
 
         page.layer.getChildren().forEach(node => {
@@ -816,7 +1486,21 @@ function collectProjectData() {
                     height: node.height(),
                     crop,
                     slotIndex: hasSlot ? rawSlot : null,
-                    src: node.getAttr("originalSrc") || node.image()?.src || null,
+                    src: (
+                        (typeof window.getNodeImageSource === "function")
+                            ? window.getNodeImageSource(node, "original")
+                            : (node.getAttr("originalSrc") || node.image()?.src)
+                    ) || null,
+                    editorSrc: (
+                        (typeof window.getNodeImageSource === "function")
+                            ? window.getNodeImageSource(node, "editor")
+                            : node.getAttr("editorSrc")
+                    ) || null,
+                    thumbSrc: (
+                        (typeof window.getNodeImageSource === "function")
+                            ? window.getNodeImageSource(node, "thumb")
+                            : node.getAttr("thumbSrc")
+                    ) || null,
                     isProductImage,
                     isUserImage,
                     isOverlayElement: node.getAttr("isOverlayElement") || false,
@@ -1799,515 +2483,93 @@ async function loadSavedProjects(listEl) {
 // ====================================================================
 async function loadProjectFromData(data, opts = {}) {
     if (!data || !data.pages) return showAppToast("Nieprawidłowy plik projektu!", "error");
+    if (window.__projectLoadMutex) {
+        try { await window.__projectLoadMutex; } catch (_e) {}
+    }
+    let releaseProjectLoadMutex = null;
+    const loadMutex = new Promise((resolve) => { releaseProjectLoadMutex = resolve; });
+    window.__projectLoadMutex = loadMutex;
+    const perfSleepBeforeLoad = (window.__enablePagePerfSleep !== false);
+    window.__enablePagePerfSleep = false;
     window.__projectLoadInProgress = true;
     try {
-    clearKonvaGlobalDragState();
-    const oldPages = Array.isArray(window.pages) ? window.pages : [];
-    oldPages.forEach((p) => {
-        const oldStage = p && p.stage;
-        if (!oldStage || (typeof oldStage.isDestroyed === "function" && oldStage.isDestroyed())) return;
-        try { if (typeof oldStage.stopDrag === "function") oldStage.stopDrag(); } catch (_e) {}
-        try { oldStage.destroy(); } catch (_e) {}
-    });
-    document.getElementById("pagesContainer").innerHTML = "";
-    window.pages = [];
-    window.CATALOG_STYLE = data.catalogStyle || "default";
-    setProjectTitle(data.name || DEFAULT_PROJECT_TITLE);
+        clearKonvaGlobalDragState();
+        if (typeof window.releaseImageMemoryCaches === "function") {
+            try { window.releaseImageMemoryCaches(); } catch (_e) {}
+        }
+        const oldPages = Array.isArray(window.pages) ? window.pages : [];
+        oldPages.forEach((p) => {
+            const oldStage = p && p.stage;
+            if (!oldStage || (typeof oldStage.isDestroyed === "function" && oldStage.isDestroyed())) return;
+            try { if (typeof oldStage.stopDrag === "function") oldStage.stopDrag(); } catch (_e) {}
+            try { oldStage.destroy(); } catch (_e) {}
+        });
 
-    for (const p of data.pages) {
-        const page = window.createNewPage();
-        const layer = page.layer;
+        const pagesContainer = document.getElementById("pagesContainer");
+        if (pagesContainer) pagesContainer.innerHTML = "";
+        window.pages = [];
+        const loadStamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        window.__projectLoadStamp = loadStamp;
+        window.CATALOG_STYLE = data.catalogStyle || "default";
+        setProjectTitle(data.name || DEFAULT_PROJECT_TITLE);
 
-        const restoreDirectNodeRecursive = async (payload) => {
-            if (!payload || !window.Konva) return null;
+        const savedPages = Array.isArray(data.pages) ? data.pages : [];
+        const hydrateNowLimit = getInitialHydratedPagesLimit(opts, savedPages.length);
+        const hydratedPages = [];
 
-            if (payload.type === "textNode") {
-                const t = new Konva.Text({
-                    x: payload.x ?? 0,
-                    y: payload.y ?? 0,
-                    width: payload.width,
-                    height: payload.height,
-                    scaleX: payload.scaleX || 1,
-                    scaleY: payload.scaleY || 1,
-                    rotation: payload.rotation || 0,
-                    text: payload.text || "",
-                    fontSize: payload.fontSize || 12,
-                    fontFamily: payload.fontFamily || "Arial",
-                    fill: payload.fill || "#000",
-                    fontStyle: payload.fontStyle || "normal",
-                    align: payload.align || "left",
-                    lineHeight: payload.lineHeight || 1.2,
-                    draggable: payload.draggable !== false,
-                    listening: payload.listening !== false
-                });
-                if (typeof t.textDecoration === "function" && payload.textDecoration) {
-                    t.textDecoration(payload.textDecoration);
-                }
-                if (payload.attrs) t.setAttrs(payload.attrs);
-                if (payload.attrs && payload.attrs.directModuleId) {
-                    t.setAttr("_directSavedFill", payload.fill || t.fill() || "#000000");
-                    t.setAttr("_directSavedFontFamily", payload.fontFamily || t.fontFamily() || "Arial");
-                    t.setAttr("_directSavedFontStyle", payload.fontStyle || t.fontStyle() || "normal");
-                    t.setAttr("_directSavedTextDecoration", payload.textDecoration || (t.textDecoration ? t.textDecoration() : ""));
-                }
-                const editFn = window.enableEditableText || window.enableTextEditing;
-                if (typeof editFn === "function" && (t.getAttr("isName") || t.getAttr("isIndex") || t.getAttr("isProductText") || t.getAttr("isCustomPackageInfo"))) {
-                    try { editFn(t, page); } catch (_e) {}
-                }
-                return t;
-            }
-
-            if (payload.type === "rectNode") {
-                const r = new Konva.Rect({
-                    x: payload.x ?? 0,
-                    y: payload.y ?? 0,
-                    width: payload.width || 0,
-                    height: payload.height || 0,
-                    scaleX: payload.scaleX || 1,
-                    scaleY: payload.scaleY || 1,
-                    rotation: payload.rotation || 0,
-                    fill: payload.fill,
-                    opacity: payload.opacity ?? 1,
-                    stroke: payload.stroke,
-                    strokeWidth: payload.strokeWidth,
-                    draggable: payload.draggable === true,
-                    listening: payload.listening !== false
-                });
-                if (payload.attrs) r.setAttrs(payload.attrs);
-                return r;
-            }
-
-            if (payload.type === "imageNode" && payload.src) {
-                return await new Promise((resolve) => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const safeCrop = normalizeSavedCrop(payload.crop, img.naturalWidth, img.naturalHeight);
-                        const k = new Konva.Image({
-                            x: payload.x ?? 0,
-                            y: payload.y ?? 0,
-                            image: img,
-                            width: payload.width || img.naturalWidth,
-                            height: payload.height || img.naturalHeight,
-                            scaleX: payload.scaleX || 1,
-                            scaleY: payload.scaleY || 1,
-                            rotation: payload.rotation || 0,
-                            draggable: payload.draggable !== false,
-                            listening: payload.listening !== false,
-                            opacity: payload.opacity ?? 1
-                        });
-                        if (safeCrop && typeof k.crop === "function") {
-                            k.crop(safeCrop);
-                        }
-                        if (payload.attrs) k.setAttrs(payload.attrs);
-                        const payloadSlotRaw = Number(
-                            payload && payload.attrs && payload.attrs.slotIndex !== undefined
-                                ? payload.attrs.slotIndex
-                                : null
-                        );
-                        const payloadHasSlot = Number.isFinite(payloadSlotRaw);
-                        const payloadIsUserImage = !!(payload && payload.attrs && payload.attrs.isUserImage);
-                        const payloadIsProductImage = !!(payload && payload.attrs && payload.attrs.isProductImage) && payloadHasSlot && !payloadIsUserImage;
-                        if (k.setAttr) {
-                            k.setAttr("slotIndex", payloadHasSlot ? payloadSlotRaw : null);
-                            k.setAttr("isProductImage", payloadIsProductImage);
-                            k.setAttr("isUserImage", payloadIsUserImage || !payloadHasSlot);
-                        }
-                        if (typeof k.imageSmoothingEnabled === "function") k.imageSmoothingEnabled(true);
-                        // image attrs mogą nadpisać src; wymuś po restore
-                        if (k.setAttr) k.setAttr("originalSrc", payload.src);
-                        if (typeof window.setupProductImageDrag === "function" && (k.getAttr("isProductImage") || k.getAttr("directModuleId"))) {
-                            try { window.setupProductImageDrag(k, layer); } catch (_e) {}
-                        }
-                        resolve(k);
-                    };
-                    img.onerror = () => resolve(null);
-                    img.crossOrigin = "Anonymous";
-                    img.src = payload.src;
-                });
-            }
-
-            if (payload.type === "groupNode") {
-                const g = new Konva.Group({
-                    x: payload.x ?? 0,
-                    y: payload.y ?? 0,
-                    scaleX: payload.scaleX || 1,
-                    scaleY: payload.scaleY || 1,
-                    rotation: payload.rotation || 0,
-                    draggable: payload.draggable !== false,
-                    listening: payload.listening !== false,
-                    name: payload.name || ""
-                });
-                if (payload.attrs) g.setAttrs(payload.attrs);
-                const children = Array.isArray(payload.children) ? payload.children : [];
-                for (const childPayload of children) {
-                    const childNode = await restoreDirectNodeRecursive(childPayload);
-                    if (childNode) g.add(childNode);
-                }
-                if (g.getAttr && g.getAttr("isPriceGroup")) {
-                    const bindFn = window.CustomStyleDirectHooks && window.CustomStyleDirectHooks.bindDirectPriceGroupEditor;
-                    if (typeof bindFn === "function") {
-                        try { bindFn(g, page); } catch (_e) {}
-                    }
-                }
-                return g;
-            }
-
-            return null;
-        };
-
-        for (const obj of p.objects) {
-
-            if (obj.type === "directGroup" && obj.data) {
-                const directGroup = await restoreDirectNodeRecursive(obj.data);
-                if (directGroup) {
-                    layer.add(directGroup);
-                }
-                continue;
-            }
-
-            if (obj.type === "directNode" && obj.data) {
-                const directNode = await restoreDirectNodeRecursive(obj.data);
-                if (directNode) {
-                    layer.add(directNode);
-                }
-                continue;
-            }
-
-            if (obj.type === "genericGroup" && obj.data) {
-                const genericGroup = await restoreDirectNodeRecursive(obj.data);
-                if (genericGroup) {
-                    layer.add(genericGroup);
-                }
-                continue;
-            }
-
-            // TŁO
-            if (obj.type === "background") {
-                const bg = layer.findOne(n => n.getAttr("isPageBg"));
-                if (bg) bg.fill(obj.fill);
-                continue;
-            }
-
-            // TEKST
-            if (obj.type === "text") {
-                const t = new Konva.Text({
-                    x: obj.x, y: obj.y,
-                    text: obj.text || "",
-                    width: obj.width,
-                    height: obj.height,
-                    fontSize: obj.fontSize,
-                    fontFamily: obj.fontFamily,
-                    fill: obj.fill,
-                    fontStyle: obj.fontStyle || "normal",
-                    align: obj.align || "left",
-                    lineHeight: obj.lineHeight || 1.2,
-                    rotation: obj.rotation,
-                    draggable: true
-                });
-                t.setAttrs({
-                    isName: obj.isName || false,
-                    isPrice: obj.isPrice || false,
-                    isIndex: obj.isIndex || false,
-                    slotIndex: obj.slotIndex
-                });
-                layer.add(t);
-                const editFn = window.enableEditableText || window.enableTextEditing;
-                if (typeof editFn === "function") editFn(t, page);
-                continue;
-            }
-
-            // ZDJĘCIA
-            if (obj.type === "image" && obj.src) {
-                await new Promise(res => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const safeCrop = normalizeSavedCrop(obj.crop, img.naturalWidth, img.naturalHeight);
-                        const slotIndexRaw = Number(obj.slotIndex);
-                        const hasSlot = Number.isFinite(slotIndexRaw);
-                        const isUserImage = !!obj.isUserImage;
-                        const isProductImage = !!obj.isProductImage && hasSlot && !isUserImage;
-                        const k = new Konva.Image({
-                            x: obj.x, y: obj.y,
-                            image: img,
-                            width: obj.width || img.naturalWidth,
-                            height: obj.height || img.naturalHeight,
-                            scaleX: obj.scaleX || 1,
-                            scaleY: obj.scaleY || 1,
-                            rotation: obj.rotation || 0,
-                            draggable: true
-                        });
-                        if (safeCrop && typeof k.crop === "function") {
-                            k.crop(safeCrop);
-                        }
-                        k.setAttr("slotIndex", hasSlot ? slotIndexRaw : null);
-                        k.setAttr("originalSrc", obj.src);
-                        k.setAttr("isProductImage", isProductImage);
-                        k.setAttr("isUserImage", isUserImage || !hasSlot);
-                        k.setAttr("isOverlayElement", obj.isOverlayElement || false);
-                        k.setAttr("isTNZBadge", obj.isTNZBadge || false);
-                        k.setAttr("isCountryBadge", obj.isCountryBadge || false);
-                        if (typeof k.imageSmoothingEnabled === "function") {
-                            k.imageSmoothingEnabled(true);
-                        }
-                        layer.add(k);
-                        if (typeof window.addImageShadow === "function") {
-                            window.addImageShadow(layer, k);
-                        }
-                        res();
-                    };
-                    img.crossOrigin = "Anonymous";
-                    img.src = obj.src;
-                });
-                continue;
-            }
-
-            // CENA (GROUP)
-            if (obj.type === "priceGroup") {
-                const g = new Konva.Group({
-                    x: obj.x ?? 0,
-                    y: obj.y ?? 0,
-                    scaleX: obj.scaleX || 1,
-                    scaleY: obj.scaleY || 1,
-                    rotation: obj.rotation || 0,
-                    draggable: obj.draggable !== false,
-                    listening: true,
-                    name: obj.name || "priceGroup"
-                });
-                g.setAttrs({
-                    isProductText: true,
-                    isPrice: true,
-                    isPriceGroup: true,
-                    slotIndex: obj.slotIndex ?? null
-                });
-
-                const parts = Array.isArray(obj.parts) ? obj.parts : [];
-                parts.forEach(part => {
-                    const t = new Konva.Text({
-                        x: part.x ?? 0,
-                        y: part.y ?? 0,
-                        text: part.text || "",
-                        width: part.width,
-                        height: part.height,
-                        fontSize: part.fontSize || 12,
-                        fontFamily: part.fontFamily || "Arial",
-                        fill: part.fill || "#000000",
-                        fontStyle: part.fontStyle || "normal",
-                        align: part.align || "left",
-                        lineHeight: part.lineHeight || 1.2
-                    });
-                    g.add(t);
-                });
-
-                layer.add(g);
-                continue;
-            }
-
-            // BARCODE
-            if (obj.type === "barcode" && obj.original) {
-                await new Promise(res => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const k = new Konva.Image({
-                            x: obj.x, y: obj.y,
-                            image: img,
-                            scaleX: obj.scaleX || 1,
-                            scaleY: obj.scaleY || 1,
-                            rotation: obj.rotation || 0,
-                            draggable: true
-                        });
-                        k.setAttrs({
-                            isBarcode: true,
-                            slotIndex: obj.slotIndex,
-                            barcodeOriginalSrc: obj.original,
-                            barcodeColor: obj.color
-                        });
-                        layer.add(k);
-                        res();
-                    };
-                    img.src = obj.original;
-                });
-                continue;
-            }
-
-            // BOXY – poprawne wczytywanie skali
-            if (obj.type === "box") {
-                const box = new Konva.Rect({
-                    x: obj.x,
-                    y: obj.y,
-                    width: obj.width,
-                    height: obj.height,
-                    fill: obj.fill !== undefined ? obj.fill : "#ffffff",
-                    stroke: obj.stroke || "rgba(0,0,0,0.06)",
-                    strokeWidth: obj.strokeWidth ?? 1,
-                    cornerRadius: obj.cornerRadius ?? 10,
-                    shadowColor: obj.shadowColor || "rgba(0,0,0,0.18)",
-                    shadowBlur: obj.shadowBlur ?? 30,
-                    shadowOffset: { x: obj.shadowOffsetX ?? 0, y: obj.shadowOffsetY ?? 12 },
-                    shadowOpacity: obj.shadowOpacity ?? 0.8,
-                    draggable: true,
-                    visible: obj.visible !== false,
-                    listening: obj.listening !== false
-                });
-
-                box.setAttr("isBox", true);
-                box.setAttr("slotIndex", obj.slotIndex ?? null);
-                box.setAttr("isShape", !!obj.isShape);
-                box.setAttr("isPreset", !!obj.isPreset);
-                if (obj.selectable !== undefined) box.setAttr("selectable", obj.selectable);
-                box.setAttr("isHiddenByCatalogStyle", !!obj.isHiddenByCatalogStyle);
-
-                // Skalujemy PO utworzeniu – zero dublowania!
-                box.scaleX(obj.scaleX || 1);
-                box.scaleY(obj.scaleY || 1);
-
-                layer.add(box);
-                continue;
+        for (let i = 0; i < savedPages.length; i++) {
+            const savedPage = (savedPages[i] && typeof savedPages[i] === "object") ? savedPages[i] : {};
+            const page = window.createNewPage();
+            page.__projectLoadStamp = loadStamp;
+            if (i < hydrateNowLimit) {
+                markPageDeferredHydration(page, null);
+                await restoreSavedObjectsForPage(page, savedPage);
+                hydratedPages.push(page);
+            } else {
+                markPageDeferredHydration(page, savedPage);
             }
         }
 
-        layer.batchDraw();
-        try {
-            window.dispatchEvent(new CustomEvent("canvasModified", { detail: page.stage }));
-        } catch (_e) {}
-    }
-
-    // Po odczycie przywróć wizualny styl katalogu (np. czerwone koła ceny, układ elegancki).
-    if (typeof window.applyCatalogStyleVisual === "function") {
-        window.applyCatalogStyleVisual(window.CATALOG_STYLE || "default");
-    } else if (typeof window.applyCatalogStyle === "function") {
-        window.applyCatalogStyle(window.CATALOG_STYLE || "default");
-    }
-
-    // Przywróć zapisane style tekstów dla modułów direct ze styl-wlasny.js
-    // (style katalogu potrafią nadpisać np. biały kolor ceny na czarny, czasem z opóźnieniem).
-    const restoreDirectTextStyles = () => {
-        try {
-            (Array.isArray(window.pages) ? window.pages : []).forEach((page) => {
-                const layer = page && page.layer;
-                if (!layer || !layer.find) return;
-                const directTexts = layer.find((n) =>
-                    n instanceof Konva.Text &&
-                    n.getAttr &&
-                    !!n.getAttr("directModuleId") &&
-                    !!n.getAttr("_directSavedFill")
-                );
-                directTexts.forEach((t) => {
-                    try {
-                        const fill = t.getAttr("_directSavedFill");
-                        const ff = t.getAttr("_directSavedFontFamily");
-                        const fs = t.getAttr("_directSavedFontStyle");
-                        const td = t.getAttr("_directSavedTextDecoration");
-                        if (fill && typeof t.fill === "function") t.fill(fill);
-                        if (ff && typeof t.fontFamily === "function") t.fontFamily(ff);
-                        if (fs && typeof t.fontStyle === "function") t.fontStyle(fs);
-                        if (typeof t.textDecoration === "function") t.textDecoration(td || "");
-                    } catch (_e) {}
-                });
-                layer.batchDraw?.();
-                page.transformerLayer?.batchDraw?.();
-            });
-        } catch (_e) {}
-    };
-
-    const stabilizePriceGroupsAfterLoad = () => {
-        try {
-            const pagesList = Array.isArray(window.pages) ? window.pages : [];
-            const directHooks = window.CustomStyleDirectHooks || {};
-            const bindDirectPriceGroupEditor = typeof directHooks.bindDirectPriceGroupEditor === "function"
-                ? directHooks.bindDirectPriceGroupEditor
-                : null;
-
-            const realignLegacyPriceGroup = (priceGroup) => {
-                if (!priceGroup || !priceGroup.getChildren) return;
-                const texts = (priceGroup.getChildren() || []).filter((n) => n instanceof Konva.Text);
-                if (texts.length < 2) return;
-
-                const pickByText = (pattern) => texts.find((t) => pattern.test(String(t.text?.() || "")));
-                const unitNode = pickByText(/\/\s*(SZT|KG|L|ML|G|OPAK)/i) || pickByText(/^\s*[£€$]\s*\/\s*/i);
-                const mainNode = texts.slice().sort((a, b) => Number(b.fontSize?.() || 0) - Number(a.fontSize?.() || 0))[0] || null;
-                const decNode = texts.find((t) => t !== mainNode && t !== unitNode) || texts.find((t) => t !== mainNode) || null;
-                if (!mainNode || !decNode || !unitNode) return;
-
-                const gap = 4;
-                const baseX = Number(mainNode.x?.() || 0);
-                const baseY = Number(mainNode.y?.() || 0);
-                const mainW = Number(mainNode.width?.() || 0);
-                const mainH = Number(mainNode.height?.() || 0);
-                const decH = Number(decNode.height?.() || 0);
-
-                decNode.x(baseX + mainW + gap);
-                decNode.y(baseY + (mainH * 0.10));
-                unitNode.x(baseX + mainW + gap);
-                unitNode.y(baseY + (decH * 1.5));
-
-                if (typeof unitNode.measureSize === "function" && typeof unitNode.width === "function") {
-                    const measured = unitNode.measureSize(unitNode.text?.() || "");
-                    const minW = Math.max(36, Math.ceil((Number(measured?.width) || 0) + 8));
-                    if (Number(unitNode.width?.() || 0) < minW) unitNode.width(minW);
-                }
-            };
-
-            pagesList.forEach((page) => {
-                const layer = page && page.layer;
-                if (!layer || typeof layer.find !== "function") return;
-
-                const priceGroups = layer.find((n) =>
-                    n instanceof Konva.Group &&
-                    n.getAttr &&
-                    n.getAttr("isPriceGroup")
-                );
-
-                priceGroups.forEach((group) => {
-                    try {
-                        if (bindDirectPriceGroupEditor && group.getAttr("directModuleId")) {
-                            bindDirectPriceGroupEditor(group, page);
-                        } else {
-                            realignLegacyPriceGroup(group);
-                        }
-                    } catch (_err) {}
-                });
-
-                layer.batchDraw?.();
-                page.transformerLayer?.batchDraw?.();
-            });
-        } catch (_e) {}
-    };
-    restoreDirectTextStyles();
-    setTimeout(restoreDirectTextStyles, 0);
-    setTimeout(restoreDirectTextStyles, 80);
-    setTimeout(restoreDirectTextStyles, 220);
-    stabilizePriceGroupsAfterLoad();
-    [0, 80, 220, 520, 980].forEach((ms) => setTimeout(stabilizePriceGroupsAfterLoad, ms));
-    try {
-        if (document?.fonts?.ready && typeof document.fonts.ready.then === "function") {
-            document.fonts.ready.then(() => {
-                stabilizePriceGroupsAfterLoad();
-                setTimeout(stabilizePriceGroupsAfterLoad, 120);
-            }).catch(() => {});
+        if (typeof window.applyCatalogStyleVisual === "function") {
+            window.applyCatalogStyleVisual(window.CATALOG_STYLE || "default");
+        } else if (typeof window.applyCatalogStyle === "function") {
+            window.applyCatalogStyle(window.CATALOG_STYLE || "default");
         }
-    } catch (_e) {}
-    try {
-        const fixSelectability = window.CustomStyleDirectHooks && window.CustomStyleDirectHooks.restoreDirectModuleNodeSelectabilityOnPage;
-        if (typeof fixSelectability === "function") {
-            (Array.isArray(window.pages) ? window.pages : []).forEach((p) => {
-                try { fixSelectability(p); } catch (_e) {}
-            });
+
+        runPostLoadRepairsForPages(
+            hydratedPages.length ? hydratedPages : (Array.isArray(window.pages) ? window.pages : []),
+            { schedule: true }
+        );
+
+        if (typeof window.createZoomSlider === "function") {
+            window.createZoomSlider();
+        } else if (typeof createZoomSlider === "function") {
+            createZoomSlider();
         }
-    } catch (_e) {}
 
-    // Przywróć zoom UI po wczytaniu projektu
-    if (typeof window.createZoomSlider === "function") {
-        window.createZoomSlider();
-    } else if (typeof createZoomSlider === "function") {
-        createZoomSlider();
-    }
-
-    if (!opts.silent) showAppToast("Projekt wczytany!", "success");
-    if (!window.projectHistory?.isApplying && typeof window.resetProjectHistory === "function") {
-        window.resetProjectHistory(data);
-    }
+        if (!opts.silent) showAppToast("Projekt wczytany!", "success");
+        if (!window.projectHistory?.isApplying && typeof window.resetProjectHistory === "function") {
+            window.resetProjectHistory(data);
+        }
     } finally {
+        window.__enablePagePerfSleep = perfSleepBeforeLoad;
+        if (typeof window.refreshPagesPerf === "function") {
+            setTimeout(() => window.refreshPagesPerf(), 0);
+            setTimeout(() => window.refreshPagesPerf(), 120);
+        }
         window.__projectLoadInProgress = false;
+            try {
+                const firstStage = window.pages && window.pages[0] && window.pages[0].stage;
+                if (firstStage) {
+                    setTimeout(() => {
+                        try {
+                            window.dispatchEvent(new CustomEvent("canvasModified", { detail: firstStage }));
+                        } catch (_e) {}
+                    }, 0);
+                }
+            } catch (_e) {}
+            if (releaseProjectLoadMutex) releaseProjectLoadMutex();
+            if (window.__projectLoadMutex === loadMutex) window.__projectLoadMutex = null;
     }
 }
 window.loadProjectFromData = loadProjectFromData;
