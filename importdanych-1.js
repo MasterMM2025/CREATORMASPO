@@ -35,8 +35,14 @@ function repopulateFontSelect(selectEl, preferredValue = "Arial") {
 // ===== LAZY LOAD ELEMENTÓW (SIDEBAR) =====
 let elementsAllItems = [];
 let elementsRenderIndex = 0;
-const ELEMENTS_BATCH_SIZE = 8; // ← zmień na 6 jeśli chcesz
+let elementsFilteredItems = [];
+const ELEMENTS_BATCH_SIZE = 24;
 let elementsLoading = false;
+let elementsLazyObserver = null;
+let elementsPendingRows = [];
+let elementsUrlWorkersActive = 0;
+let elementsSearchDebounce = null;
+let elementsScrollRaf = 0;
 
 // === AUTO-CROP — usuwa przezroczyste marginesy z PNG ===
 function autoCropKonvaImage(kImg) {
@@ -114,6 +120,57 @@ const ELEMENTS_URL_CONCURRENCY = 8;
 let addTextMode = false;
 let addImageMode = false;
 let addPSDMode = false;
+
+function normalizeVariantPayloadLocal(value) {
+  if (typeof window.normalizeImageVariantPayload === "function") {
+    return window.normalizeImageVariantPayload(value);
+  }
+  const src = String(value || "").trim();
+  return { original: src, editor: src, thumb: src };
+}
+
+function variantSrcLocal(variants, kind = "editor") {
+  if (typeof window.getImageVariantSource === "function") {
+    return window.getImageVariantSource(variants, kind);
+  }
+  const payload = normalizeVariantPayloadLocal(variants);
+  if (kind === "original") return payload.original || payload.editor || payload.thumb || "";
+  if (kind === "thumb") return payload.thumb || payload.editor || payload.original || "";
+  return payload.editor || payload.original || payload.thumb || "";
+}
+
+async function getImageVariantsFromSourceLocal(src, cacheKeyPrefix = "sidebar-src") {
+  const safeSrc = String(src || "").trim();
+  if (!safeSrc) return normalizeVariantPayloadLocal("");
+  if (typeof window.createImageVariantsFromSource === "function") {
+    try {
+      return await window.createImageVariantsFromSource(safeSrc, {
+        cacheKey: `${cacheKeyPrefix}:${safeSrc}`,
+        thumbMaxEdge: 128,
+        editorMaxEdge: 560
+      });
+    } catch (_e) {}
+  }
+  return normalizeVariantPayloadLocal(safeSrc);
+}
+
+async function getImageVariantsFromFileLocal(file, cacheKeyPrefix = "sidebar-file") {
+  if (typeof window.createImageVariantsFromFile === "function") {
+    try {
+      return await window.createImageVariantsFromFile(file, {
+        cacheKey: `${cacheKeyPrefix}:${file?.name || "file"}:${file?.size || 0}:${file?.lastModified || 0}`,
+        thumbMaxEdge: 128,
+        editorMaxEdge: 560
+      });
+    } catch (_e) {}
+  }
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(normalizeVariantPayloadLocal(String(reader.result || "")));
+    reader.onerror = () => reject(new Error("image_read_error"));
+    reader.readAsDataURL(file);
+  });
+}
 
 
 // ====================== SIDEBAR – PRZYCISKI ======================
@@ -301,50 +358,64 @@ function disableAddImageMode() {
 function openImagePickerAtPosition(page, x, y) {
   const input = document.createElement('input');
   input.type = 'file'; input.accept = 'image/*';
-  input.onchange = e => {
+  input.onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      Konva.Image.fromURL(ev.target.result, img => {
-        img.setAttr("originalSrc", ev.target.result);
+    let variants = null;
+    try {
+      variants = await getImageVariantsFromFileLocal(file, "sidebar-manual");
+    } catch (_e) {
+      return;
+    }
+    const editorSrc = variantSrcLocal(variants, "editor");
+    const originalSrc = variantSrcLocal(variants, "original") || editorSrc;
+    const thumbSrc = variantSrcLocal(variants, "thumb") || editorSrc;
+    if (!editorSrc) return;
 
-  // 🔥 duże zdjęcie, ładne jak w Canva
-const maxSize = 500;  // możesz zmienić na 800 jeśli chcesz
+    Konva.Image.fromURL(editorSrc, img => {
+      if (!img) return;
+      if (typeof window.applyImageVariantsToKonvaNode === "function") {
+        window.applyImageVariantsToKonvaNode(img, {
+          original: originalSrc,
+          editor: editorSrc,
+          thumb: thumbSrc
+        });
+      } else {
+        img.setAttr("originalSrc", originalSrc);
+        img.setAttr("editorSrc", editorSrc);
+        img.setAttr("thumbSrc", thumbSrc);
+      }
 
-const s = Math.min(maxSize / img.width(), maxSize / img.height(), 1);
+      // 🔥 duże zdjęcie, ładne jak w Canva
+      const maxSize = 500;  // możesz zmienić na 800 jeśli chcesz
+
+      const s = Math.min(maxSize / img.width(), maxSize / img.height(), 1);
 
 
-  img.setAttrs({
-    x: x - img.width() * s / 2,
-    y: y - img.height() * s / 2,
-    scaleX: s,
-    scaleY: s,
-    draggable: true,
-    listening: true,
+      img.setAttrs({
+        x: x - img.width() * s / 2,
+        y: y - img.height() * s / 2,
+        scaleX: s,
+        scaleY: s,
+        draggable: true,
+        listening: true,
 
-    // 🔥 ULTRA WAŻNE — pozwala odróżnić od tła/koloru strony
-    isSidebarImage: true,
-    isDesignElement: true,
-    isEditable: true,
-    isSelectable: true,
-    isDraggable: true,
-    isPageBg: false,
-    name: "design-image"
-    
-    
+        // 🔥 ULTRA WAŻNE — pozwala odróżnić od tła/koloru strony
+        isSidebarImage: true,
+        isDesignElement: true,
+        isEditable: true,
+        isSelectable: true,
+        isDraggable: true,
+        isPageBg: false,
+        name: "design-image"
+      });
 
-  });
+      markAsEditable(img);
+      if (img.hitStrokeWidth) img.hitStrokeWidth(20);
 
-  markAsEditable(img);
-  if (img.hitStrokeWidth) img.hitStrokeWidth(20);
-
-  page.layer.add(img);
-  page.layer.batchDraw();
-});
-
-    };
-    reader.readAsDataURL(file);
+      page.layer.add(img);
+      page.layer.batchDraw();
+    });
   };
   input.click();
 }
@@ -776,6 +847,15 @@ document.querySelectorAll('.tabBtn').forEach(btn => {
     loadFirebaseFolder(currentFolder);     // 🔥 wczytaj odpowiedni folder
   });
 });
+const searchElementsInput = document.getElementById('searchElements');
+if (searchElementsInput) {
+  searchElementsInput.addEventListener('input', () => {
+    if (elementsSearchDebounce) clearTimeout(elementsSearchDebounce);
+    elementsSearchDebounce = setTimeout(() => {
+      loadFirebaseFolder(currentFolder);
+    }, 140);
+  });
+}
 
 const toggleBtn = document.createElement('button');
 toggleBtn.id = 'toggleElementsPanel';
@@ -860,8 +940,43 @@ toggleBtn.addEventListener('click', () => {
   }
 });
 
-const { getStorage, ref, listAll, getDownloadURL } = window.firebaseStorageExports || await import("https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js");
-const storage = getStorage(undefined, "gs://pdf-creator-f7a8b.firebasestorage.app");
+let firebaseStorageApi = null;
+let storage = null;
+let firebaseStorageApiPromise = null;
+
+async function ensureFirebaseStorageReady() {
+  if (firebaseStorageApi && storage) return firebaseStorageApi;
+  if (!firebaseStorageApiPromise) {
+    firebaseStorageApiPromise = (async () => {
+      const api = window.firebaseStorageExports || await import("https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js");
+      const getStorageFn = api?.getStorage;
+      const refFn = api?.ref;
+      const listAllFn = api?.listAll;
+      const getDownloadURLFn = api?.getDownloadURL;
+      if (
+        typeof getStorageFn !== "function" ||
+        typeof refFn !== "function" ||
+        typeof listAllFn !== "function" ||
+        typeof getDownloadURLFn !== "function"
+      ) {
+        throw new Error("Brak API Firebase Storage.");
+      }
+      storage = getStorageFn(undefined, "gs://pdf-creator-f7a8b.firebasestorage.app");
+      firebaseStorageApi = {
+        ref: refFn,
+        listAll: listAllFn,
+        getDownloadURL: getDownloadURLFn
+      };
+      return firebaseStorageApi;
+    })();
+  }
+  try {
+    return await firebaseStorageApiPromise;
+  } catch (err) {
+    firebaseStorageApiPromise = null;
+    throw err;
+  }
+}
 
 
 
@@ -891,63 +1006,111 @@ addElementBtn.addEventListener('click', async () => {
 
 async function loadFirebaseFolder(folderPath) {
   const container = document.getElementById('elementsContainer');
+  const searchInput = document.getElementById('searchElements');
+  if (!container) return;
+  let storageApi = null;
+  try {
+    storageApi = await ensureFirebaseStorageReady();
+  } catch (err) {
+    container.innerHTML = '<p style="color:#c62828;font-size:13px;">Nie udało się połączyć z Firebase Storage.</p>';
+    console.error("Firebase Storage init error:", err);
+    return;
+  }
 
-  // ⭐ NOWA SESJA ŁADOWANIA
   const mySession = ++loadSessionId;
+  const renderSkeletons = (count = 12) => {
+    container.innerHTML = "";
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < count; i += 1) {
+      const tile = document.createElement("div");
+      tile.className = "elementTile";
+      const skeleton = document.createElement("div");
+      skeleton.className = "elementSkeleton";
+      tile.appendChild(skeleton);
+      fragment.appendChild(tile);
+    }
+    container.appendChild(fragment);
+  };
 
-  container.innerHTML = "";
-  container.innerHTML = '<p style="color:#777;font-size:14px;">Wczytywanie...</p>';
+  renderSkeletons(12);
 
   let items = ELEMENTS_FOLDER_ITEMS_CACHE.get(folderPath) || null;
   if (!items) {
-    const folderRef = ref(storage, folderPath);
-    const result = await listAll(folderRef);
+    const folderRef = storageApi.ref(storage, folderPath);
+    const result = await storageApi.listAll(folderRef);
     items = Array.isArray(result?.items) ? result.items : [];
     ELEMENTS_FOLDER_ITEMS_CACHE.set(folderPath, items);
   }
 
-// Jeśli w międzyczasie kliknięto inny folder → ANULUJ
-if (mySession !== loadSessionId) return;
+  if (mySession !== loadSessionId) return;
 
-container.innerHTML = "";
+  const query = String(searchInput?.value || "").trim().toLowerCase();
+  elementsAllItems = Array.isArray(items) ? items.slice() : [];
+  elementsFilteredItems = query
+    ? elementsAllItems.filter((item) => String(item?.name || "").toLowerCase().includes(query))
+    : elementsAllItems.slice();
 
-const lazyObserver = new IntersectionObserver(entries => {
-  entries.forEach(entry => {
-    const img = entry.target;
+  elementsRenderIndex = 0;
+  elementsLoading = false;
+  elementsPendingRows = [];
+  elementsUrlWorkersActive = 0;
 
-    // Sesja przerwana? Nie ładuj dalej.
-    if (mySession !== loadSessionId) {
-      lazyObserver.unobserve(img);
-      return;
-    }
-
-    if (entry.isIntersecting) {
+  if (elementsLazyObserver) {
+    try { elementsLazyObserver.disconnect(); } catch (_e) {}
+  }
+  elementsLazyObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      const img = entry.target;
+      if (!img) return;
+      if (mySession !== loadSessionId) {
+        elementsLazyObserver.unobserve(img);
+        return;
+      }
+      if (!entry.isIntersecting) return;
       const src = img.dataset.src || "";
       if (!src) return;
       if (img.dataset.loaded === "1") {
-        lazyObserver.unobserve(img);
+        elementsLazyObserver.unobserve(img);
         return;
       }
       img.dataset.loaded = "1";
       img.src = src;
-      lazyObserver.unobserve(img);
-    }
-  });
-}, { root: elementsPanel, rootMargin: "120px 0px", threshold: 0.01 });
+      elementsLazyObserver.unobserve(img);
+    });
+  }, { root: elementsPanel, rootMargin: "120px 0px", threshold: 0.01 });
+
+  container.innerHTML = "";
 
   const createTile = (item, url) => {
     const tile = document.createElement('div');
     tile.className = 'elementTile';
     tile.title = item?.name || "";
     tile.draggable = true;
+
     const skeleton = document.createElement('div');
     skeleton.className = 'elementSkeleton';
     tile.appendChild(skeleton);
 
     const img = document.createElement('img');
-    if (url) img.dataset.src = url;
-    img.dataset.loaded = "0";
     img.alt = "";
+    img.draggable = false;
+    img.decoding = "async";
+    img.loading = "lazy";
+    if (url) {
+      const fullSrc = String(url || "").trim();
+      img.dataset.fullsrc = fullSrc;
+      let previewSrc = fullSrc;
+      if (typeof window.getImageVariantsFromCache === "function") {
+        const cached = window.getImageVariantsFromCache(fullSrc);
+        const cachedThumb = variantSrcLocal(cached, "thumb");
+        if (cachedThumb) {
+          previewSrc = cachedThumb;
+          img.dataset.thumbready = "1";
+        }
+      }
+      img.dataset.src = previewSrc;
+    }
+    img.dataset.loaded = "0";
     img.style.cssText = `
       display:block;
       opacity:0;
@@ -962,6 +1125,24 @@ const lazyObserver = new IntersectionObserver(entries => {
     img.addEventListener('load', () => {
       skeleton.style.display = 'none';
       img.style.opacity = '1';
+      const fullSrc = String(img.dataset.fullsrc || img.dataset.src || "").trim();
+      if (
+        fullSrc &&
+        img.dataset.thumbready !== "1" &&
+        typeof window.createImageVariantsFromSource === "function"
+      ) {
+        window.createImageVariantsFromSource(fullSrc, {
+          cacheKey: `elements-thumb:${fullSrc}`
+        }).then((variants) => {
+          const thumbSrc = variantSrcLocal(variants, "thumb");
+          if (!thumbSrc || thumbSrc === fullSrc) return;
+          img.dataset.thumbready = "1";
+          img.dataset.src = thumbSrc;
+          if (img.isConnected) {
+            img.src = thumbSrc;
+          }
+        }).catch(() => {});
+      }
     });
     img.addEventListener('error', () => {
       img.dataset.loaded = "0";
@@ -969,10 +1150,9 @@ const lazyObserver = new IntersectionObserver(entries => {
       img.style.opacity = '0';
     });
 
-    img.draggable = false;
     tile.addEventListener('dragstart', e => {
       if (mySession !== loadSessionId) return;
-      const dragUrl = img.dataset.src || "";
+      const dragUrl = img.dataset.fullsrc || img.dataset.src || "";
       if (!dragUrl) {
         e.preventDefault();
         return;
@@ -985,7 +1165,7 @@ const lazyObserver = new IntersectionObserver(entries => {
     });
     tile.addEventListener('click', () => {
       if (mySession !== loadSessionId) return;
-      const selectedUrl = img.dataset.src || "";
+      const selectedUrl = img.dataset.fullsrc || img.dataset.src || "";
       if (!selectedUrl) return;
       document.querySelectorAll('#elementsContainer .elementTile')
         .forEach(i => i.classList.remove('is-selected'));
@@ -995,44 +1175,87 @@ const lazyObserver = new IntersectionObserver(entries => {
     });
 
     tile.appendChild(img);
-    container.appendChild(tile);
-    if (url) lazyObserver.observe(img);
-    return img;
+    if (url) elementsLazyObserver.observe(img);
+    return { tile, img, item, cacheKey: item.fullPath || item.name };
   };
 
-  const tileRows = items.map(item => {
-    const cacheKey = item.fullPath || item.name;
-    const cachedUrl = ELEMENTS_URL_CACHE.get(cacheKey) || "";
-    const img = createTile(item, cachedUrl);
-    return { item, cacheKey, img };
-  });
-
-  if (mySession !== loadSessionId) return;
-
-  const queue = tileRows.filter(row => !row.img.dataset.src);
-  let queueIndex = 0;
-  const workersCount = Math.min(ELEMENTS_URL_CONCURRENCY, queue.length);
-  const workers = Array.from({ length: workersCount }, async () => {
-    while (true) {
-      const idx = queueIndex++;
-      if (idx >= queue.length) return;
-      const row = queue[idx];
-      if (mySession !== loadSessionId) return;
-      try {
-        const url = await getDownloadURL(row.item);
-        if (mySession !== loadSessionId) return;
-        if (!url) continue;
-        ELEMENTS_URL_CACHE.set(row.cacheKey, url);
-        row.img.dataset.src = url;
-        lazyObserver.observe(row.img);
-      } catch (err) {
-        console.warn("⚠️ Nie udało się pobrać miniatury:", row.item?.fullPath || row.item?.name, err);
-      }
+  const pumpUrlWorkers = () => {
+    while (
+      mySession === loadSessionId &&
+      elementsUrlWorkersActive < ELEMENTS_URL_CONCURRENCY &&
+      elementsPendingRows.length
+    ) {
+      elementsUrlWorkersActive += 1;
+      (async () => {
+        while (mySession === loadSessionId && elementsPendingRows.length) {
+          const row = elementsPendingRows.shift();
+          if (!row) continue;
+          if (row.img.dataset.src) {
+            elementsLazyObserver.observe(row.img);
+            continue;
+          }
+          try {
+            const url = await storageApi.getDownloadURL(row.item);
+            if (mySession !== loadSessionId) return;
+            if (!url) continue;
+            ELEMENTS_URL_CACHE.set(row.cacheKey, url);
+            row.img.dataset.fullsrc = url;
+            let previewSrc = url;
+            if (typeof window.getImageVariantsFromCache === "function") {
+              const cached = window.getImageVariantsFromCache(url);
+              const thumbSrc = variantSrcLocal(cached, "thumb");
+              if (thumbSrc) {
+                previewSrc = thumbSrc;
+                row.img.dataset.thumbready = "1";
+              }
+            }
+            row.img.dataset.src = previewSrc;
+            elementsLazyObserver.observe(row.img);
+          } catch (err) {
+            console.warn("⚠️ Nie udało się pobrać miniatury:", row.item?.fullPath || row.item?.name, err);
+          }
+        }
+      })().finally(() => {
+        elementsUrlWorkersActive = Math.max(0, elementsUrlWorkersActive - 1);
+        if (mySession === loadSessionId && elementsPendingRows.length) {
+          pumpUrlWorkers();
+        }
+      });
     }
-  });
-  await Promise.all(workers);
-  if (mySession === loadSessionId && !tileRows.length) {
-    container.innerHTML = '<p style="color:#777;font-size:14px;">Brak elementów w tym folderze.</p>';
+  };
+
+  const renderNextBatch = () => {
+    if (mySession !== loadSessionId || elementsLoading) return;
+    if (elementsRenderIndex >= elementsFilteredItems.length) return;
+    elementsLoading = true;
+    const batch = elementsFilteredItems.slice(elementsRenderIndex, elementsRenderIndex + ELEMENTS_BATCH_SIZE);
+    elementsRenderIndex += batch.length;
+
+    const fragment = document.createDocumentFragment();
+    const rowsMissingUrl = [];
+    batch.forEach((item) => {
+      const cacheKey = item.fullPath || item.name;
+      const cachedUrl = ELEMENTS_URL_CACHE.get(cacheKey) || "";
+      const row = createTile(item, cachedUrl);
+      fragment.appendChild(row.tile);
+      if (!cachedUrl) rowsMissingUrl.push(row);
+    });
+    container.appendChild(fragment);
+    if (rowsMissingUrl.length) {
+      elementsPendingRows.push(...rowsMissingUrl);
+      pumpUrlWorkers();
+    }
+    elementsLoading = false;
+  };
+
+  window.renderNextElementsBatch = renderNextBatch;
+  renderNextBatch();
+  renderNextBatch();
+
+  if (!elementsFilteredItems.length) {
+    container.innerHTML = query
+      ? '<p style="color:#777;font-size:14px;">Brak wyników wyszukiwania.</p>'
+      : '<p style="color:#777;font-size:14px;">Brak elementów w tym folderze.</p>';
   }
   return;
 
@@ -1045,48 +1268,64 @@ function enablePageClickForImage(url) {
   pages.forEach(page => {
     const c = page.stage.container();
 
-    const handler = e => {
+    const handler = async (e) => {
       const pos = page.stage.getPointerPosition();
       if (!pos) return;
+      const variants = await getImageVariantsFromSourceLocal(url, "sidebar-firebase");
+      const editorSrc = variantSrcLocal(variants, "editor");
+      const originalSrc = variantSrcLocal(variants, "original") || editorSrc;
+      const thumbSrc = variantSrcLocal(variants, "thumb") || editorSrc;
+      if (!editorSrc) return;
 
-      Konva.Image.fromURL(url, kImg => {
-        kImg.setAttr("originalSrc", url);
+      Konva.Image.fromURL(editorSrc, kImg => {
+        if (!kImg) return;
+        if (typeof window.applyImageVariantsToKonvaNode === "function") {
+          window.applyImageVariantsToKonvaNode(kImg, {
+            original: originalSrc,
+            editor: editorSrc,
+            thumb: thumbSrc
+          });
+        } else {
+          kImg.setAttr("originalSrc", originalSrc);
+          kImg.setAttr("editorSrc", editorSrc);
+          kImg.setAttr("thumbSrc", thumbSrc);
+        }
 
-  // 🔥 USTAWIAMY ROZMIAR TYLKO DLA OBRAZÓW Z FIREBASE
-const maxSize = 250; // możesz zmienić np. 200–300 px
+        // 🔥 USTAWIAMY ROZMIAR TYLKO DLA OBRAZÓW Z FIREBASE
+        const maxSize = 250; // możesz zmienić np. 200–300 px
 
-const scale = Math.min(
-  maxSize / kImg.width(),
-  maxSize / kImg.height(),
-  1
-);
-
-
-  kImg.setAttrs({
-    x: pos.x - (kImg.width() * scale) / 2,
-    y: pos.y - (kImg.height() * scale) / 2,
-    scaleX: scale,
-    scaleY: scale,
-  });
-
-  kImg.setAttrs({
-    isDesignElement: true,
-    isEditable: true,
-    isSelectable: true,
-    isDraggable: true,
-    isPageBg: false,   // 🔥 KLUCZOWE
-    name: "design-image"
-});
-
-markAsEditable(kImg);
-kImg.hitStrokeWidth(20);
+        const scale = Math.min(
+          maxSize / kImg.width(),
+          maxSize / kImg.height(),
+          1
+        );
 
 
-  page.layer.add(kImg);
-  kImg.zIndex(10);
+        kImg.setAttrs({
+          x: pos.x - (kImg.width() * scale) / 2,
+          y: pos.y - (kImg.height() * scale) / 2,
+          scaleX: scale,
+          scaleY: scale,
+        });
 
-  page.layer.batchDraw();
-});
+        kImg.setAttrs({
+          isDesignElement: true,
+          isEditable: true,
+          isSelectable: true,
+          isDraggable: true,
+          isPageBg: false,   // 🔥 KLUCZOWE
+          name: "design-image"
+        });
+
+        markAsEditable(kImg);
+        kImg.hitStrokeWidth(20);
+
+
+        page.layer.add(kImg);
+        kImg.zIndex(10);
+
+        page.layer.batchDraw();
+      });
 
 
 
@@ -1109,68 +1348,91 @@ kImg.hitStrokeWidth(20);
 // przeciąganie musi być dozwolone globalnie
 document.addEventListener("dragover", e => e.preventDefault());
 
-document.addEventListener("drop", e => {
+document.addEventListener("drop", async (e) => {
     e.preventDefault();
 
     const url = e.dataTransfer.getData("image-url");
     if (!url) return;
 
     // Sprawdź, na którą stronę upuszczono
-    pages.forEach(page => {
+    for (const page of pages) {
         const container = page.stage.container();
         const rect = container.getBoundingClientRect();
 
         if (
-            e.clientX >= rect.left &&
-            e.clientX <= rect.right &&
-            e.clientY >= rect.top &&
-            e.clientY <= rect.bottom
+            e.clientX < rect.left ||
+            e.clientX > rect.right ||
+            e.clientY < rect.top ||
+            e.clientY > rect.bottom
         ) {
-            // Upuszczono NA TĘ STRONĘ
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-
-            Konva.Image.fromURL(url, kImg => {
-              kImg.setAttr("originalSrc", url);
-
-                const maxWidth = 300;
-                const scale = Math.min(maxWidth / kImg.width(), 1);
-
-                kImg.setAttrs({
-    x: x - (kImg.width() * scale) / 2,
-    y: y - (kImg.height() * scale) / 2,
-    scaleX: scale,
-    scaleY: scale,
-});
-
-kImg.setAttrs({
-    isDesignElement: true,
-    isEditable: true,
-    isSelectable: true,
-    isDraggable: true,
-    name: "design-image"
-});
-markAsEditable(kImg);
-kImg.hitStrokeWidth(20);
-
-
-
-                page.layer.add(kImg);
-                page.layer.batchDraw();
-            });
+            continue;
         }
-    });
+
+        // Upuszczono NA TĘ STRONĘ
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        const variants = await getImageVariantsFromSourceLocal(url, "sidebar-firebase-drop");
+        const editorSrc = variantSrcLocal(variants, "editor");
+        const originalSrc = variantSrcLocal(variants, "original") || editorSrc;
+        const thumbSrc = variantSrcLocal(variants, "thumb") || editorSrc;
+        if (!editorSrc) return;
+
+        Konva.Image.fromURL(editorSrc, kImg => {
+            if (!kImg) return;
+            if (typeof window.applyImageVariantsToKonvaNode === "function") {
+              window.applyImageVariantsToKonvaNode(kImg, {
+                original: originalSrc,
+                editor: editorSrc,
+                thumb: thumbSrc
+              });
+            } else {
+              kImg.setAttr("originalSrc", originalSrc);
+              kImg.setAttr("editorSrc", editorSrc);
+              kImg.setAttr("thumbSrc", thumbSrc);
+            }
+
+            const maxWidth = 300;
+            const scale = Math.min(maxWidth / kImg.width(), 1);
+
+            kImg.setAttrs({
+              x: x - (kImg.width() * scale) / 2,
+              y: y - (kImg.height() * scale) / 2,
+              scaleX: scale,
+              scaleY: scale,
+            });
+
+            kImg.setAttrs({
+              isDesignElement: true,
+              isEditable: true,
+              isSelectable: true,
+              isDraggable: true,
+              name: "design-image"
+            });
+            markAsEditable(kImg);
+            kImg.hitStrokeWidth(20);
+
+            page.layer.add(kImg);
+            page.layer.batchDraw();
+        });
+
+        break;
+    }
 });
 elementsPanel.addEventListener('scroll', () => {
-  const nearBottom =
-    elementsPanel.scrollTop + elementsPanel.clientHeight >=
-    elementsPanel.scrollHeight - 120;
+  if (elementsScrollRaf) return;
+  elementsScrollRaf = requestAnimationFrame(() => {
+    elementsScrollRaf = 0;
+    const nearBottom =
+      elementsPanel.scrollTop + elementsPanel.clientHeight >=
+      elementsPanel.scrollHeight - 120;
 
-  if (nearBottom && typeof window.renderNextElementsBatch === "function") {
-    window.renderNextElementsBatch();
-  } else if (nearBottom && typeof renderNextElementsBatch === "function") {
-    renderNextElementsBatch();
-  }
-});
+    if (nearBottom && typeof window.renderNextElementsBatch === "function") {
+      window.renderNextElementsBatch();
+    } else if (nearBottom && typeof renderNextElementsBatch === "function") {
+      renderNextElementsBatch();
+    }
+  });
+}, { passive: true });
 
 console.log("importdanych-1.js – GOTOWY! Ikony jak w Canva, zero błędów, pięknie!");
