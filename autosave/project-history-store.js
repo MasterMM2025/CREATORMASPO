@@ -3,6 +3,7 @@
   const DB_NAME = 'wf_project_autosave_db';
   const DB_VERSION = 1;
   const STORE_NAME = 'snapshots';
+  const HASH_LONG_STRING_LIMIT = 1400;
 
   function hashString(input) {
     let h = 2166136261;
@@ -13,12 +14,21 @@
     return (h >>> 0).toString(16);
   }
 
-  function safeStringify(value) {
+  function safeStringify(value, replacer) {
     try {
-      return JSON.stringify(value);
+      return JSON.stringify(value, replacer);
     } catch (_e) {
       return null;
     }
+  }
+
+  function hashStringReplacer(_key, val) {
+    if (typeof val !== 'string') return val;
+    const raw = String(val || '');
+    if (raw.length <= HASH_LONG_STRING_LIMIT) return raw;
+    const head = raw.slice(0, 96);
+    const tail = raw.slice(-48);
+    return `__WF_LONG_STR__:${raw.length}:${head}:${tail}`;
   }
 
   function normalizeKey(key) {
@@ -27,7 +37,7 @@
   }
 
   function computeStateHash(state) {
-    const raw = safeStringify(state);
+    const raw = safeStringify(state, hashStringReplacer);
     if (!raw) return null;
     return `${hashString(raw)}:${raw.length}`;
   }
