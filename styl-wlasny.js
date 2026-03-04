@@ -80,6 +80,7 @@
   let directModuleStabilityWorkInProgress = false;
   let pendingPreviewExportLayouts = null;
   let isCustomPlacementActive = false;
+  let cancelPendingCustomPlacement = null;
   let customPriceCircleColor = "#d71920";
   let customPriceBadgeStyleId = "solid";
   let customModuleLayoutStyleId = "default";
@@ -111,7 +112,10 @@
   let customPriceTextBold = true;
   let customPriceTextUnderline = false;
   let customPriceTextAlign = "left";
+  let customStyleClipboardSettings = null;
+  let customStyleClipboardLabel = "";
   let customDraftModules = [];
+  const customImportedProductsById = new Map();
   let customDraftModuleSeq = 0;
   let customFontReadyListenerBound = false;
   let familyBaseProduct = null;
@@ -511,6 +515,38 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     });
   }
 
+  async function resolveCustomImageVariants(input, cachePrefix = "styl-wlasny") {
+    const source = String(input || "").trim();
+    if (!source) return { original: "", editor: "", thumb: "" };
+    if (typeof window.createImageVariantsFromSource === "function") {
+      try {
+        return await window.createImageVariantsFromSource(source, {
+          cacheKey: `${cachePrefix}:${source}`,
+          thumbMaxEdge: 128,
+          editorMaxEdge: 560
+        });
+      } catch (_err) {}
+    }
+    if (typeof window.normalizeImageVariantPayload === "function") {
+      return window.normalizeImageVariantPayload(source);
+    }
+    return { original: source, editor: source, thumb: source };
+  }
+
+  function customVariantSrc(variants, kind = "editor") {
+    if (typeof window.getImageVariantSource === "function") {
+      return window.getImageVariantSource(variants, kind);
+    }
+    const safe = (typeof window.normalizeImageVariantPayload === "function")
+      ? window.normalizeImageVariantPayload(variants)
+      : (variants && typeof variants === "object"
+        ? variants
+        : { original: String(variants || ""), editor: String(variants || ""), thumb: String(variants || "") });
+    if (kind === "original") return String(safe.original || safe.editor || safe.thumb || "").trim();
+    if (kind === "thumb") return String(safe.thumb || safe.editor || safe.original || "").trim();
+    return String(safe.editor || safe.original || safe.thumb || "").trim();
+  }
+
   function ensureCustomAddLoadingOverlay() {
     let styleEl = document.getElementById("customAddLoadingStyle");
     if (!styleEl) {
@@ -713,8 +749,24 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return plain || raw.replace(/\s+/g, "");
   }
 
-  function readFileAsDataUrl(file) {
-    return new Promise((resolve, reject) => {
+  async function readFileAsDataUrl(file) {
+    if (typeof window.createImageVariantsFromFile === "function") {
+      try {
+        const variants = await window.createImageVariantsFromFile(file, {
+          cacheKey: `styl-wlasny-file:${file?.name || "file"}:${file?.size || 0}:${file?.lastModified || 0}`,
+          thumbMaxEdge: 128,
+          editorMaxEdge: 560
+        });
+        if (typeof window.getImageVariantSource === "function") {
+          const original = window.getImageVariantSource(variants, "original");
+          if (original) return String(original);
+        }
+        if (variants && typeof variants === "object" && variants.original) {
+          return String(variants.original);
+        }
+      } catch (_err) {}
+    }
+    return await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result || ""));
       reader.onerror = () => reject(new Error("Nie udało się odczytać pliku zdjęcia."));
@@ -881,6 +933,22 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return fallback;
   }
 
+  function normalizeImageUrlValue(value) {
+    const raw = value == null ? "" : String(value);
+    const trimmed = raw.trim();
+    if (!trimmed) return "";
+    const lowered = trimmed.toLowerCase();
+    if (
+      lowered === "null" ||
+      lowered === "undefined" ||
+      lowered === "nan" ||
+      lowered === "[object object]"
+    ) {
+      return "";
+    }
+    return trimmed;
+  }
+
   function boolAttrToFlag(value) {
     return value === true || value === "true" || value === 1 || value === "1";
   }
@@ -915,6 +983,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   }
 
   function resetCustomStyleEditorSessionState() {
+    if (typeof cancelPendingCustomPlacement === "function") {
+      try { cancelPendingCustomPlacement(); } catch (_err) {}
+      cancelPendingCustomPlacement = null;
+    }
     resetCustomStyleEditorParamsToDefaults();
 
     familyBaseProduct = null;
@@ -950,6 +1022,18 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     syncCustomStyleControlsFromState();
     updateFamilyUiStatus("Kliknij przycisk, aby ustawić produkt bazowy rodziny.", "info");
     renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+  }
+
+  function pruneImportedProductsCacheByDrafts() {
+    if (!(customImportedProductsById instanceof Map) || !customImportedProductsById.size) return;
+    const keep = new Set(
+      (Array.isArray(customDraftModules) ? customDraftModules : [])
+        .map((draft) => String(draft?.productId || ""))
+        .filter(Boolean)
+    );
+    Array.from(customImportedProductsById.keys()).forEach((id) => {
+      if (!keep.has(String(id))) customImportedProductsById.delete(String(id));
+    });
   }
 
   function syncCustomStyleControlsFromState() {
@@ -1062,6 +1146,39 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     } catch (_err) {}
   }
 
+  function getReliableWrappedLineCount(node) {
+    if (!node || !window.Konva || !(node instanceof window.Konva.Text)) return 1;
+    const fallback = Math.max(
+      1,
+      Number(node.textArr?.length) || String(node.text?.() || "").split("\n").length
+    );
+    try {
+      const probe = new window.Konva.Text({
+        text: String(node.text?.() || ""),
+        fontFamily: String(node.fontFamily?.() || "Arial"),
+        fontSize: Number(node.fontSize?.() || 12),
+        fontStyle: String(node.fontStyle?.() || ""),
+        textDecoration: String(node.textDecoration?.() || ""),
+        lineHeight: Number(node.lineHeight?.() || 1.2),
+        letterSpacing: Number(node.letterSpacing?.() || 0),
+        wrap: String(node.wrap?.() || "word"),
+        align: String(node.align?.() || "left"),
+        width: Math.max(1, Number(node.width?.() || 1)),
+        height: 100000,
+        padding: Number(node.padding?.() || 0),
+        stroke: String(node.stroke?.() || ""),
+        strokeWidth: Number(node.strokeWidth?.() || 0),
+        listening: false
+      });
+      probe.getClientRect?.();
+      const lines = Array.isArray(probe.textArr) ? probe.textArr.length : fallback;
+      probe.destroy?.();
+      return Math.max(1, Number(lines) || fallback);
+    } catch (_err) {
+      return fallback;
+    }
+  }
+
   function tightenDirectTextSelectionBox(node) {
     if (!node || !window.Konva || !(node instanceof window.Konva.Text)) return;
     if (!node.getAttr) return;
@@ -1072,14 +1189,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const fontSize = Number(node.fontSize?.() || 12);
       const lineHeightMult = Number(node.lineHeight?.() || 1);
       const textHeight = Number(node.textHeight || Math.round(fontSize * lineHeightMult));
-      const lines = Math.max(
-        1,
-        Number(node.textArr?.length) || String(node.text?.() || "").split("\n").length
-      );
+      const lines = getReliableWrappedLineCount(node);
       const padding = node.getAttr("isName") ? 4 : 3;
       const minH = Math.max(fontSize + 2, 10);
       const tightH = Math.max(minH, Math.ceil(lines * textHeight + padding));
-      if (typeof node.height === "function") node.height(tightH);
+      if (typeof node.height === "function") {
+        const currentH = Math.max(0, Number(node.height?.() || 0));
+        node.height(Math.max(currentH, tightH));
+      }
     } catch (_err) {}
   }
 
@@ -1165,7 +1282,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       // do następnego kliknięcia (dotyczy głównie modułów styl-wlasny/direct).
       try {
         layer.find?.(".selectionOutline")?.forEach?.((n) => n.destroy?.());
-        (Array.isArray(page.selectedNodes) ? page.selectedNodes : []).forEach((node) => {
+        const selectedNodes = Array.isArray(page.selectedNodes) ? page.selectedNodes : [];
+        const nodesToOutline = selectedNodes.length > 12 ? selectedNodes.slice(0, 12) : selectedNodes;
+        nodesToOutline.forEach((node) => {
           if (!node || (typeof node.isDestroyed === "function" && node.isDestroyed())) return;
           let box = null;
           try { box = node.getClientRect?.({ relativeTo: layer }); } catch (_e) { box = null; }
@@ -1320,6 +1439,371 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return true;
   }
 
+  function resolveDirectModuleRootFromNode(node) {
+    if (!node || !window.Konva) return null;
+    let cursor = node;
+    while (cursor) {
+      if (cursor.getAttr && cursor.getAttr("isDirectCustomModuleGroup")) return cursor;
+      cursor = cursor.getParent ? cursor.getParent() : null;
+    }
+    const sourceId = String(node.getAttr?.("directModuleId") || "").trim();
+    if (!sourceId) return null;
+    const layer = node.getLayer ? node.getLayer() : null;
+    if (!layer || typeof layer.findOne !== "function") return null;
+    return layer.findOne((n) =>
+      n instanceof window.Konva.Group &&
+      n.getAttr &&
+      n.getAttr("isDirectCustomModuleGroup") &&
+      String(n.getAttr("directModuleId") || "").trim() === sourceId
+    ) || null;
+  }
+
+  function getDirectModuleStyleNodeKey(node) {
+    if (!node || !node.getAttr) return "";
+    const imageIndexRaw = Number(node.getAttr("familyImageIndex"));
+    const imageIndex = Number.isFinite(imageIndexRaw) ? imageIndexRaw : 0;
+    if (node.getAttr("isProductImage")) return `image-${imageIndex}`;
+    if (node.getAttr("isName")) return "name";
+    if (node.getAttr("isIndex")) return "index";
+    if (node.getAttr("isCustomPackageInfo")) return "package";
+    if (node.getAttr("isCountryBadge")) return "flag";
+    if (node.getAttr("isBarcode")) return "barcode";
+    if (node.getAttr("isLayoutDivider")) return "divider";
+    if (node.getAttr("isDirectPriceCircleBg")) return "price-bg-image";
+    if (node.getAttr("isDirectPriceRectBg")) return "price-bg-rect";
+    if (node.getAttr("isPriceGroup")) return "price-group";
+    return "";
+  }
+
+  function getDirectModulePricePartKey(node) {
+    if (!node || !node.getAttr) return "";
+    const part = String(node.getAttr("pricePart") || "").trim();
+    if (!part) return "";
+    if (part === "main" || part === "dec" || part === "unit") return `price-part-${part}`;
+    return "";
+  }
+
+  function collectDirectModuleTopNodesWithKeys(root) {
+    if (!root || typeof root.getChildren !== "function") return [];
+    const out = [];
+    root.getChildren().forEach((n) => {
+      const key = getDirectModuleStyleNodeKey(n);
+      if (!key) return;
+      out.push({ key, node: n });
+    });
+    return out;
+  }
+
+  function computeDirectModuleAnchorFromNodes(nodesWithKeys) {
+    let minX = Infinity;
+    let minY = Infinity;
+    (Array.isArray(nodesWithKeys) ? nodesWithKeys : []).forEach((entry) => {
+      const n = entry?.node;
+      const x = Number(n?.x?.());
+      const y = Number(n?.y?.());
+      if (Number.isFinite(x)) minX = Math.min(minX, x);
+      if (Number.isFinite(y)) minY = Math.min(minY, y);
+    });
+    return {
+      x: Number.isFinite(minX) ? minX : 0,
+      y: Number.isFinite(minY) ? minY : 0
+    };
+  }
+
+  function rebalanceDirectModuleMetaTextFlow(root) {
+    if (!root || !window.Konva) return;
+    const map = new Map();
+    collectDirectModuleTopNodesWithKeys(root).forEach(({ key, node }) => map.set(String(key), node));
+    const nameNode = map.get("name");
+    const indexNode = map.get("index");
+    const packageNode = map.get("package");
+    const gap = 3;
+    const getBottom = (node) => {
+      if (!node) return 0;
+      const y = Number(node.y?.() || 0);
+      const h = Number(node.height?.() || 0);
+      return y + Math.max(0, h);
+    };
+
+    [nameNode, indexNode, packageNode].forEach((node) => {
+      if (!node || !(node instanceof window.Konva.Text)) return;
+      tightenDirectTextSelectionBox(node);
+      applySmallTextEasyHitArea(node);
+    });
+
+    if (nameNode && indexNode) {
+      const minIndexY = getBottom(nameNode) + gap;
+      const currentIndexY = Number(indexNode.y?.() || 0);
+      if (Number.isFinite(minIndexY) && currentIndexY < minIndexY && typeof indexNode.y === "function") {
+        indexNode.y(minIndexY);
+      }
+    }
+
+    if (indexNode && packageNode) {
+      const minPackageY = getBottom(indexNode) + gap;
+      const currentPackageY = Number(packageNode.y?.() || 0);
+      if (Number.isFinite(minPackageY) && currentPackageY < minPackageY && typeof packageNode.y === "function") {
+        packageNode.y(minPackageY);
+      }
+    }
+  }
+
+  function captureNodeVisualStyleSnapshot(node) {
+    if (!node || !window.Konva) return null;
+    const out = {
+      type: "node",
+      x: Number(node.x?.()),
+      y: Number(node.y?.()),
+      scaleX: Number(node.scaleX?.()),
+      scaleY: Number(node.scaleY?.()),
+      rotation: Number(node.rotation?.()),
+      opacity: Number(node.opacity?.())
+    };
+
+    if (node instanceof window.Konva.Text) {
+      out.type = "text";
+      out.width = Number(node.width?.());
+      out.height = Number(node.height?.());
+      out.fontFamily = String(node.fontFamily?.() || "");
+      out.fontSize = Number(node.fontSize?.());
+      out.fontStyle = String(node.fontStyle?.() || "");
+      out.textDecoration = String(node.textDecoration?.() || "");
+      out.fill = String(node.fill?.() || "");
+      out.align = String(node.align?.() || "");
+      out.lineHeight = Number(node.lineHeight?.());
+      out.letterSpacing = Number(node.letterSpacing?.());
+      out.stroke = String(node.stroke?.() || "");
+      out.strokeWidth = Number(node.strokeWidth?.());
+      return out;
+    }
+
+    if (node instanceof window.Konva.Image) {
+      out.type = "image";
+      out.width = Number(node.width?.());
+      out.height = Number(node.height?.());
+      return out;
+    }
+
+    if (node instanceof window.Konva.Rect) {
+      out.type = "rect";
+      out.width = Number(node.width?.());
+      out.height = Number(node.height?.());
+      out.fill = String(node.fill?.() || "");
+      out.stroke = String(node.stroke?.() || "");
+      out.strokeWidth = Number(node.strokeWidth?.());
+      const corner = node.cornerRadius?.();
+      out.cornerRadius = Array.isArray(corner) ? corner.slice() : Number(corner);
+      return out;
+    }
+
+    if (node instanceof window.Konva.Group) {
+      out.type = "group";
+      return out;
+    }
+
+    return out;
+  }
+
+  function applyNodeVisualStyleSnapshot(node, snap, options = {}) {
+    if (!node || !snap || typeof snap !== "object") return;
+    const applyPosition = !!options.applyPosition;
+    const applyScale = !!options.applyScale;
+    const applyRotation = !!options.applyRotation;
+    const applyOpacity = Object.prototype.hasOwnProperty.call(options, "applyOpacity")
+      ? !!options.applyOpacity
+      : true;
+    const applyTextWidth = Object.prototype.hasOwnProperty.call(options, "applyTextWidth")
+      ? !!options.applyTextWidth
+      : true;
+    const applyTextHeight = Object.prototype.hasOwnProperty.call(options, "applyTextHeight")
+      ? !!options.applyTextHeight
+      : true;
+    const setNum = (fnName, value) => {
+      if (!Number.isFinite(Number(value))) return;
+      const fn = node[fnName];
+      if (typeof fn === "function") fn.call(node, Number(value));
+    };
+    const setPositiveSize = (fnName, value, min = 1) => {
+      const num = Number(value);
+      if (!Number.isFinite(num) || num < min) return;
+      const fn = node[fnName];
+      if (typeof fn === "function") fn.call(node, num);
+    };
+    const setStr = (fnName, value) => {
+      if (value == null) return;
+      const fn = node[fnName];
+      if (typeof fn === "function") fn.call(node, String(value));
+    };
+
+    if (applyPosition) {
+      setNum("x", snap.x);
+      setNum("y", snap.y);
+    }
+    if (applyScale) {
+      setNum("scaleX", snap.scaleX);
+      setNum("scaleY", snap.scaleY);
+    }
+    if (applyRotation) setNum("rotation", snap.rotation);
+    if (applyOpacity) setNum("opacity", snap.opacity);
+
+    if (snap.type === "text") {
+      if (applyTextWidth) setPositiveSize("width", snap.width, 4);
+      if (applyTextHeight) setPositiveSize("height", snap.height, 4);
+      setStr("fontFamily", snap.fontFamily);
+      setNum("fontSize", snap.fontSize);
+      setStr("fontStyle", snap.fontStyle);
+      setStr("textDecoration", snap.textDecoration);
+      setStr("fill", snap.fill);
+      setStr("align", snap.align);
+      setNum("lineHeight", snap.lineHeight);
+      setNum("letterSpacing", snap.letterSpacing);
+      setStr("stroke", snap.stroke);
+      setNum("strokeWidth", snap.strokeWidth);
+      return;
+    }
+
+    if (snap.type === "image") {
+      setPositiveSize("width", snap.width, 8);
+      setPositiveSize("height", snap.height, 8);
+      return;
+    }
+
+    if (snap.type === "rect") {
+      setPositiveSize("width", snap.width, 4);
+      setPositiveSize("height", snap.height, 4);
+      setStr("fill", snap.fill);
+      setStr("stroke", snap.stroke);
+      setNum("strokeWidth", snap.strokeWidth);
+      if (snap.cornerRadius !== undefined) {
+        const cornerFn = node.cornerRadius;
+        if (typeof cornerFn === "function") cornerFn.call(node, snap.cornerRadius);
+      }
+    }
+  }
+
+  let directModuleVisualStyleClipboard = null;
+
+  function copyDirectModuleVisualStyleFromNode(node) {
+    const root = resolveDirectModuleRootFromNode(node);
+    if (!root || !window.Konva) return { ok: false, reason: "no_module" };
+    try { bakeGroupTransformToChildren(root, { includeTranslation: false }); } catch (_err) {}
+    const directId = String(root.getAttr?.("directModuleId") || "").trim();
+    if (!directId) return { ok: false, reason: "no_module_id" };
+
+    const topNodes = collectDirectModuleTopNodesWithKeys(root);
+    const anchor = computeDirectModuleAnchorFromNodes(topNodes);
+    const snap = {
+      version: 1,
+      sourceDirectModuleId: directId,
+      anchorX: Number(anchor.x || 0),
+      anchorY: Number(anchor.y || 0),
+      nodes: {}
+    };
+
+    topNodes.forEach(({ key, node: n }) => {
+      const nSnap = captureNodeVisualStyleSnapshot(n);
+      if (!nSnap) return;
+      const nx = Number(n.x?.());
+      const ny = Number(n.y?.());
+      if (Number.isFinite(nx)) nSnap.relX = nx - snap.anchorX;
+      if (Number.isFinite(ny)) nSnap.relY = ny - snap.anchorY;
+      snap.nodes[key] = nSnap;
+
+      if (n.getAttr?.("isPriceGroup") && n.getChildren) {
+        n.getChildren().forEach((child) => {
+          const partKey = getDirectModulePricePartKey(child);
+          if (!partKey) return;
+          const pSnap = captureNodeVisualStyleSnapshot(child);
+          if (!pSnap) return;
+          snap.nodes[partKey] = pSnap;
+        });
+      }
+    });
+
+    directModuleVisualStyleClipboard = snap;
+    return { ok: true };
+  }
+
+  function pasteDirectModuleVisualStyleToNode(node) {
+    const snap = directModuleVisualStyleClipboard;
+    if (!snap || typeof snap !== "object") return { ok: false, reason: "clipboard_empty" };
+    const root = resolveDirectModuleRootFromNode(node);
+    if (!root || !window.Konva) return { ok: false, reason: "no_target_module" };
+    try { bakeGroupTransformToChildren(root, { includeTranslation: false }); } catch (_err) {}
+
+    const nodeMap = new Map();
+    let targetPriceGroup = null;
+    const targetTopNodes = collectDirectModuleTopNodesWithKeys(root);
+    const targetAnchor = computeDirectModuleAnchorFromNodes(targetTopNodes);
+    targetTopNodes.forEach(({ key, node: n }) => {
+      nodeMap.set(key, n);
+      if (n.getAttr?.("isPriceGroup")) targetPriceGroup = n;
+    });
+    if (targetPriceGroup && targetPriceGroup.getChildren) {
+      targetPriceGroup.getChildren().forEach((child) => {
+        const partKey = getDirectModulePricePartKey(child);
+        if (partKey) nodeMap.set(partKey, child);
+      });
+    }
+
+    Object.entries(snap.nodes || {}).forEach(([key, nodeSnap]) => {
+      const targetNode = nodeMap.get(String(key));
+      if (!targetNode) return;
+      const isPricePart = String(key || "").startsWith("price-part-");
+      const isMetaTextNode =
+        targetNode instanceof window.Konva.Text &&
+        !!(
+          targetNode.getAttr?.("isName") ||
+          targetNode.getAttr?.("isIndex") ||
+          targetNode.getAttr?.("isCustomPackageInfo")
+        );
+      const applyTopPosition = !isPricePart &&
+        Number.isFinite(Number(nodeSnap?.relX)) &&
+        Number.isFinite(Number(nodeSnap?.relY));
+      const normalizedSnap = applyTopPosition
+        ? {
+            ...nodeSnap,
+            x: targetAnchor.x + Number(nodeSnap.relX),
+            y: targetAnchor.y + Number(nodeSnap.relY)
+          }
+        : nodeSnap;
+      applyNodeVisualStyleSnapshot(targetNode, normalizedSnap, {
+        applyPosition: isPricePart || applyTopPosition,
+        applyScale: false,
+        applyRotation: false,
+        applyOpacity: false,
+        applyTextWidth: true,
+        applyTextHeight: !isMetaTextNode
+      });
+    });
+
+    rebalanceDirectModuleMetaTextFlow(root);
+
+    const stage = root.getStage ? root.getStage() : null;
+    const page = (Array.isArray(window.pages) ? window.pages : []).find((p) => p && p.stage === stage) || null;
+    if (targetPriceGroup && page) {
+      try { bindDirectPriceGroupEditor(targetPriceGroup, page); } catch (_err) {}
+    }
+    const priceRectBg = nodeMap.get("price-bg-rect");
+    if (priceRectBg && page) {
+      try { bindDirectPriceRectEditor(priceRectBg, page); } catch (_err) {}
+    }
+
+    const layer = root.getLayer ? root.getLayer() : null;
+    layer?.batchDraw?.();
+    page?.transformerLayer?.batchDraw?.();
+    window.dispatchEvent(new CustomEvent("canvasModified", { detail: stage }));
+    return { ok: true };
+  }
+
+  window.copyDirectModuleVisualStyleFromNode = function copyDirectModuleVisualStyleFromNodePublic(node) {
+    return copyDirectModuleVisualStyleFromNode(node);
+  };
+
+  window.pasteDirectModuleVisualStyleToNode = function pasteDirectModuleVisualStyleToNodePublic(node) {
+    return pasteDirectModuleVisualStyleToNode(node);
+  };
+
   function patchPageUngroupForDirectModules(page) {
     if (!page || typeof page.ungroupSelectedNodes !== "function") return;
     if (page._customDirectUngroupPatched) return;
@@ -1347,18 +1831,34 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   function ensureDirectModuleUngroupProtectionInstalled() {
     if (directModuleUngroupProtectionInstalled) return;
     directModuleUngroupProtectionInstalled = true;
-    window.addEventListener("canvasModified", () => {
+    const pageHasDirectModules = (page) => {
+      if (!page || !page.layer || typeof page.layer.findOne !== "function") return false;
+      return !!page.layer.findOne((n) =>
+        n &&
+        n.getAttr &&
+        (
+          n.getAttr("directModuleId") ||
+          n.getAttr("isDirectCustomModuleGroup")
+        )
+      );
+    };
+    window.addEventListener("canvasModified", (evt) => {
+      if (window.__projectLoadInProgress) return;
       if (directModuleStabilityWorkInProgress) return;
       directModuleStabilityWorkInProgress = true;
       try {
         const pages = Array.isArray(window.pages) ? window.pages : [];
-        pages.forEach((p) => {
+        const stage = evt && evt.detail ? evt.detail : null;
+        const targetPage = stage ? pages.find((p) => p && p.stage === stage) : null;
+        const pagesToProcess = targetPage ? [targetPage] : pages;
+        pagesToProcess.forEach((p) => {
+          if (!pageHasDirectModules(p)) return;
           patchPageUngroupForDirectModules(p);
           normalizeDirectModuleGroupTransformsOnPage(p);
           restoreDirectModuleNodeSelectabilityOnPage(p);
         });
       } finally {
-        setTimeout(() => { directModuleStabilityWorkInProgress = false; }, 0);
+        requestAnimationFrame(() => { directModuleStabilityWorkInProgress = false; });
       }
     });
   }
@@ -1379,7 +1879,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (window.__stylWlasnyHelper1Loaded || document.getElementById("stylWlasnyHelper1Script")) return;
     const s = document.createElement("script");
     s.id = "stylWlasnyHelper1Script";
-    s.src = "styl-wlasny-1.js";
+    s.src = "styl-wlasny-1.js?v=20260302-draft-style-sync1";
     s.async = true;
     s.onload = () => { window.__stylWlasnyHelper1Loaded = true; };
     s.onerror = () => {};
@@ -1566,23 +2066,47 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   }
 
   async function createKonvaImageNodeFromUrl(url) {
-    const src = String(url || "").trim();
-    if (!src) return null;
-    const img = await loadKonvaImageFromUrl(src, 3000);
-    if (img && img.setAttr) img.setAttr("originalSrc", src);
+    const source = String(url || "").trim();
+    if (!source) return null;
+    const variants = await resolveCustomImageVariants(source, "styl-wlasny-node");
+    const editorSrc = customVariantSrc(variants, "editor") || source;
+    const originalSrc = customVariantSrc(variants, "original") || source;
+    const thumbSrc = customVariantSrc(variants, "thumb") || editorSrc;
+    const img = await loadKonvaImageFromUrl(editorSrc, 3000);
+    if (img && img.setAttr) {
+      if (typeof window.applyImageVariantsToKonvaNode === "function") {
+        window.applyImageVariantsToKonvaNode(img, {
+          original: originalSrc,
+          editor: editorSrc,
+          thumb: thumbSrc
+        });
+      } else {
+        img.setAttr("originalSrc", originalSrc);
+        img.setAttr("editorSrc", editorSrc);
+        img.setAttr("thumbSrc", thumbSrc);
+      }
+    }
     return img || null;
   }
 
-  function layoutImageNodeContain(node, frameX, frameY, frameW, frameH) {
+  function layoutImageNodeContain(node, frameX, frameY, frameW, frameH, options = {}) {
     if (!node) return;
     const rawW = Number(node.width?.()) || 1;
     const rawH = Number(node.height?.()) || 1;
     const scale = Math.min(frameW / rawW, frameH / rawH);
     const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+    const alignX = String(options?.alignX || "center").toLowerCase();
+    const alignY = String(options?.alignY || "center").toLowerCase();
+    const drawnW = rawW * safeScale;
+    const drawnH = rawH * safeScale;
+    const freeX = frameW - drawnW;
+    const freeY = frameH - drawnH;
+    const offsetX = alignX === "right" ? freeX : (alignX === "left" ? 0 : (freeX / 2));
+    const offsetY = alignY === "bottom" ? freeY : (alignY === "top" ? 0 : (freeY / 2));
     node.scaleX(safeScale);
     node.scaleY(safeScale);
-    node.x(frameX + (frameW - rawW * safeScale) / 2);
-    node.y(frameY + (frameH - rawH * safeScale) / 2);
+    node.x(frameX + offsetX);
+    node.y(frameY + offsetY);
   }
 
   function scaleNodeAroundCenter(node, factor) {
@@ -1783,10 +2307,12 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const baseX = Number(priceGroup.getAttr?.("priceTextOffsetX"));
       const baseY = Number(priceGroup.getAttr?.("priceTextOffsetY"));
       let safeBaseX = Number.isFinite(baseX) ? baseX : (main.x?.() || 0);
-      const safeBaseY = Number.isFinite(baseY) ? baseY : (main.y?.() || 0);
+      let safeBaseY = Number.isFinite(baseY) ? baseY : (main.y?.() || 0);
       const alignMode = normalizeAlignOption(priceGroup.getAttr?.("priceTextAlign") || "left", "left");
+      const vAlignMode = String(priceGroup.getAttr?.("priceTextVAlign") || "top").toLowerCase();
       const circleSize = Number(priceGroup.getAttr?.("priceCircleSize"));
       const circleLocalX = Number(priceGroup.getAttr?.("priceCircleLocalX"));
+      const circleLocalY = Number(priceGroup.getAttr?.("priceCircleLocalY"));
       const isDirectSingle = !!priceGroup.getAttr?.("isDirectSinglePriceLayout");
       const isImageBadge = !!priceGroup.getAttr?.("isImagePriceBadge");
       const noPriceCircleDirect = !!priceGroup.getAttr?.("noPriceCircleDirect");
@@ -1825,14 +2351,25 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         else if (alignMode === "right") safeBaseX = circleLocalX + circleSize - clusterWidth - innerPad;
         else safeBaseX = circleLocalX + innerPad;
       }
+      const decYOffsetFactor = noPriceCircleDirect ? 0.00 : (isRoundedRect ? 0.04 : 0.10);
+      const unitYOffsetFactor = isDirectSingle ? (noPriceCircleDirect ? 1.02 : (isRoundedRect ? 1.02 : 1.35)) : 1.5;
+      const mainH = Number(main.height?.() || 0);
+      const decH = Number(dec.height?.() || 0);
+      const unitH = Number(unit.height?.() || 0);
+      const decTop = mainH * decYOffsetFactor;
+      const unitTop = decH * unitYOffsetFactor;
+      const clusterHeight = Math.max(mainH, decTop + decH, unitTop + unitH);
+      if (vAlignMode === "center" && Number.isFinite(circleSize) && Number.isFinite(circleLocalY)) {
+        safeBaseY = circleLocalY + Math.max(0, (circleSize - clusterHeight) / 2);
+      }
       if ((isDirectSingle || isImageBadge) && alignMode !== "right" && !noPriceCircleDirect && !noOpticalShift) safeBaseX += opticalShiftX;
       main.x(safeBaseX);
       main.y(safeBaseY + opticalShiftY);
       dec.x(safeBaseX + (main.width?.() || 0) + gap);
-      dec.y((safeBaseY + opticalShiftY) + (main.height?.() || 0) * (noPriceCircleDirect ? 0.00 : (isRoundedRect ? 0.04 : 0.10)));
+      dec.y((safeBaseY + opticalShiftY) + (main.height?.() || 0) * decYOffsetFactor);
       const noCircleGap = noPriceCircleDirect ? 6 : (isRoundedRect ? 6 : 2);
       unit.x(safeBaseX + (main.width?.() || 0) + (isDirectSingle ? noCircleGap : gap));
-      unit.y((safeBaseY + opticalShiftY) + (dec.height?.() || 0) * (isDirectSingle ? (noPriceCircleDirect ? 1.02 : (isRoundedRect ? 1.02 : 1.35)) : 1.5));
+      unit.y((safeBaseY + opticalShiftY) + (dec.height?.() || 0) * unitYOffsetFactor);
       if (typeof unit.width === "function" && typeof unit.measureSize === "function") {
         const measured = unit.measureSize(unit.text?.() || "");
         const targetW = Math.max(
@@ -1986,7 +2523,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         // Tylko finalny moduł: w Styl numer 2 (2 produkty) dosuwamy zdjęcia bliżej bloku tekstu/ceny.
         frame.x += imgArea.w * 0.08;
       }
-      layoutImageNodeContain(kImg, frame.x, frame.y, frame.w, frame.h);
+      const shouldAlignImageRightToDivider =
+        useSingleLikeDirectLayout &&
+        selectedLayoutStyleId === "styl-numer-1";
+      layoutImageNodeContain(
+        kImg,
+        frame.x,
+        frame.y,
+        frame.w,
+        frame.h,
+        shouldAlignImageRightToDivider ? { alignX: "right", alignY: "center" } : undefined
+      );
       kImg.draggable(true);
       kImg.listening(true);
       kImg.setAttrs({
@@ -2104,7 +2651,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const priceScale = Number.isFinite(Number(catalogEntry?.PRICE_TEXT_SCALE))
       ? Number(catalogEntry.PRICE_TEXT_SCALE)
       : 1;
-    const effectivePriceScaleDirect = priceScale * (useCustomSinglePalette ? Math.max(1, Number(singleSpec.text.priceScaleMultiplier || 1)) : 1);
+    const priceBadgeStyleId = String(catalogEntry?.PRICE_BG_STYLE_ID || customPriceBadgeStyleId || "solid");
+    const isNativeFamilyDefaultPrice =
+      !isSingleDirectLayout &&
+      selectedLayoutStyleId === "default" &&
+      priceBadgeStyleId === "solid";
+    const effectivePriceScaleDirect = priceScale
+      * (useCustomSinglePalette ? Math.max(1, Number(singleSpec.text.priceScaleMultiplier || 1)) : 1)
+      * (isNativeFamilyDefaultPrice ? 1.12 : 1);
     const priceColor = String(useCustomSinglePalette
       ? (noPriceCircleDirect
           ? (singleSpec.text.priceColor || catalogEntry?.PRICE_TEXT_COLOR || customPriceTextColor || "#d71920")
@@ -2113,7 +2667,6 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const priceTextOffsetX = noPriceCircleDirect ? 0 : (isRoundedRectPriceDirect ? Math.round(priceArea.w * 0.06) : Math.round(priceArea.s * (useSingleLikeDirectLayout ? 0.16 : 0.22)));
     const priceTextOffsetY = noPriceCircleDirect ? 0 : (isRoundedRectPriceDirect ? Math.round(priceArea.h * 0.10) : Math.round(priceArea.s * (useSingleLikeDirectLayout ? 0.235 : 0.26)));
 
-    const priceBadgeStyleId = String(catalogEntry?.PRICE_BG_STYLE_ID || customPriceBadgeStyleId || "solid");
     if (!noPriceCircleDirect && !isRoundedRectPriceDirect) {
       const priceCircleUrl = String(catalogEntry?.PRICE_BG_IMAGE_URL || "").trim() || getSelectedPriceBadgeBackgroundUrl();
       const priceBg = await createKonvaImageNodeFromUrl(priceCircleUrl);
@@ -2157,11 +2710,13 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (isRoundedRectPriceDirect) priceGroup.setAttr("priceShapeRoundedRect", true);
     if (hasImagePriceBadge) priceGroup.setAttr("isImagePriceBadge", true);
     priceGroup.setAttr("priceBadgeStyleId", priceBadgeStyleId);
-    priceGroup.setAttr("priceTextAlign", priceTextAlign);
+    priceGroup.setAttr("priceTextAlign", isNativeFamilyDefaultPrice ? "center" : priceTextAlign);
+    if (isNativeFamilyDefaultPrice) priceGroup.setAttr("priceTextVAlign", "center");
     priceGroup.setAttr("priceTextOffsetX", 0);
     priceGroup.setAttr("priceTextOffsetY", 0);
     priceGroup.setAttr("priceCircleSize", isRoundedRectPriceDirect ? priceArea.w : priceArea.s);
     priceGroup.setAttr("priceCircleLocalX", -priceTextOffsetX);
+    priceGroup.setAttr("priceCircleLocalY", -priceTextOffsetY);
     if (isRoundedRectPriceDirect) priceGroup.setAttr("priceNoOpticalShift", true);
     if (isRoundedRectPriceDirect) {
       priceGroup.setAttr("priceBgOffsetX", -priceTextOffsetX);
@@ -2219,13 +2774,13 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const isSingleCirclePriceDirect = useSingleLikeDirectLayout && !noPriceCircleDirect && !isRoundedRectPriceDirect;
     const unitFactor = noPriceCircleDirect
       ? 0.20
-      : (isRoundedRectPriceDirect ? 0.26 : (isSingleCirclePriceDirect ? 0.095 : 0.10));
+      : (isRoundedRectPriceDirect ? 0.26 : (isSingleCirclePriceDirect ? 0.095 : (isNativeFamilyDefaultPrice ? 0.115 : 0.10)));
     const decFactor = noPriceCircleDirect
       ? 0
-      : (isRoundedRectPriceDirect ? 0.26 : (isSingleCirclePriceDirect ? 0.14 : 0.12));
+      : (isRoundedRectPriceDirect ? 0.26 : (isSingleCirclePriceDirect ? 0.14 : (isNativeFamilyDefaultPrice ? 0.135 : 0.12)));
     const mainFactor = noPriceCircleDirect
       ? 0.52
-      : (isRoundedRectPriceDirect ? 0.80 : (isSingleCirclePriceDirect ? 0.475 : 0.34));
+      : (isRoundedRectPriceDirect ? 0.80 : (isSingleCirclePriceDirect ? 0.475 : (isNativeFamilyDefaultPrice ? 0.40 : 0.34)));
     const unitSize = Math.max(7, Math.round(priceBaseSize * unitFactor * effectivePriceScaleDirect));
     const decSize = noPriceCircleDirect
       ? unitSize
@@ -2510,7 +3065,11 @@ const CUSTOM_PRODUCT_LAYOUTS = {
                   ${MODULE_LAYOUT_STYLE_OPTIONS.map((opt) => `<option value="${escapeHtml(opt.id)}">${escapeHtml(opt.label)}</option>`).join("")}
                 </select>
               </label>
-              <button id="customApplyStyleToImportedBtn" type="button" style="border:1px solid #0b8f84;background:#fff;color:#0b8f84;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Zastosuj do zaimportowanych</button>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <button id="customCopyStyleBtn" type="button" style="border:1px solid #334155;background:#fff;color:#0f172a;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Kopiuj styl</button>
+                <button id="customPasteStyleBtn" type="button" style="border:1px solid #7c3aed;background:#f5f3ff;color:#6d28d9;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Wklej styl</button>
+                <button id="customApplyStyleToImportedBtn" type="button" style="border:1px solid #0b8f84;background:#fff;color:#0b8f84;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Zastosuj do zaimportowanych</button>
+              </div>
             </div>
             <div id="customPreviewCard" style="position:relative;width:100%;aspect-ratio:1.38/1;background:#ffffff;border:1px solid #dbe4ef;border-radius:12px;overflow:hidden;">
               <div id="customPreviewImagesTrack" style="position:absolute;left:0%;top:4%;width:48%;height:83%;overflow:hidden;">
@@ -2686,6 +3245,13 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const img = new Image();
       img.onload = () => {
         cacheImageMeta(url, img.naturalWidth || img.width, img.naturalHeight || img.height);
+        if (typeof window.createImageVariantsFromSource === "function") {
+          window.createImageVariantsFromSource(url, {
+            cacheKey: `styl-wlasny-prewarm:${url}`,
+            thumbMaxEdge: 128,
+            editorMaxEdge: 560
+          }).catch(() => {});
+        }
         onReady(url);
       };
       img.onerror = tryNext;
@@ -2699,7 +3265,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   }
 
   function getEffectivePreviewImageUrl() {
-    return familyBaseProduct ? familyBaseImageUrl : currentPreviewImageUrl;
+    return normalizeImageUrlValue(familyBaseProduct ? familyBaseImageUrl : currentPreviewImageUrl);
   }
 
   function resolveProductImageUrl(product, onReady) {
@@ -2708,11 +3274,27 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       return;
     }
     if (customImageOverrides.has(product.id)) {
-      onReady(customImageOverrides.get(product.id) || null);
+      const overrideSrc = customImageOverrides.get(product.id) || null;
+      if (overrideSrc && typeof window.createImageVariantsFromSource === "function") {
+        window.createImageVariantsFromSource(String(overrideSrc), {
+          cacheKey: `styl-wlasny-override:${product.id}`,
+          thumbMaxEdge: 128,
+          editorMaxEdge: 560
+        }).catch(() => {});
+      }
+      onReady(overrideSrc);
       return;
     }
     if (customResolvedImageUrls.has(product.id)) {
-      onReady(customResolvedImageUrls.get(product.id) || null);
+      const resolvedSrc = customResolvedImageUrls.get(product.id) || null;
+      if (resolvedSrc && typeof window.createImageVariantsFromSource === "function") {
+        window.createImageVariantsFromSource(String(resolvedSrc), {
+          cacheKey: `styl-wlasny-resolved:${product.id}`,
+          thumbMaxEdge: 128,
+          editorMaxEdge: 560
+        }).catch(() => {});
+      }
+      onReady(resolvedSrc);
       return;
     }
     loadImageWithFallback(product.index, (url) => {
@@ -2721,10 +3303,35 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     });
   }
 
+  function bindPreviewImageLoadFallback(imgEl, product) {
+    if (!(imgEl instanceof HTMLImageElement)) return;
+    const previewProduct = product || null;
+    imgEl.onerror = () => {
+      const failedSrc = normalizeImageUrlValue(imgEl.getAttribute("src"));
+      imgEl.onerror = null;
+      imgEl.removeAttribute("src");
+
+      const productId = String(previewProduct?.id || "").trim();
+      if (productId) {
+        const cachedResolved = normalizeImageUrlValue(customResolvedImageUrls.get(productId));
+        if (cachedResolved && cachedResolved === failedSrc) {
+          customResolvedImageUrls.delete(productId);
+        }
+      }
+
+      if (!previewProduct) return;
+      resolveProductImageUrl(previewProduct, (nextUrl) => {
+        const safeNextUrl = normalizeImageUrlValue(nextUrl);
+        currentPreviewImageUrl = safeNextUrl || null;
+        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+      });
+    };
+  }
+
   function renderProductImagePreview(product) {
     const box = document.getElementById("customStyleImageBox");
     if (!box) return;
-    const overrideUrl = product?.id ? customImageOverrides.get(product.id) : null;
+    const overrideUrl = normalizeImageUrlValue(product?.id ? customImageOverrides.get(product.id) : null);
     if (overrideUrl) {
       box.innerHTML = `<img src="${overrideUrl}" alt="Zdjęcie produktu (własne)" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:7px;transition:transform .16s ease;transform-origin:center center;cursor:zoom-in;position:relative;z-index:1;">`;
       const imgEl = box.querySelector("img");
@@ -2744,7 +3351,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       return;
     }
 
-    const resolvedUrl = product?.id ? customResolvedImageUrls.get(product.id) : null;
+    const resolvedUrl = normalizeImageUrlValue(product?.id ? customResolvedImageUrls.get(product.id) : null);
     if (resolvedUrl) {
       box.innerHTML = `<img src="${resolvedUrl}" alt="Zdjęcie produktu" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:7px;transition:transform .16s ease;transform-origin:center center;cursor:zoom-in;position:relative;z-index:1;">`;
       const imgEl = box.querySelector("img");
@@ -2799,7 +3406,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       }
       current.style.color = "#0f172a";
       if (product?.id) customResolvedImageUrls.set(product.id, url);
-      currentPreviewImageUrl = url;
+      currentPreviewImageUrl = normalizeImageUrlValue(url) || null;
       renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
     });
   }
@@ -2818,17 +3425,24 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (!entries.length) {
       track.innerHTML = `<img id="customPreviewImage" alt="Podgląd produktu" style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform:scale(1.08);transform-origin:left top;">`;
       const imgEl = document.getElementById("customPreviewImage");
-      const effectiveUrl = getEffectivePreviewImageUrl();
+      const effectiveUrl = normalizeImageUrlValue(getEffectivePreviewImageUrl());
       if (imgEl) {
         if (effectiveUrl) imgEl.src = effectiveUrl;
         else imgEl.removeAttribute("src");
+        bindPreviewImageLoadFallback(imgEl, base);
       }
       return;
     }
 
     if (entries.length === 1) {
-      const escaped = escapeHtml(entries[0].url || getEffectivePreviewImageUrl() || "");
-      track.innerHTML = `<img src="${escaped}" alt="Zdjęcie produktu 1" style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform:scale(1.08);transform-origin:left top;">`;
+      const firstUrl = normalizeImageUrlValue(entries[0]?.url || getEffectivePreviewImageUrl() || "");
+      track.innerHTML = `<img alt="Zdjęcie produktu 1" style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform:scale(1.08);transform-origin:left top;">`;
+      const imgEl = track.querySelector("img");
+      if (imgEl) {
+        if (firstUrl) imgEl.src = firstUrl;
+        else imgEl.removeAttribute("src");
+        bindPreviewImageLoadFallback(imgEl, entries[0]?.product || base);
+      }
       return;
     }
 
@@ -2847,7 +3461,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     track.innerHTML = visible
       .map((entry, idx) => {
-        const escaped = escapeHtml(entry.url || "");
+        const normalizedUrl = normalizeImageUrlValue(entry?.url || "");
+        const escaped = escapeHtml(normalizedUrl);
         const alt = `Zdjęcie produktu ${idx + 1}`;
         const pos = layout[idx] || layout[layout.length - 1] || { x: 0, y: 0, w: 0.76, h: 1 };
         // Tylko preview: cofamy minimalnie rodzinę w Styl numer 2,
@@ -2859,9 +3474,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           ? `transform:scale(${family2Scale.toFixed(3)});transform-origin:center ${idx === 0 ? "bottom" : "top"};`
           : "transform:none;transform-origin:left top;";
         const objPos = isFamily2 ? `object-position:center ${idx === 0 ? "bottom" : "top"};` : "object-position:left top;";
-        return `<img src="${escaped}" alt="${alt}" style="position:absolute;left:${(previewX * 100).toFixed(3)}%;top:${(pos.y * 100).toFixed(3)}%;width:${(pos.w * 100).toFixed(3)}%;height:${(pos.h * 100).toFixed(3)}%;object-fit:contain;${objPos}${transform}border-radius:4px;">`;
+        const srcAttr = escaped ? `src="${escaped}"` : "";
+        return `<img ${srcAttr} alt="${alt}" style="position:absolute;left:${(previewX * 100).toFixed(3)}%;top:${(pos.y * 100).toFixed(3)}%;width:${(pos.w * 100).toFixed(3)}%;height:${(pos.h * 100).toFixed(3)}%;object-fit:contain;${objPos}${transform}border-radius:4px;">`;
       })
       .join("");
+    track.querySelectorAll("img").forEach((imgEl, idx) => {
+      if (!(imgEl instanceof HTMLImageElement)) return;
+      bindPreviewImageLoadFallback(imgEl, visible[idx]?.product || null);
+    });
   }
 
   function updateFamilyIndexPreviewText() {
@@ -2988,10 +3608,11 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       track.querySelectorAll("img").forEach((img) => {
         if (!(img instanceof HTMLImageElement)) return;
         if (isSingleDirectMode) {
+          const shouldAlignImageRightToDivider = String(styleIdOverride || customModuleLayoutStyleId || "default") === "styl-numer-1";
           img.style.transform = "none";
           img.style.transformOrigin = "center center";
           img.style.objectFit = "contain";
-          img.style.objectPosition = "center center";
+          img.style.objectPosition = shouldAlignImageRightToDivider ? "right center" : "center center";
         } else if (!img.style.transform) {
           img.style.transform = "scale(1.08)";
           img.style.transformOrigin = "left top";
@@ -3162,7 +3783,13 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       ? Math.max(1, Number(singleSpec.text.priceScaleMultiplier || 1))
       : 1;
     const priceUnderline = boolAttrToFlag(product?.PRICE_TEXT_UNDERLINE ?? customPriceTextUnderline);
-    const priceAlign = normalizeAlignOption(product?.PRICE_TEXT_ALIGN || customPriceTextAlign, "left");
+    const rawPriceAlign = normalizeAlignOption(product?.PRICE_TEXT_ALIGN || customPriceTextAlign, "left");
+    const isNativeFamilyDefaultPreview =
+      hasFamilyPreview &&
+      !isSingleDirectPreview &&
+      selectedLayoutStyleId === "default" &&
+      String(product?.PRICE_BG_STYLE_ID || customPriceBadgeStyleId || "solid") === "solid";
+    const priceAlign = isNativeFamilyDefaultPreview ? "center" : rawPriceAlign;
 
     const nameColor = useCustomSingleTextPalette ? (singleSpec.text.nameColor || "#111111") : metaColor;
     const indexColor = useCustomSingleTextPalette ? (singleSpec.text.indexColor || "#b9b9b9") : metaColor;
@@ -3244,7 +3871,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
             priceRowEl.style.transform = isGranatBadgePreview ? "translate(22px, 3px)" : (isTnzBadgePreview ? "translate(12px, 3px)" : "translate(7px, 2px)");
           }
         } else {
-          priceRowEl.style.transform = "none";
+          priceRowEl.style.transform = isNativeFamilyDefaultPreview ? "translateY(5px)" : "none";
         }
       }
     }
@@ -3300,11 +3927,11 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const previewPriceBase = isRoundedRectPricePreview
         ? Math.max(34, parseInt(priceCircle.style.height || "34", 10))
         : base;
-      const previewUnitPx = Math.max(7, Math.round(previewPriceBase * (noPriceCirclePreview ? 0.22 : (isRoundedRectPricePreview ? 0.26 : (isSingleDirectPreview ? 0.095 : 0.11))) * scale));
+      const previewUnitPx = Math.max(7, Math.round(previewPriceBase * (noPriceCirclePreview ? 0.22 : (isRoundedRectPricePreview ? 0.26 : (isSingleDirectPreview ? 0.095 : (isNativeFamilyDefaultPreview ? 0.115 : 0.11)))) * scale));
       const previewDecPx = noPriceCirclePreview
         ? previewUnitPx
-        : Math.max(8, Math.round(previewPriceBase * (isRoundedRectPricePreview ? 0.26 : 0.14) * scale));
-      const previewMainPx = Math.max(12, Math.round(previewPriceBase * (noPriceCirclePreview ? 0.56 : (isRoundedRectPricePreview ? 0.80 : (isSingleDirectPreview ? 0.475 : 0.38))) * scale));
+        : Math.max(8, Math.round(previewPriceBase * (isRoundedRectPricePreview ? 0.26 : (isNativeFamilyDefaultPreview ? 0.155 : 0.14)) * scale));
+      const previewMainPx = Math.max(12, Math.round(previewPriceBase * (noPriceCirclePreview ? 0.56 : (isRoundedRectPricePreview ? 0.80 : (isSingleDirectPreview ? 0.475 : (isNativeFamilyDefaultPreview ? 0.43 : 0.38)))) * scale));
       mainEl.style.fontSize = `${previewMainPx}px`;
       decEl.style.fontSize = `${previewDecPx}px`;
       unitEl.style.fontSize = `${previewUnitPx}px`;
@@ -3410,6 +4037,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   }
 
   function addCurrentProductToCatalog() {
+    if (typeof cancelPendingCustomPlacement === "function") {
+      try { cancelPendingCustomPlacement(); } catch (_err) {}
+      cancelPendingCustomPlacement = null;
+    }
     if (window.__projectLoadInProgress) {
       if (typeof window.showAppToast === "function") {
         window.showAppToast("Poczekaj chwilę, projekt nadal się wczytuje.", "info");
@@ -3454,12 +4085,16 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       document.removeEventListener("keydown", onEsc, true);
       window.__customPlacementActive = false;
       isCustomPlacementActive = false;
+      cancelPendingCustomPlacement = null;
       if (!window.__customPlacementActive) {
         // Snapshot jest ważny tylko dla najbliższego wstawienia.
         setTimeout(() => {
           pendingPreviewExportLayouts = null;
         }, 120000);
       }
+    };
+    cancelPendingCustomPlacement = () => {
+      detachPlacement();
     };
 
     const onEsc = (e) => {
@@ -4622,7 +5257,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         page.slotObjects[slotIndex] = null;
         finalize();
       } else if (effectiveImageUrl && window.Konva && typeof window.Konva.Image.fromURL === "function") {
-        const img = await loadKonvaImageFromUrl(effectiveImageUrl, 2600);
+        const img = await createKonvaImageNodeFromUrl(effectiveImageUrl);
         page.slotObjects[slotIndex] = img || null;
         finalize();
       } else {
@@ -4683,6 +5318,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const openDraftTrayBtn = document.getElementById("customOpenDraftTrayBtn");
     const clearEditorBtn = document.getElementById("customClearEditorBtn");
     const moduleLayoutSelect = document.getElementById("customModuleLayoutSelect");
+    const copyStyleBtn = document.getElementById("customCopyStyleBtn");
+    const pasteStyleBtn = document.getElementById("customPasteStyleBtn");
     const applyStyleToImportedBtn = document.getElementById("customApplyStyleToImportedBtn");
     const showFlagToggle = document.getElementById("customShowFlagToggle");
     const showBarcodeToggle = document.getElementById("customShowBarcodeToggle");
@@ -4723,7 +5360,90 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (!search || !select || !info) return;
     if (addBtn) addBtn.onclick = () => addCurrentProductToCatalog();
     const productsById = new Map((Array.isArray(products) ? products : []).map((p) => [String(p.id), p]));
+    if (customImportedProductsById instanceof Map && customImportedProductsById.size) {
+      customImportedProductsById.forEach((p, id) => {
+        if (!p || !id) return;
+        productsById.set(String(id), p);
+      });
+    }
     const draftBridgeListeners = new Set();
+    let activeDraftEditId = "";
+
+    const getCurrentEditorSettingsSnapshot = () => ({
+      customModuleLayoutStyleId,
+      customPriceCircleColor,
+      customPriceBadgeStyleId,
+      customPriceTextColor,
+      customCurrencySymbol,
+      customPriceTextScale,
+      customMetaFontFamily,
+      customMetaTextColor,
+      customMetaTextBold,
+      customMetaTextUnderline,
+      customMetaTextAlign,
+      customPriceFontFamily,
+      customPriceTextBold,
+      customPriceTextUnderline,
+      customPriceTextAlign,
+      customFamilySpacingTightness,
+      showFlag: !!customPreviewVisibility.showFlag,
+      showBarcode: !!customPreviewVisibility.showBarcode
+    });
+
+    const normalizeEditorSettingsSnapshot = (source, fallback) => {
+      const base = (fallback && typeof fallback === "object")
+        ? fallback
+        : getCurrentEditorSettingsSnapshot();
+      const s = (source && typeof source === "object") ? source : {};
+      return {
+        customModuleLayoutStyleId: String(s.customModuleLayoutStyleId || base.customModuleLayoutStyleId || "default"),
+        customPriceCircleColor: String(s.customPriceCircleColor || base.customPriceCircleColor || "#d71920"),
+        customPriceBadgeStyleId: String(s.customPriceBadgeStyleId || base.customPriceBadgeStyleId || "solid"),
+        customPriceTextColor: String(s.customPriceTextColor || base.customPriceTextColor || "#ffffff"),
+        customCurrencySymbol: String(s.customCurrencySymbol || base.customCurrencySymbol || "£") === "€" ? "€" : "£",
+        customPriceTextScale: Number.isFinite(Number(s.customPriceTextScale))
+          ? Number(s.customPriceTextScale)
+          : (Number.isFinite(Number(base.customPriceTextScale)) ? Number(base.customPriceTextScale) : 1),
+        customMetaFontFamily: normalizeFontOption(s.customMetaFontFamily || base.customMetaFontFamily, "Arial"),
+        customMetaTextColor: String(s.customMetaTextColor || base.customMetaTextColor || "#1f3560"),
+        customMetaTextBold: (s.customMetaTextBold !== undefined) ? !!s.customMetaTextBold : !!base.customMetaTextBold,
+        customMetaTextUnderline: (s.customMetaTextUnderline !== undefined) ? !!s.customMetaTextUnderline : !!base.customMetaTextUnderline,
+        customMetaTextAlign: normalizeAlignOption(s.customMetaTextAlign || base.customMetaTextAlign, "left"),
+        customPriceFontFamily: normalizeFontOption(s.customPriceFontFamily || base.customPriceFontFamily, "Arial"),
+        customPriceTextBold: (s.customPriceTextBold !== undefined) ? !!s.customPriceTextBold : !!base.customPriceTextBold,
+        customPriceTextUnderline: (s.customPriceTextUnderline !== undefined) ? !!s.customPriceTextUnderline : !!base.customPriceTextUnderline,
+        customPriceTextAlign: normalizeAlignOption(s.customPriceTextAlign || base.customPriceTextAlign, "left"),
+        customFamilySpacingTightness: normalizeFamilySpacingTightness(
+          s.customFamilySpacingTightness,
+          base.customFamilySpacingTightness
+        ),
+        showFlag: (s.showFlag !== undefined) ? !!s.showFlag : !!base.showFlag,
+        showBarcode: (s.showBarcode !== undefined) ? !!s.showBarcode : !!base.showBarcode
+      };
+    };
+
+    const applyEditorSettingsSnapshot = (source) => {
+      const next = normalizeEditorSettingsSnapshot(source, getCurrentEditorSettingsSnapshot());
+      customPriceCircleColor = next.customPriceCircleColor;
+      customModuleLayoutStyleId = next.customModuleLayoutStyleId;
+      customPriceBadgeStyleId = next.customPriceBadgeStyleId;
+      customPriceTextColor = next.customPriceTextColor;
+      customCurrencySymbol = next.customCurrencySymbol;
+      customPriceTextScale = next.customPriceTextScale;
+      customMetaFontFamily = next.customMetaFontFamily;
+      customMetaTextColor = next.customMetaTextColor;
+      customMetaTextBold = next.customMetaTextBold;
+      customMetaTextUnderline = next.customMetaTextUnderline;
+      customMetaTextAlign = next.customMetaTextAlign;
+      customPriceFontFamily = next.customPriceFontFamily;
+      customPriceTextBold = next.customPriceTextBold;
+      customPriceTextUnderline = next.customPriceTextUnderline;
+      customPriceTextAlign = next.customPriceTextAlign;
+      customFamilySpacingTightness = next.customFamilySpacingTightness;
+      customPreviewVisibility.showFlag = next.showFlag;
+      customPreviewVisibility.showBarcode = next.showBarcode;
+      applyAllControlValuesFromState();
+    };
 
     const getCurrentEditorSnapshot = () => {
       const previewProduct = getEffectivePreviewProduct() || currentPreviewProduct;
@@ -4748,7 +5468,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         productId: String(previewProduct.id || ""),
         productIndex: String(previewProduct.index || ""),
         productName: String(getDisplayName(previewProduct) || ""),
-        previewImageUrl: String(previewUrl || ""),
+        previewImageUrl: normalizeImageUrlValue(previewUrl || ""),
         familyBaseProductId: String(familyBaseProduct?.id || ""),
         familyBaseImageUrl: String(familyBaseImageUrl || ""),
         familyProducts: family.map((item) => ({
@@ -4756,26 +5476,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           url: String(item?.url || "")
         })),
         nameOverrides,
-        settings: {
-          customModuleLayoutStyleId,
-          customPriceCircleColor,
-          customPriceBadgeStyleId,
-          customPriceTextColor,
-          customCurrencySymbol,
-          customPriceTextScale,
-          customMetaFontFamily,
-          customMetaTextColor,
-          customMetaTextBold,
-          customMetaTextUnderline,
-          customMetaTextAlign,
-          customPriceFontFamily,
-          customPriceTextBold,
-          customPriceTextUnderline,
-          customPriceTextAlign,
-          customFamilySpacingTightness,
-          showFlag: !!customPreviewVisibility.showFlag,
-          showBarcode: !!customPreviewVisibility.showBarcode
-        }
+        settings: getCurrentEditorSettingsSnapshot()
       };
     };
 
@@ -4887,6 +5588,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         importSeq += 1;
         const variant = buildImportedProductVariant(base, row, importSeq);
         productsById.set(String(variant.id), variant);
+        customImportedProductsById.set(String(variant.id), variant);
         matched.push({
           row,
           product: variant
@@ -4916,15 +5618,74 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const createdDrafts = [];
       const totalUnits = Math.max(1, matched.length);
       let processedUnits = 0;
+      let lastProgressTs = 0;
+      let lastProgressLabel = "";
       const tickProgress = (label) => {
         processedUnits += 1;
         const ratio = Math.max(0, Math.min(1, processedUnits / totalUnits));
         const percent = 26 + (ratio * 66);
-        showCustomImportProgress(label || "Importowanie produktów...", percent);
+        const now = Date.now();
+        const nextLabel = label || "Importowanie produktów...";
+        const shouldPaint = (
+          processedUnits >= totalUnits ||
+          nextLabel !== lastProgressLabel ||
+          (now - lastProgressTs) >= 45
+        );
+        if (!shouldPaint) return;
+        lastProgressTs = now;
+        lastProgressLabel = nextLabel;
+        showCustomImportProgress(nextLabel, percent);
       };
+      const imageUrlCache = new Map();
+      const imageUrlPending = new Map();
+      const resolveCachedImageUrl = (product) => {
+        const key = String(product?.id || "");
+        if (!key) return Promise.resolve("");
+        if (imageUrlCache.has(key)) return Promise.resolve(String(imageUrlCache.get(key) || ""));
+        if (imageUrlPending.has(key)) return imageUrlPending.get(key);
+        const pending = resolveProductImageUrlAsync(product)
+          .then((url) => {
+            const normalized = String(url || "");
+            imageUrlCache.set(key, normalized);
+            imageUrlPending.delete(key);
+            return normalized;
+          })
+          .catch(() => {
+            imageUrlPending.delete(key);
+            imageUrlCache.set(key, "");
+            return "";
+          });
+        imageUrlPending.set(key, pending);
+        return pending;
+      };
+      const prefetchProductImageUrls = async (productsToLoad, concurrency = 6) => {
+        const queue = (Array.isArray(productsToLoad) ? productsToLoad : []).slice();
+        if (!queue.length) return;
+        const limit = Math.max(1, Math.min(10, Number(concurrency) || 6));
+        const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+          while (queue.length) {
+            const next = queue.shift();
+            if (!next) continue;
+            await resolveCachedImageUrl(next);
+          }
+        });
+        await Promise.all(workers);
+      };
+      {
+        const prefetchProducts = [];
+        const prefetchSeen = new Set();
+        matched.forEach((entry) => {
+          const id = String(entry?.product?.id || "");
+          if (!id || prefetchSeen.has(id)) return;
+          prefetchSeen.add(id);
+          prefetchProducts.push(entry.product);
+        });
+        showCustomImportProgress("Przygotowywanie zdjęć produktów...", 30);
+        await prefetchProductImageUrls(prefetchProducts, 6);
+      }
       for (const item of singles) {
         const p = item.product;
-        const url = await resolveProductImageUrlAsync(p);
+        const url = await resolveCachedImageUrl(p);
         tickProgress("Importowanie produktów bez grupy...");
         const draft = {
           id: `draft-${Date.now()}-${++customDraftModuleSeq}`,
@@ -4932,7 +5693,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           productId: String(p.id || ""),
           productIndex: String(p.index || ""),
           productName: String(getDisplayName(p) || p.name || "-"),
-          previewImageUrl: String(url || ""),
+          previewImageUrl: normalizeImageUrlValue(url || ""),
           familyBaseProductId: "",
           familyBaseImageUrl: "",
           familyProducts: [],
@@ -4960,7 +5721,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           const item = items[0];
           if (!item) continue;
           const p = item.product;
-          const url = await resolveProductImageUrlAsync(p);
+          const url = await resolveCachedImageUrl(p);
           tickProgress("Importowanie grup rodzimych...");
           createdDrafts.push({
             id: `draft-${Date.now()}-${++customDraftModuleSeq}`,
@@ -4968,7 +5729,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
             productId: String(p.id || ""),
             productIndex: String(p.index || ""),
             productName: String(getDisplayName(p) || p.name || "-"),
-            previewImageUrl: String(url || ""),
+            previewImageUrl: normalizeImageUrlValue(url || ""),
             familyBaseProductId: "",
             familyBaseImageUrl: "",
             familyProducts: [],
@@ -4990,7 +5751,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         const limitedItems = items.slice(0, targetImageCount);
         const familyProducts = [];
         for (const entry of limitedItems) {
-          const imgUrl = await resolveProductImageUrlAsync(entry.product);
+          const imgUrl = await resolveCachedImageUrl(entry.product);
           tickProgress("Importowanie grup rodzimych...");
           familyProducts.push({
             productId: String(entry.product?.id || ""),
@@ -5009,7 +5770,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           productId: String(baseProduct?.id || ""),
           productIndex: String(baseProduct?.index || ""),
           productName: `${groupLabel} (${limitedItems.length})`,
-          previewImageUrl: firstUrl,
+          previewImageUrl: normalizeImageUrlValue(firstUrl),
           familyBaseProductId: String(baseProduct?.id || ""),
           familyBaseImageUrl: firstUrl,
           familyProducts,
@@ -5034,6 +5795,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
       customDraftModules = [...createdDrafts, ...(Array.isArray(customDraftModules) ? customDraftModules : [])];
       customDraftModules = customDraftModules.slice(0, 240);
+      pruneImportedProductsCacheByDrafts();
       renderDraftModulesList();
       const firstDraftForPreview = createdDrafts.find((d) => {
         if (String(d?.previewImageUrl || "").trim()) return true;
@@ -5085,6 +5847,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         draftBridgeListeners.forEach((fn) => {
           try { fn([]); } catch (_err) {}
         });
+        updateClipboardButtonsUi();
         return;
       }
       draftListEl.innerHTML = customDraftModules.map((draft, idx) => {
@@ -5132,6 +5895,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
               <div style="font-size:9px;color:#64748b;">Cena: ${priceFont}, ${priceAlign}${draft.settings?.customPriceTextBold ? ", B" : ""}${draft.settings?.customPriceTextUnderline ? ", U" : ""}</div>
             </div>
             <div style="display:flex;flex-direction:column;gap:6px;">
+              <button data-action="copy-style" type="button" style="border:1px solid #334155;background:#fff;color:#0f172a;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;">Kopiuj styl</button>
+              <button data-action="paste-style" type="button" style="border:1px solid #7c3aed;background:#f5f3ff;color:#6d28d9;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;">Wklej styl</button>
               <button data-action="edit" type="button" style="border:1px solid #0b8f84;background:#f0fdfa;color:#0b8f84;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;">Edytuj</button>
               <button data-action="delete" type="button" style="border:1px solid #e2e8f0;background:#fff;color:#64748b;border-radius:6px;padding:4px 8px;font-size:10px;cursor:pointer;">Usuń</button>
             </div>
@@ -5141,47 +5906,106 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       draftBridgeListeners.forEach((fn) => {
         try { fn((customDraftModules || []).slice()); } catch (_err) {}
       });
+      updateClipboardButtonsUi();
     };
 
-    const restoreDraftToEditor = (draft) => {
+    const persistActiveDraftSettings = ({ rerender = true } = {}) => {
+      const draftId = String(activeDraftEditId || "").trim();
+      if (!draftId) return false;
+      const nextSettings = normalizeEditorSettingsSnapshot(getCurrentEditorSettingsSnapshot());
+      let changed = false;
+      customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).map((draft) => {
+        if (String(draft?.id || "") !== draftId) return draft;
+        const prevSettings = draft?.settings || {};
+        const hasDiff = Object.keys(nextSettings).some((key) => prevSettings[key] !== nextSettings[key]);
+        if (!hasDiff) return draft;
+        changed = true;
+        return {
+          ...draft,
+          settings: {
+            ...prevSettings,
+            ...nextSettings
+          }
+        };
+      });
+      if (changed && rerender) renderDraftModulesList();
+      return changed;
+    };
+
+    const updateClipboardButtonsUi = () => {
+      const hasClipboard = !!(customStyleClipboardSettings && typeof customStyleClipboardSettings === "object");
+      if (pasteStyleBtn) {
+        pasteStyleBtn.disabled = !hasClipboard;
+        pasteStyleBtn.style.opacity = hasClipboard ? "1" : "0.45";
+        pasteStyleBtn.style.cursor = hasClipboard ? "pointer" : "not-allowed";
+      }
+      if (copyStyleBtn) {
+        const label = String(customStyleClipboardLabel || "").trim();
+        copyStyleBtn.title = label
+          ? `Ostatnio skopiowano styl z: ${label}`
+          : "Skopiuj styl bieżącego produktu";
+      }
+    };
+
+    const copyStyleFromSettings = (settings, sourceLabel = "") => {
+      customStyleClipboardSettings = normalizeEditorSettingsSnapshot(settings, getCurrentEditorSettingsSnapshot());
+      customStyleClipboardLabel = String(sourceLabel || "").trim();
+      updateClipboardButtonsUi();
+    };
+
+    const applyCopiedStyleToDraftById = (draftId) => {
+      const id = String(draftId || "");
+      if (!id || !customStyleClipboardSettings) return false;
+      const copied = normalizeEditorSettingsSnapshot(customStyleClipboardSettings, getCurrentEditorSettingsSnapshot());
+      let changed = false;
+      customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).map((draft) => {
+        if (String(draft?.id || "") !== id) return draft;
+        const prev = normalizeEditorSettingsSnapshot(draft?.settings || {}, getCurrentEditorSettingsSnapshot());
+        const hasDiff = Object.keys(copied).some((key) => prev[key] !== copied[key]);
+        if (!hasDiff) return draft;
+        changed = true;
+        return {
+          ...draft,
+          settings: {
+            ...(draft.settings || {}),
+            ...copied
+          }
+        };
+      });
+      if (!changed) return false;
+      if (String(activeDraftEditId || "") === id) {
+        applyEditorSettingsSnapshot(copied);
+      }
+      renderDraftModulesList();
+      renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+      return true;
+    };
+
+    const restoreDraftToEditor = (draft, options = {}) => {
       if (!draft) return;
-      const s = draft.settings || {};
-      customPriceCircleColor = String(s.customPriceCircleColor || customPriceCircleColor || "#d71920");
-      customModuleLayoutStyleId = String(s.customModuleLayoutStyleId || customModuleLayoutStyleId || "default");
-      customPriceBadgeStyleId = String(s.customPriceBadgeStyleId || customPriceBadgeStyleId || "solid");
-      customPriceTextColor = String(s.customPriceTextColor || customPriceTextColor || "#ffffff");
-      customCurrencySymbol = String(s.customCurrencySymbol || customCurrencySymbol || "£") === "€" ? "€" : "£";
-      customPriceTextScale = Number.isFinite(Number(s.customPriceTextScale)) ? Number(s.customPriceTextScale) : (customPriceTextScale || 1);
-      customMetaFontFamily = normalizeFontOption(s.customMetaFontFamily || customMetaFontFamily, "Arial");
-      customMetaTextColor = String(s.customMetaTextColor || customMetaTextColor || "#1f3560");
-      customMetaTextBold = !!s.customMetaTextBold;
-      customMetaTextUnderline = !!s.customMetaTextUnderline;
-      customMetaTextAlign = normalizeAlignOption(s.customMetaTextAlign || customMetaTextAlign, "left");
-      customPriceFontFamily = normalizeFontOption(s.customPriceFontFamily || customPriceFontFamily, "Arial");
-      customPriceTextBold = !!s.customPriceTextBold;
-      customPriceTextUnderline = !!s.customPriceTextUnderline;
-      customPriceTextAlign = normalizeAlignOption(s.customPriceTextAlign || customPriceTextAlign, "left");
-      customFamilySpacingTightness = normalizeFamilySpacingTightness(s.customFamilySpacingTightness, customFamilySpacingTightness);
-      customPreviewVisibility.showFlag = !!s.showFlag;
-      customPreviewVisibility.showBarcode = !!s.showBarcode;
+      const rememberAsEditing = Object.prototype.hasOwnProperty.call(options, "rememberAsEditing")
+        ? !!options.rememberAsEditing
+        : true;
+      if (rememberAsEditing) activeDraftEditId = String(draft?.id || "");
+      applyEditorSettingsSnapshot(draft.settings || {});
       Object.entries(draft.nameOverrides || {}).forEach(([id, value]) => {
         if (id) customNameOverrides.set(String(id), String(value || ""));
       });
 
       const baseProduct = productsById.get(String(draft.familyBaseProductId || "")) || null;
       familyBaseProduct = baseProduct;
-      familyBaseImageUrl = String(draft.familyBaseImageUrl || "");
+      familyBaseImageUrl = normalizeImageUrlValue(draft.familyBaseImageUrl || "");
       currentFamilyProducts = (Array.isArray(draft.familyProducts) ? draft.familyProducts : [])
         .map((item) => ({
           product: productsById.get(String(item?.productId || "")) || null,
-          url: String(item?.url || "")
+          url: normalizeImageUrlValue(item?.url || "")
         }))
         .filter((item) => item.product);
 
       const targetProduct = productsById.get(String(draft.productId || "")) || null;
       currentPreviewProduct = targetProduct;
       currentPickerProduct = targetProduct;
-      currentPreviewImageUrl = String(draft.previewImageUrl || "");
+      currentPreviewImageUrl = normalizeImageUrlValue(draft.previewImageUrl || "");
       currentPickerImageUrl = currentPreviewImageUrl;
       if (targetProduct && currentPreviewImageUrl) {
         customResolvedImageUrls.set(String(targetProduct.id), currentPreviewImageUrl);
@@ -5189,7 +6013,6 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       if (select && targetProduct) select.value = String(targetProduct.id);
       updateInfo(info, targetProduct, products.length, products.length, Number.isFinite(rendered?.length) ? rendered.length : products.length);
       bindEditableName(targetProduct);
-      applyAllControlValuesFromState();
       updateFamilyUiStatus("Wczytano moduł roboczy do edycji.", "success");
       if (targetProduct) renderProductImagePreview(targetProduct);
       renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
@@ -5206,12 +6029,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         customDraftModules = Array.isArray(customDraftModules) ? customDraftModules.slice() : [];
         customDraftModules.unshift(snap);
         customDraftModules = customDraftModules.slice(0, 24);
+        activeDraftEditId = String(snap.id || "");
         renderDraftModulesList();
         if (typeof window.showAppToast === "function") window.showAppToast("Dodano moduł do listy roboczej.", "success");
       };
     }
     if (openDraftTrayBtn) {
       openDraftTrayBtn.onclick = () => {
+        if (typeof cancelPendingCustomPlacement === "function") {
+          try { cancelPendingCustomPlacement(); } catch (_err) {}
+          cancelPendingCustomPlacement = null;
+        }
         ensureStylWlasnyHelperScriptLoaded();
         const modal = document.getElementById("customStyleModal");
         if (modal) modal.style.display = "none";
@@ -5219,6 +6047,31 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           window.CustomStyleDraftTrayUI.open();
         } else {
           window.dispatchEvent(new CustomEvent("customStyleDraftTrayOpenRequest"));
+        }
+      };
+    }
+    if (copyStyleBtn) {
+      copyStyleBtn.onclick = () => {
+        const labelParts = [];
+        if (currentPreviewProduct?.index) labelParts.push(String(currentPreviewProduct.index));
+        if (currentPreviewProduct?.name) labelParts.push(String(currentPreviewProduct.name).slice(0, 48));
+        copyStyleFromSettings(getCurrentEditorSettingsSnapshot(), labelParts.join(" • "));
+        if (typeof window.showAppToast === "function") {
+          window.showAppToast("Skopiowano pełny styl bieżącego produktu.", "success");
+        }
+      };
+    }
+    if (pasteStyleBtn) {
+      pasteStyleBtn.onclick = () => {
+        if (!customStyleClipboardSettings) {
+          if (typeof window.showAppToast === "function") window.showAppToast("Najpierw skopiuj styl produktu.", "error");
+          return;
+        }
+        applyEditorSettingsSnapshot(customStyleClipboardSettings);
+        persistActiveDraftSettings();
+        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        if (typeof window.showAppToast === "function") {
+          window.showAppToast("Wklejono skopiowany styl do bieżącego produktu.", "success");
         }
       };
     }
@@ -5346,8 +6199,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
               if (!mainUrl && (!nextFamily.length || nextFamily === draft.familyProducts)) return draft;
               return {
                 ...draft,
-                previewImageUrl: mainUrl || String(draft?.previewImageUrl || ""),
-                familyBaseImageUrl: mainUrl || String(draft?.familyBaseImageUrl || ""),
+                previewImageUrl: normalizeImageUrlValue(mainUrl || draft?.previewImageUrl || ""),
+                familyBaseImageUrl: normalizeImageUrlValue(mainUrl || draft?.familyBaseImageUrl || ""),
                 familyProducts: nextFamily
               };
             });
@@ -5382,7 +6235,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const pointer = payload.pointer && Number.isFinite(payload.pointer.x) && Number.isFinite(payload.pointer.y) ? payload.pointer : null;
       if (!page || !page.stage || !page.layer || !pointer) return { ok: false, error: "page_or_pointer_missing" };
 
-      restoreDraftToEditor(draft);
+      restoreDraftToEditor(draft, { rememberAsEditing: false });
       const product = currentPreviewProduct;
       if (!product) return { ok: false, error: "product_restore_failed" };
 
@@ -5424,6 +6277,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       window.projectDirty = true;
 
       customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).filter((d) => String(d?.id || "") !== String(draftId || ""));
+      pruneImportedProductsCacheByDrafts();
+      if (String(activeDraftEditId || "") === String(draftId || "")) activeDraftEditId = "";
       renderDraftModulesList();
       if (typeof window.showAppToast === "function") window.showAppToast("Przeciągnięto moduł na stronę katalogu.", "success");
       return { ok: true, slotIndex };
@@ -5451,6 +6306,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       removeDraft: (draftId) => {
         const before = Array.isArray(customDraftModules) ? customDraftModules.length : 0;
         customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).filter((d) => String(d?.id || "") !== String(draftId || ""));
+        pruneImportedProductsCacheByDrafts();
+        if (String(activeDraftEditId || "") === String(draftId || "")) activeDraftEditId = "";
         renderDraftModulesList();
         return (customDraftModules.length !== before);
       },
@@ -5469,12 +6326,34 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         const draft = (Array.isArray(customDraftModules) ? customDraftModules : []).find((d) => String(d?.id || "") === id);
         if (!draft) return;
         const action = String(btn.getAttribute("data-action") || "");
+        if (action === "copy-style") {
+          const label = String(draft?.productIndex || draft?.productId || draft?.productName || "produkt");
+          copyStyleFromSettings(draft?.settings || {}, label);
+          if (typeof window.showAppToast === "function") window.showAppToast("Skopiowano styl wybranego modułu.", "success");
+          return;
+        }
+        if (action === "paste-style") {
+          if (!customStyleClipboardSettings) {
+            if (typeof window.showAppToast === "function") window.showAppToast("Najpierw skopiuj styl modułu.", "error");
+            return;
+          }
+          const ok = applyCopiedStyleToDraftById(id);
+          if (typeof window.showAppToast === "function") {
+            window.showAppToast(
+              ok ? "Wklejono skopiowany styl do wybranego modułu." : "Ten moduł ma już identyczny styl.",
+              ok ? "success" : "info"
+            );
+          }
+          return;
+        }
         if (action === "edit") {
           restoreDraftToEditor(draft);
           return;
         }
         if (action === "delete") {
           customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).filter((d) => String(d?.id || "") !== id);
+          pruneImportedProductsCacheByDrafts();
+          if (String(activeDraftEditId || "") === id) activeDraftEditId = "";
           renderDraftModulesList();
         }
       };
@@ -5491,23 +6370,24 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       };
     }
     if (imageUploadInput) {
-      imageUploadInput.onchange = () => {
+      imageUploadInput.onchange = async () => {
         const file = imageUploadInput.files && imageUploadInput.files[0];
         if (!file) return;
         const targetId = imageUploadInput.dataset.productId || currentPreviewProduct?.id || "";
         if (!targetId) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          const dataUrl = String(reader.result || "");
-          if (!dataUrl.startsWith("data:image/")) return;
-          customImageOverrides.set(targetId, dataUrl);
-          const targetProduct = products.find((p) => p.id === targetId) || currentPreviewProduct;
-          if (targetProduct) {
-            currentPreviewProduct = targetProduct;
-            renderProductImagePreview(targetProduct);
-          }
-        };
-        reader.readAsDataURL(file);
+        let dataUrl = "";
+        try {
+          dataUrl = String(await readFileAsDataUrl(file) || "");
+        } catch (_err) {
+          dataUrl = "";
+        }
+        if (!dataUrl.startsWith("data:image/")) return;
+        customImageOverrides.set(targetId, dataUrl);
+        const targetProduct = products.find((p) => p.id === targetId) || currentPreviewProduct;
+        if (targetProduct) {
+          currentPreviewProduct = targetProduct;
+          renderProductImagePreview(targetProduct);
+        }
       };
     }
     const applyToggleMark = (markEl, enabled) => {
@@ -5522,12 +6402,16 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       btn.style.background = enabled ? "#f0fdfa" : "#fff";
       btn.style.color = enabled ? "#0b8f84" : "#0f172a";
     };
+    const renderPreviewAndSyncDraft = () => {
+      persistActiveDraftSettings({ rerender: false });
+      renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+    };
     if (showFlagToggle) {
       applyToggleMark(showFlagToggleMark, !!customPreviewVisibility.showFlag);
       showFlagToggle.onclick = () => {
         customPreviewVisibility.showFlag = !customPreviewVisibility.showFlag;
         applyToggleMark(showFlagToggleMark, !!customPreviewVisibility.showFlag);
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (showBarcodeToggle) {
@@ -5535,14 +6419,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       showBarcodeToggle.onclick = () => {
         customPreviewVisibility.showBarcode = !customPreviewVisibility.showBarcode;
         applyToggleMark(showBarcodeToggleMark, !!customPreviewVisibility.showBarcode);
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (priceColorInput) {
       priceColorInput.value = customPriceCircleColor || "#d71920";
       priceColorInput.oninput = () => {
         customPriceCircleColor = priceColorInput.value || "#d71920";
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (moduleLayoutSelect) {
@@ -5567,21 +6451,21 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           customPriceTextColor = suggestedText;
           if (priceTextColorInput) priceTextColorInput.value = suggestedText;
         }
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (priceStyleSelect) {
       priceStyleSelect.value = customPriceBadgeStyleId || "solid";
       priceStyleSelect.onchange = () => {
         customPriceBadgeStyleId = String(priceStyleSelect.value || "solid");
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (priceTextColorInput) {
       priceTextColorInput.value = customPriceTextColor || "#ffffff";
       priceTextColorInput.oninput = () => {
         customPriceTextColor = priceTextColorInput.value || "#ffffff";
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (metaFontSelect) {
@@ -5589,14 +6473,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       metaFontSelect.onchange = () => {
         customMetaFontFamily = normalizeFontOption(metaFontSelect.value, "Arial");
         applyFontPreviewToSelect(metaFontSelect, "Arial");
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (metaTextColorInput) {
       metaTextColorInput.value = customMetaTextColor || "#1f3560";
       metaTextColorInput.oninput = () => {
         customMetaTextColor = metaTextColorInput.value || "#1f3560";
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (metaBoldToggle) {
@@ -5604,7 +6488,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       metaBoldToggle.onclick = () => {
         customMetaTextBold = !customMetaTextBold;
         applyMiniToggleButton(metaBoldToggle, !!customMetaTextBold);
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (metaUnderlineToggle) {
@@ -5612,14 +6496,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       metaUnderlineToggle.onclick = () => {
         customMetaTextUnderline = !customMetaTextUnderline;
         applyMiniToggleButton(metaUnderlineToggle, !!customMetaTextUnderline);
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (metaAlignSelect) {
       metaAlignSelect.value = normalizeAlignOption(customMetaTextAlign, "left");
       metaAlignSelect.onchange = () => {
         customMetaTextAlign = normalizeAlignOption(metaAlignSelect.value, "left");
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (priceFontSelect) {
@@ -5627,7 +6511,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       priceFontSelect.onchange = () => {
         customPriceFontFamily = normalizeFontOption(priceFontSelect.value, "Arial");
         applyFontPreviewToSelect(priceFontSelect, "Arial");
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (priceBoldToggle) {
@@ -5635,7 +6519,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       priceBoldToggle.onclick = () => {
         customPriceTextBold = !customPriceTextBold;
         applyMiniToggleButton(priceBoldToggle, !!customPriceTextBold);
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (priceUnderlineToggle) {
@@ -5643,35 +6527,35 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       priceUnderlineToggle.onclick = () => {
         customPriceTextUnderline = !customPriceTextUnderline;
         applyMiniToggleButton(priceUnderlineToggle, !!customPriceTextUnderline);
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (priceAlignSelect) {
       priceAlignSelect.value = normalizeAlignOption(customPriceTextAlign, "left");
       priceAlignSelect.onchange = () => {
         customPriceTextAlign = normalizeAlignOption(priceAlignSelect.value, "left");
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (familySpacingSelect) {
       familySpacingSelect.value = String(normalizeFamilySpacingTightness(customFamilySpacingTightness, 0.12));
       familySpacingSelect.onchange = () => {
         customFamilySpacingTightness = normalizeFamilySpacingTightness(familySpacingSelect.value, 0.12);
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     if (currencySelect) {
       currencySelect.value = customCurrencySymbol === "€" ? "€" : "£";
       currencySelect.onchange = () => {
         customCurrencySymbol = String(currencySelect.value || "£").trim() === "€" ? "€" : "£";
-        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+        renderPreviewAndSyncDraft();
       };
     }
     const setPriceScale = (next) => {
       const rounded = Math.round(next * 100) / 100;
       customPriceTextScale = Math.max(0.6, Math.min(1.8, rounded));
       if (priceSizeValue) priceSizeValue.textContent = `${Math.round(customPriceTextScale * 100)}%`;
-      renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+      renderPreviewAndSyncDraft();
     };
     if (priceSizeValue) priceSizeValue.textContent = `${Math.round(customPriceTextScale * 100)}%`;
     if (priceSizeMinusBtn) priceSizeMinusBtn.onclick = () => setPriceScale(customPriceTextScale - 0.05);
@@ -5787,7 +6671,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     if (clearEditorBtn) {
       clearEditorBtn.onclick = () => {
+        activeDraftEditId = "";
         customDraftModules = [];
+        customImportedProductsById.clear();
         resetCustomStyleEditorSessionState();
         hideCustomImportProgress();
         if (excelImportStatus) excelImportStatus.style.display = "none";
@@ -5800,9 +6686,29 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     }
 
     applyFilter();
+    const autoDraftForPreview = (() => {
+      const drafts = Array.isArray(customDraftModules) ? customDraftModules : [];
+      if (!drafts.length) return null;
+      const hasPreviewImage = (draft) => {
+        if (normalizeImageUrlValue(draft?.previewImageUrl)) return true;
+        return Array.isArray(draft?.familyProducts)
+          && draft.familyProducts.some((fp) => normalizeImageUrlValue(fp?.url));
+      };
+      const productExists = (draft) => productsById.has(String(draft?.productId || ""));
+      return drafts.find((d) => productExists(d) && hasPreviewImage(d))
+        || drafts.find((d) => productExists(d))
+        || null;
+    })();
+    if (autoDraftForPreview) {
+      restoreDraftToEditor(autoDraftForPreview, { rememberAsEditing: false });
+    }
   }
 
   window.openCustomStyleCreator = async function () {
+    if (typeof cancelPendingCustomPlacement === "function") {
+      try { cancelPendingCustomPlacement(); } catch (_err) {}
+      cancelPendingCustomPlacement = null;
+    }
     ensureStylWlasnyHelperScriptLoaded();
     ensureModal();
 
