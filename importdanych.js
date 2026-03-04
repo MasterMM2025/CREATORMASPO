@@ -3,6 +3,687 @@
 // ======================================================================== //
 window.pages = window.pages || [];
 window.productImageCache = window.productImageCache || {};
+
+// ============================================
+// IMAGE PIPELINE (thumb/editor/original)
+// ============================================
+window.IMAGE_VARIANT_CONFIG = window.IMAGE_VARIANT_CONFIG || {
+    // Lekki podglad (sidebar / miniatury / DnD)
+    thumbMaxEdge: 112,
+    // Edycja na scenie: cel 400-600 px
+    editorMaxEdge: 480,
+    outputType: "image/webp",
+    thumbQuality: 0.72,
+    editorQuality: 0.86,
+    loadTimeoutMs: 12000
+};
+window.__IMAGE_VARIANT_CACHE = window.__IMAGE_VARIANT_CACHE || new Map();
+window.__IMAGE_VARIANT_PROMISES = window.__IMAGE_VARIANT_PROMISES || new Map();
+window.__IMAGE_VARIANT_CACHE_META = window.__IMAGE_VARIANT_CACHE_META || new Map();
+window.__IMAGE_VARIANT_CACHE_BYTES = Number(window.__IMAGE_VARIANT_CACHE_BYTES) || 0;
+window.__PRODUCT_IMAGE_CACHE_ORDER = Array.isArray(window.__PRODUCT_IMAGE_CACHE_ORDER) ? window.__PRODUCT_IMAGE_CACHE_ORDER : [];
+window.__IMAGE_SOURCE_BANK = window.__IMAGE_SOURCE_BANK || new Map();
+window.__IMAGE_SOURCE_BANK_ORDER = Array.isArray(window.__IMAGE_SOURCE_BANK_ORDER) ? window.__IMAGE_SOURCE_BANK_ORDER : [];
+const IMAGE_VARIANT_CACHE_LIMIT = 120;
+const IMAGE_VARIANT_CACHE_MAX_BYTES = 180 * 1024 * 1024;
+const PRODUCT_IMAGE_CACHE_LIMIT = 180;
+const DATA_URL_KEY_INLINE_LIMIT = 220;
+const NODE_INLINE_SRC_LIMIT = 48000;
+const IMAGE_SOURCE_BANK_LIMIT = 220;
+
+function _normalizeImageSrcValue(value) {
+    return String(value || "").trim();
+}
+
+function _isDataUrlSource(src) {
+    return /^data:/i.test(String(src || "").trim());
+}
+
+function _simpleHashString(input) {
+    const text = String(input || "");
+    let h = 2166136261;
+    for (let i = 0; i < text.length; i += 1) {
+        h ^= text.charCodeAt(i);
+        h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+    }
+    return (h >>> 0).toString(16);
+}
+
+function _normalizeVariantCacheKey(value) {
+    const raw = _normalizeImageSrcValue(value);
+    if (!raw) return "";
+    if (!_isDataUrlSource(raw) || raw.length <= DATA_URL_KEY_INLINE_LIMIT) return raw;
+    const head = raw.slice(0, 96);
+    const tail = raw.slice(-48);
+    return `data:${_simpleHashString(`${head}|${tail}|${raw.length}`)}:${raw.length}`;
+}
+
+function _touchImageSourceBankKey(key) {
+    const clean = String(key || "").trim();
+    if (!clean) return;
+    const order = window.__IMAGE_SOURCE_BANK_ORDER;
+    const idx = order.indexOf(clean);
+    if (idx >= 0) order.splice(idx, 1);
+    order.push(clean);
+    while (order.length > IMAGE_SOURCE_BANK_LIMIT) {
+        const drop = order.shift();
+        if (!drop) continue;
+        window.__IMAGE_SOURCE_BANK?.delete?.(drop);
+    }
+}
+
+function _putImageSourceInBank(src) {
+    const normalized = _normalizeImageSrcValue(src);
+    if (!normalized) return "";
+    const head = normalized.slice(0, 120);
+    const tail = normalized.slice(-56);
+    const key = `src:${_simpleHashString(`${normalized.length}|${head}|${tail}`)}:${normalized.length}`;
+    if (!window.__IMAGE_SOURCE_BANK.has(key)) {
+        window.__IMAGE_SOURCE_BANK.set(key, normalized);
+    }
+    _touchImageSourceBankKey(key);
+    return key;
+}
+
+function _getImageSourceFromBank(key) {
+    const clean = String(key || "").trim();
+    if (!clean) return "";
+    const value = window.__IMAGE_SOURCE_BANK.get(clean) || "";
+    if (value) _touchImageSourceBankKey(clean);
+    return String(value || "");
+}
+
+function _cloneImageVariants(value) {
+    const normalized = _normalizeImageVariantPayload(value);
+    return {
+        original: normalized.original,
+        editor: normalized.editor,
+        thumb: normalized.thumb
+    };
+}
+
+function _normalizeImageVariantPayload(value) {
+    if (!value) return { original: "", editor: "", thumb: "" };
+    if (typeof value === "string") {
+        const src = _normalizeImageSrcValue(value);
+        return { original: src, editor: src, thumb: src };
+    }
+    const original =
+        _normalizeImageSrcValue(value.original) ||
+        _normalizeImageSrcValue(value.originalSrc) ||
+        _normalizeImageSrcValue(value.src) ||
+        _normalizeImageSrcValue(value.url);
+    const editor =
+        _normalizeImageSrcValue(value.editor) ||
+        _normalizeImageSrcValue(value.editorSrc) ||
+        original;
+    const thumb =
+        _normalizeImageSrcValue(value.thumb) ||
+        _normalizeImageSrcValue(value.thumbSrc) ||
+        editor ||
+        original;
+    return {
+        original: original || editor || thumb || "",
+        editor: editor || original || thumb || "",
+        thumb: thumb || editor || original || ""
+    };
+}
+
+function _estimateVariantPayloadBytes(payload) {
+    const normalized = _normalizeImageVariantPayload(payload);
+    const totalChars =
+        String(normalized.original || "").length +
+        String(normalized.editor || "").length +
+        String(normalized.thumb || "").length;
+    return totalChars * 2;
+}
+
+function _trimVariantCacheToBudget() {
+    const cache = window.__IMAGE_VARIANT_CACHE;
+    const meta = window.__IMAGE_VARIANT_CACHE_META;
+    while (
+        cache.size > IMAGE_VARIANT_CACHE_LIMIT ||
+        Number(window.__IMAGE_VARIANT_CACHE_BYTES || 0) > IMAGE_VARIANT_CACHE_MAX_BYTES
+    ) {
+        const first = cache.keys().next();
+        if (!first || first.done) break;
+        const firstKey = first.value;
+        const info = meta.get(firstKey);
+        cache.delete(firstKey);
+        meta.delete(firstKey);
+        if (info && Number.isFinite(info.bytes)) {
+            window.__IMAGE_VARIANT_CACHE_BYTES = Math.max(
+                0,
+                Number(window.__IMAGE_VARIANT_CACHE_BYTES || 0) - Number(info.bytes)
+            );
+        }
+    }
+}
+
+function _touchProductImageCacheKey(indeksKey) {
+    const key = String(indeksKey || "").trim().toLowerCase();
+    if (!key) return;
+    const order = window.__PRODUCT_IMAGE_CACHE_ORDER;
+    const idx = order.indexOf(key);
+    if (idx >= 0) order.splice(idx, 1);
+    order.push(key);
+    while (order.length > PRODUCT_IMAGE_CACHE_LIMIT) {
+        const drop = order.shift();
+        if (!drop) continue;
+        if (window.productImageCache && Object.prototype.hasOwnProperty.call(window.productImageCache, drop)) {
+            delete window.productImageCache[drop];
+        }
+    }
+}
+
+function _setProductImageCacheEntry(indeksKey, variants) {
+    const key = String(indeksKey || "").trim().toLowerCase();
+    if (!key) return;
+    const normalized = _normalizeImageVariantPayload(variants);
+    if (!window.productImageCache || typeof window.productImageCache !== "object") {
+        window.productImageCache = {};
+    }
+    window.productImageCache[key] = {
+        original: normalized.original || normalized.editor || normalized.thumb || "",
+        editor: normalized.editor || normalized.original || normalized.thumb || "",
+        thumb: normalized.thumb || normalized.editor || normalized.original || ""
+    };
+    _touchProductImageCacheKey(key);
+}
+
+function _cacheImageVariants(key, payload) {
+    const cacheKey = _normalizeVariantCacheKey(key);
+    if (!cacheKey) return;
+    const cache = window.__IMAGE_VARIANT_CACHE;
+    const meta = window.__IMAGE_VARIANT_CACHE_META;
+    const cloned = _cloneImageVariants(payload);
+    const bytes = _estimateVariantPayloadBytes(cloned);
+    const prevMeta = meta.get(cacheKey);
+    if (prevMeta && Number.isFinite(prevMeta.bytes)) {
+        window.__IMAGE_VARIANT_CACHE_BYTES = Math.max(
+            0,
+            Number(window.__IMAGE_VARIANT_CACHE_BYTES || 0) - Number(prevMeta.bytes)
+        );
+    }
+    if (cache.has(cacheKey)) cache.delete(cacheKey);
+    cache.set(cacheKey, cloned);
+    meta.set(cacheKey, { bytes });
+    window.__IMAGE_VARIANT_CACHE_BYTES = Number(window.__IMAGE_VARIANT_CACHE_BYTES || 0) + bytes;
+    _trimVariantCacheToBudget();
+}
+
+function _getCachedImageVariants(key) {
+    const cacheKey = _normalizeVariantCacheKey(key);
+    if (!cacheKey) return null;
+    const cache = window.__IMAGE_VARIANT_CACHE;
+    const item = cache.get(cacheKey);
+    if (item) {
+        // LRU: odswiez wpis
+        cache.delete(cacheKey);
+        cache.set(cacheKey, item);
+    }
+    return item ? _cloneImageVariants(item) : null;
+}
+
+function _readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("Nie udalo sie odczytac pliku obrazu."));
+        reader.readAsDataURL(file);
+    });
+}
+
+function _loadImageElementForPipeline(src, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        const safeSrc = _normalizeImageSrcValue(src);
+        if (!safeSrc) {
+            reject(new Error("Brak zrodla obrazu."));
+            return;
+        }
+        const img = new Image();
+        let done = false;
+        const finish = (ok, payload) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            img.onload = null;
+            img.onerror = null;
+            if (ok) resolve(payload);
+            else reject(payload instanceof Error ? payload : new Error(String(payload || "Blad ladowania obrazu.")));
+        };
+        const timer = setTimeout(() => finish(false, new Error("Timeout ladowania obrazu.")), Math.max(1200, Number(timeoutMs) || 12000));
+        img.onload = () => finish(true, img);
+        img.onerror = () => finish(false, new Error("Nie udalo sie zaladowac obrazu."));
+        if (/^https?:\/\//i.test(safeSrc)) {
+            img.crossOrigin = "Anonymous";
+            img.referrerPolicy = "no-referrer";
+        }
+        img.src = safeSrc;
+    });
+}
+
+function _encodeCanvasDataUrl(canvas, outputType, quality, fallback) {
+    if (!canvas) return _normalizeImageSrcValue(fallback);
+    const safeType = _normalizeImageSrcValue(outputType) || "image/webp";
+    const safeQuality = Number.isFinite(Number(quality)) ? Math.max(0.1, Math.min(0.98, Number(quality))) : 0.82;
+    try {
+        return canvas.toDataURL(safeType, safeQuality);
+    } catch (_e) {
+        try {
+            return canvas.toDataURL("image/png");
+        } catch (_e2) {
+            return _normalizeImageSrcValue(fallback);
+        }
+    }
+}
+
+function _buildResizedImageVariant(img, maxEdge, outputType, quality, fallback) {
+    const safeFallback = _normalizeImageSrcValue(fallback);
+    const targetEdge = Math.max(32, Number(maxEdge) || 0);
+    if (!(img instanceof HTMLImageElement) && !(img instanceof ImageBitmap)) {
+        return safeFallback;
+    }
+    const srcW = Math.max(1, Number(img.naturalWidth || img.width) || 1);
+    const srcH = Math.max(1, Number(img.naturalHeight || img.height) || 1);
+    const srcMax = Math.max(srcW, srcH);
+    const ratio = srcMax > targetEdge ? (targetEdge / srcMax) : 1;
+    const dstW = Math.max(1, Math.round(srcW * ratio));
+    const dstH = Math.max(1, Math.round(srcH * ratio));
+    let canvas = null;
+    let ctx = null;
+    try {
+        canvas = document.createElement("canvas");
+        canvas.width = dstW;
+        canvas.height = dstH;
+        ctx = canvas.getContext("2d", { alpha: true, willReadFrequently: false });
+        if (!ctx) return safeFallback;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.clearRect(0, 0, dstW, dstH);
+        ctx.drawImage(img, 0, 0, dstW, dstH);
+        return _encodeCanvasDataUrl(canvas, outputType, quality, safeFallback);
+    } catch (_e) {
+        return safeFallback;
+    }
+}
+
+function _buildFileCacheKey(file, fallbackPrefix = "file") {
+    if (!(file instanceof File)) return `${fallbackPrefix}:unknown`;
+    return `${fallbackPrefix}:${file.name}:${file.size}:${file.lastModified}`;
+}
+
+window.normalizeImageVariantPayload = function(value) {
+    return _normalizeImageVariantPayload(value);
+};
+
+window.cloneImageVariantPayload = function(value) {
+    return _cloneImageVariants(value);
+};
+
+window.getImageVariantSource = function(value, kind = "editor") {
+    const normalized = _normalizeImageVariantPayload(value);
+    const mode = String(kind || "editor").toLowerCase();
+    if (mode === "original") return normalized.original || normalized.editor || normalized.thumb || "";
+    if (mode === "thumb") return normalized.thumb || normalized.editor || normalized.original || "";
+    return normalized.editor || normalized.original || normalized.thumb || "";
+};
+
+window.getImageVariantsFromCache = function(cacheKeyOrSrc) {
+    return _getCachedImageVariants(cacheKeyOrSrc);
+};
+
+window.getNodeImageSource = function(node, kind = "original") {
+    if (!node || typeof node.getAttr !== "function") return "";
+    const mode = String(kind || "original").toLowerCase();
+    const attrName = mode === "thumb" ? "thumbSrc" : mode === "editor" ? "editorSrc" : "originalSrc";
+    const bankAttrName = mode === "thumb" ? "thumbSrcBankKey" : mode === "editor" ? "editorSrcBankKey" : "originalSrcBankKey";
+
+    const inlineSrc = _normalizeImageSrcValue(node.getAttr(attrName));
+    if (inlineSrc) return inlineSrc;
+
+    const bankKey = _normalizeImageSrcValue(node.getAttr(bankAttrName));
+    if (bankKey) {
+        const bankSrc = _getImageSourceFromBank(bankKey);
+        if (bankSrc) return bankSrc;
+    }
+
+    if (mode === "editor" || mode === "thumb") {
+        const fallback = (typeof node.image === "function" && node.image() && node.image().src)
+            ? String(node.image().src || "")
+            : "";
+        if (fallback) return fallback;
+    }
+
+    if (mode === "original") {
+        const barcodeSrc = _normalizeImageSrcValue(node.getAttr("barcodeOriginalSrc"));
+        if (barcodeSrc) return barcodeSrc;
+        const editorInline = _normalizeImageSrcValue(node.getAttr("editorSrc"));
+        if (editorInline) return editorInline;
+        const editorBank = _normalizeImageSrcValue(node.getAttr("editorSrcBankKey"));
+        if (editorBank) {
+            const bankEditor = _getImageSourceFromBank(editorBank);
+            if (bankEditor) return bankEditor;
+        }
+        const imageFallback = (typeof node.image === "function" && node.image() && node.image().src)
+            ? String(node.image().src || "")
+            : "";
+        if (imageFallback) return imageFallback;
+    }
+    return "";
+};
+
+window.applyImageVariantsToKonvaNode = function(node, value) {
+    if (!node || typeof node.setAttr !== "function") return;
+    const normalized = _normalizeImageVariantPayload(value);
+    const originalSrc = normalized.original || normalized.editor || normalized.thumb || "";
+    const editorSrc = normalized.editor || normalized.original || normalized.thumb || originalSrc;
+    const thumbSrc = normalized.thumb || normalized.editor || normalized.original || editorSrc;
+
+    const assignNodeSource = (attrName, bankAttrName, sourceValue) => {
+        const src = _normalizeImageSrcValue(sourceValue);
+        if (!src) {
+            node.setAttr(attrName, "");
+            node.setAttr(bankAttrName, "");
+            return;
+        }
+        if (_isDataUrlSource(src) && src.length > NODE_INLINE_SRC_LIMIT) {
+            const bankKey = _putImageSourceInBank(src);
+            node.setAttr(attrName, "");
+            node.setAttr(bankAttrName, bankKey || "");
+            return;
+        }
+        node.setAttr(attrName, src);
+        node.setAttr(bankAttrName, "");
+    };
+
+    assignNodeSource("originalSrc", "originalSrcBankKey", originalSrc);
+    assignNodeSource("editorSrc", "editorSrcBankKey", editorSrc);
+    assignNodeSource("thumbSrc", "thumbSrcBankKey", thumbSrc);
+};
+
+window.createImageVariantsFromSource = async function(src, options = {}) {
+    const source = _normalizeImageSrcValue(src);
+    if (!source) return _normalizeImageVariantPayload(null);
+    const cfg = window.IMAGE_VARIANT_CONFIG || {};
+    const cacheKeyRaw = _normalizeImageSrcValue(options.cacheKey) || source;
+    const cacheKey = _normalizeVariantCacheKey(cacheKeyRaw);
+    const sourceKey = _normalizeVariantCacheKey(source);
+    const cached = _getCachedImageVariants(cacheKey) || _getCachedImageVariants(sourceKey);
+    if (cached) return cached;
+
+    if (window.__IMAGE_VARIANT_PROMISES.has(cacheKey)) {
+        return _cloneImageVariants(await window.__IMAGE_VARIANT_PROMISES.get(cacheKey));
+    }
+
+    const job = (async () => {
+        const original = source;
+        let editor = original;
+        let thumb = original;
+        try {
+            const img = await _loadImageElementForPipeline(source, options.timeoutMs || cfg.loadTimeoutMs || 12000);
+            const outputType = _normalizeImageSrcValue(options.outputType) || cfg.outputType || "image/webp";
+            const editorMax = Number(options.editorMaxEdge) || Number(cfg.editorMaxEdge) || 600;
+            const thumbMax = Number(options.thumbMaxEdge) || Number(cfg.thumbMaxEdge) || 128;
+            const editorQuality = Number(options.editorQuality);
+            const thumbQuality = Number(options.thumbQuality);
+            editor = _buildResizedImageVariant(
+                img,
+                editorMax,
+                outputType,
+                Number.isFinite(editorQuality) ? editorQuality : cfg.editorQuality,
+                original
+            ) || original;
+            thumb = _buildResizedImageVariant(
+                img,
+                thumbMax,
+                outputType,
+                Number.isFinite(thumbQuality) ? thumbQuality : cfg.thumbQuality,
+                editor || original
+            ) || editor || original;
+        } catch (_e) {
+            editor = original;
+            thumb = original;
+        }
+
+        const payload = _normalizeImageVariantPayload({ original, editor, thumb });
+        _cacheImageVariants(cacheKey, payload);
+        if (cacheKey !== sourceKey) _cacheImageVariants(sourceKey, payload);
+        return payload;
+    })().finally(() => {
+        window.__IMAGE_VARIANT_PROMISES.delete(cacheKey);
+    });
+
+    window.__IMAGE_VARIANT_PROMISES.set(cacheKey, job);
+    return _cloneImageVariants(await job);
+};
+
+window.createImageVariantsFromFile = async function(file, options = {}) {
+    if (!(file instanceof File)) {
+        throw new Error("Niepoprawny plik obrazu.");
+    }
+    const cfg = window.IMAGE_VARIANT_CONFIG || {};
+    const cacheKeyRaw = _normalizeImageSrcValue(options.cacheKey) || _buildFileCacheKey(file, "local");
+    const cacheKey = _normalizeVariantCacheKey(cacheKeyRaw);
+    const cached = _getCachedImageVariants(cacheKey);
+    if (cached) return cached;
+
+    if (window.__IMAGE_VARIANT_PROMISES.has(cacheKey)) {
+        return _cloneImageVariants(await window.__IMAGE_VARIANT_PROMISES.get(cacheKey));
+    }
+
+    const job = (async () => {
+        const original = await _readFileAsDataUrl(file);
+        const blobUrl = URL.createObjectURL(file);
+        let editor = original;
+        let thumb = original;
+        try {
+            const img = await _loadImageElementForPipeline(blobUrl, options.timeoutMs || cfg.loadTimeoutMs || 12000);
+            const outputType = _normalizeImageSrcValue(options.outputType) || cfg.outputType || "image/webp";
+            const editorMax = Number(options.editorMaxEdge) || Number(cfg.editorMaxEdge) || 600;
+            const thumbMax = Number(options.thumbMaxEdge) || Number(cfg.thumbMaxEdge) || 128;
+            const editorQuality = Number(options.editorQuality);
+            const thumbQuality = Number(options.thumbQuality);
+            editor = _buildResizedImageVariant(
+                img,
+                editorMax,
+                outputType,
+                Number.isFinite(editorQuality) ? editorQuality : cfg.editorQuality,
+                original
+            ) || original;
+            thumb = _buildResizedImageVariant(
+                img,
+                thumbMax,
+                outputType,
+                Number.isFinite(thumbQuality) ? thumbQuality : cfg.thumbQuality,
+                editor || original
+            ) || editor || original;
+        } catch (_e) {
+            editor = original;
+            thumb = original;
+        } finally {
+            try { URL.revokeObjectURL(blobUrl); } catch (_e) {}
+        }
+        const payload = _normalizeImageVariantPayload({ original, editor, thumb });
+        _cacheImageVariants(cacheKey, payload);
+        return payload;
+    })().finally(() => {
+        window.__IMAGE_VARIANT_PROMISES.delete(cacheKey);
+    });
+
+    window.__IMAGE_VARIANT_PROMISES.set(cacheKey, job);
+    return _cloneImageVariants(await job);
+};
+
+window.__EXPORT_ORIGINAL_IMAGE_CACHE = window.__EXPORT_ORIGINAL_IMAGE_CACHE || new Map();
+const EXPORT_ORIGINAL_IMAGE_CACHE_LIMIT = 80;
+
+function _trimExportOriginalImageCache() {
+    const cache = window.__EXPORT_ORIGINAL_IMAGE_CACHE;
+    while (cache.size > EXPORT_ORIGINAL_IMAGE_CACHE_LIMIT) {
+        const first = cache.keys().next();
+        if (!first || first.done) break;
+        cache.delete(first.value);
+    }
+}
+
+window.releaseExportImageCache = function() {
+    try {
+        if (window.__EXPORT_ORIGINAL_IMAGE_CACHE && typeof window.__EXPORT_ORIGINAL_IMAGE_CACHE.clear === "function") {
+            window.__EXPORT_ORIGINAL_IMAGE_CACHE.clear();
+        }
+    } catch (_e) {}
+};
+
+window.releaseImageMemoryCaches = function() {
+    try {
+        window.__IMAGE_VARIANT_PROMISES?.clear?.();
+    } catch (_e) {}
+    try {
+        window.__IMAGE_VARIANT_CACHE?.clear?.();
+    } catch (_e) {}
+    try {
+        window.__IMAGE_VARIANT_CACHE_META?.clear?.();
+    } catch (_e) {}
+    window.__IMAGE_VARIANT_CACHE_BYTES = 0;
+    try {
+        window.__IMAGE_SOURCE_BANK?.clear?.();
+    } catch (_e) {}
+    window.__IMAGE_SOURCE_BANK_ORDER = [];
+    window.productImageCache = {};
+    window.__PRODUCT_IMAGE_CACHE_ORDER = [];
+    if (typeof window.releaseExportImageCache === "function") {
+        window.releaseExportImageCache();
+    }
+};
+
+async function _loadOriginalImageForExport(src) {
+    const safeSrc = _normalizeImageSrcValue(src);
+    if (!safeSrc) return null;
+    const cache = window.__EXPORT_ORIGINAL_IMAGE_CACHE;
+    const cacheKey = _normalizeVariantCacheKey(safeSrc) || safeSrc;
+    if (cache.has(cacheKey)) {
+        return await cache.get(cacheKey);
+    }
+    const job = _loadImageElementForPipeline(safeSrc, 20000)
+        .then((img) => img || null)
+        .catch(() => null);
+    cache.set(cacheKey, job);
+    _trimExportOriginalImageCache();
+    const loaded = await job;
+    if (!loaded) cache.delete(cacheKey);
+    return loaded;
+}
+
+function _readImageNaturalSize(img) {
+    const w = Number(img && (img.naturalWidth || img.width)) || 0;
+    const h = Number(img && (img.naturalHeight || img.height)) || 0;
+    return {
+        width: w > 0 ? w : 0,
+        height: h > 0 ? h : 0
+    };
+}
+
+window.swapKonvaImageToOriginalForExport = async function(node) {
+    if (!window.Konva || !(node instanceof window.Konva.Image)) return null;
+    if (!node || typeof node.image !== "function" || typeof node.getAttr !== "function") return null;
+
+    if (node.getAttr("isPriceHitArea")) return null;
+    if (node.getAttr("isBarcode") || node.getAttr("isQRCode") || node.getAttr("isEAN")) return null;
+
+    const originalSrc = _normalizeImageSrcValue(
+        (typeof window.getNodeImageSource === "function")
+            ? window.getNodeImageSource(node, "original")
+            : (node.getAttr("originalSrc") || node.getAttr("barcodeOriginalSrc"))
+    );
+    if (!originalSrc) return null;
+
+    const currentImage = node.image();
+    if (!currentImage) return null;
+
+    const originalImage = await _loadOriginalImageForExport(originalSrc);
+    if (!originalImage || originalImage === currentImage) return null;
+
+    const layer = (typeof node.getLayer === "function") ? node.getLayer() : null;
+    const prevState = {
+        image: currentImage,
+        cropX: (typeof node.cropX === "function") ? Number(node.cropX()) : 0,
+        cropY: (typeof node.cropY === "function") ? Number(node.cropY()) : 0,
+        cropWidth: (typeof node.cropWidth === "function") ? Number(node.cropWidth()) : 0,
+        cropHeight: (typeof node.cropHeight === "function") ? Number(node.cropHeight()) : 0
+    };
+    const hadCropRect = Number.isFinite(prevState.cropWidth) && Number.isFinite(prevState.cropHeight) &&
+        prevState.cropWidth > 0 && prevState.cropHeight > 0;
+    let cropChanged = false;
+
+    try {
+        node.image(originalImage);
+
+        if (hadCropRect && typeof node.crop === "function") {
+            const editorSize = _readImageNaturalSize(prevState.image);
+            const originalSize = _readImageNaturalSize(originalImage);
+            if (editorSize.width > 0 && editorSize.height > 0 && originalSize.width > 0 && originalSize.height > 0) {
+                const ratioX = originalSize.width / editorSize.width;
+                const ratioY = originalSize.height / editorSize.height;
+                const nextCrop = clampCropRectToImage(
+                    prevState.cropX * ratioX,
+                    prevState.cropY * ratioY,
+                    prevState.cropWidth * ratioX,
+                    prevState.cropHeight * ratioY,
+                    originalSize.width,
+                    originalSize.height
+                );
+                node.crop({
+                    x: nextCrop.x,
+                    y: nextCrop.y,
+                    width: nextCrop.width,
+                    height: nextCrop.height
+                });
+                cropChanged = true;
+            }
+        }
+        if (layer && typeof layer.batchDraw === "function") layer.batchDraw();
+    } catch (_err) {
+        try { node.image(prevState.image); } catch (_e) {}
+        if (layer && typeof layer.batchDraw === "function") layer.batchDraw();
+        return null;
+    }
+
+    return () => {
+        try {
+            node.image(prevState.image);
+            if (cropChanged && typeof node.crop === "function") {
+                node.crop({
+                    x: prevState.cropX,
+                    y: prevState.cropY,
+                    width: prevState.cropWidth,
+                    height: prevState.cropHeight
+                });
+            }
+            if (layer && typeof layer.batchDraw === "function") layer.batchDraw();
+        } catch (_err) {}
+    };
+};
+
+window.swapPageImagesToOriginalForExport = async function(page) {
+    if (!window.Konva || !page || !page.layer || typeof page.layer.find !== "function") return null;
+    const images = page.layer.find((n) => n instanceof window.Konva.Image);
+    if (!images || typeof images.length !== "number" || images.length === 0) return null;
+
+    const restorers = [];
+    for (let i = 0; i < images.length; i++) {
+        const restore = await window.swapKonvaImageToOriginalForExport(images[i]);
+        if (typeof restore === "function") restorers.push(restore);
+    }
+    if (!restorers.length) return null;
+
+    return () => {
+        for (let i = restorers.length - 1; i >= 0; i--) {
+            try { restorers[i](); } catch (_err) {}
+        }
+    };
+};
+
 const TNZ_BADGE_URL =
   "https://firebasestorage.googleapis.com/v0/b/pdf-creator-f7a8b.firebasestorage.app/o/CREATOR%20BASIC%2FTNZ.png?alt=media";
 
@@ -30,6 +711,184 @@ const COUNTRY_PL_BADGE_URL =
   "https://firebasestorage.googleapis.com/v0/b/pdf-creator-f7a8b.firebasestorage.app/o/CREATOR%20BASIC%2FPolska.png?alt=media";
 
 window.COUNTRY_PL_IMAGE = null;
+
+// ============================================
+// PERFORMANCE: aktywne tylko strony blisko viewportu
+// ============================================
+const PAGE_PERF_VIEWPORT_MARGIN = 320;
+// Domyslnie wlaczone (mozna recznie wylaczyc przez window.__enablePagePerfSleep = false)
+window.__enablePagePerfSleep = (window.__enablePagePerfSleep !== false);
+let pagePerfObserver = null;
+let pagePerfRefreshQueued = false;
+const pagePerfByContainer = new WeakMap();
+const pagePerfInteractiveState = new WeakMap();
+
+function shouldSkipPageDrawForTarget(target) {
+    if (window.__projectLoadInProgress) return false;
+    if (!window.__enablePagePerfSleep) return false;
+    if (window.__forceAllPageDraw) return false;
+    if (!target) return false;
+    let stage = null;
+    try {
+        if (typeof target.getStage === "function") stage = target.getStage();
+        if (!stage && typeof target.container === "function") stage = target;
+    } catch (_e) {}
+    if (!stage || typeof stage.container !== "function") return false;
+    const container = stage.container();
+    if (!container || typeof container.closest !== "function") return false;
+    const host = container.closest(".page-container");
+    return !!(host && host.classList && host.classList.contains("page-perf-sleep"));
+}
+
+function patchKonvaDrawPerf() {
+    if (!window.Konva || window.__konvaDrawPerfPatched) return;
+    window.__konvaDrawPerfPatched = true;
+
+    const patchMethod = (proto, methodName) => {
+        if (!proto || typeof proto[methodName] !== "function") return;
+        const original = proto[methodName];
+        proto[methodName] = function patchedDrawMethod(...args) {
+            if (shouldSkipPageDrawForTarget(this)) return this;
+            return original.apply(this, args);
+        };
+    };
+
+    patchMethod(window.Konva.Stage && window.Konva.Stage.prototype, "draw");
+    patchMethod(window.Konva.Stage && window.Konva.Stage.prototype, "batchDraw");
+    patchMethod(window.Konva.Layer && window.Konva.Layer.prototype, "draw");
+    patchMethod(window.Konva.Layer && window.Konva.Layer.prototype, "batchDraw");
+}
+
+window.beginForcePageDraw = function() {
+    const prev = !!window.__forceAllPageDraw;
+    window.__forceAllPageDraw = true;
+    return () => {
+        window.__forceAllPageDraw = prev;
+    };
+};
+
+window.forceDrawAllPagesForExport = function() {
+    const release = (typeof window.beginForcePageDraw === "function")
+        ? window.beginForcePageDraw()
+        : null;
+    try {
+        const list = Array.isArray(window.pages) ? window.pages : [];
+        list.forEach((p) => {
+            try { p?.bgLayer?.draw?.(); } catch (_e) {}
+            try { p?.layer?.draw?.(); } catch (_e) {}
+            try { p?.transformerLayer?.draw?.(); } catch (_e) {}
+            try { p?.stage?.draw?.(); } catch (_e) {}
+        });
+    } finally {
+        if (typeof release === "function") release();
+    }
+};
+
+function isPageNearViewport(container) {
+    if (!container || typeof container.getBoundingClientRect !== "function") return true;
+    const rect = container.getBoundingClientRect();
+    const vh = window.innerHeight || document.documentElement?.clientHeight || 0;
+    return rect.bottom >= -PAGE_PERF_VIEWPORT_MARGIN && rect.top <= (vh + PAGE_PERF_VIEWPORT_MARGIN);
+}
+
+function requestDeferredPageHydration(page, reason) {
+    if (!page) return;
+    if (window.__projectLoadInProgress) return;
+    if (typeof window.hasDeferredPageHydration !== "function") return;
+    if (typeof window.ensurePageHydrated !== "function") return;
+    if (!window.hasDeferredPageHydration(page)) return;
+    Promise.resolve()
+        .then(() => window.ensurePageHydrated(page, { reason: reason || "viewport" }))
+        .catch(() => {});
+}
+
+function setPagePerfInteractive(page, interactive) {
+    if (!page || !page.container || !page.stage) return;
+    const enabled = (!window.__enablePagePerfSleep || window.__projectLoadInProgress) ? true : !!interactive;
+    if (enabled) {
+        requestDeferredPageHydration(page, "viewport");
+    }
+    if (pagePerfInteractiveState.get(page) === enabled) return;
+    pagePerfInteractiveState.set(page, enabled);
+
+    try { page.stage.listening(enabled); } catch (_e) {}
+    const toggleLayer = (layer) => {
+        if (!layer) return;
+        try {
+            if (typeof layer.listening === "function") layer.listening(enabled);
+            if (typeof layer.hitGraphEnabled === "function") layer.hitGraphEnabled(enabled);
+        } catch (_e) {}
+    };
+    toggleLayer(page.bgLayer);
+    toggleLayer(page.layer);
+    toggleLayer(page.transformerLayer);
+
+    page.container.classList.toggle("page-perf-sleep", !enabled);
+    const wrapper = page.container.querySelector(".canvas-wrapper");
+    if (wrapper) wrapper.style.pointerEvents = enabled ? "auto" : "none";
+
+    if (enabled) {
+        try {
+            page.stage.batchDraw();
+        } catch (_e) {}
+    }
+}
+
+function ensurePagePerfObserver() {
+    if (!window.__enablePagePerfSleep) return null;
+    if (pagePerfObserver || typeof IntersectionObserver !== "function") return pagePerfObserver;
+    pagePerfObserver = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+            const page = pagePerfByContainer.get(entry.target);
+            if (!page) return;
+            setPagePerfInteractive(page, !!entry.isIntersecting);
+        });
+    }, {
+        root: null,
+        rootMargin: `${PAGE_PERF_VIEWPORT_MARGIN}px 0px ${PAGE_PERF_VIEWPORT_MARGIN}px 0px`,
+        threshold: 0.001
+    });
+    return pagePerfObserver;
+}
+
+function queueRefreshPagesPerf() {
+    if (pagePerfRefreshQueued) return;
+    pagePerfRefreshQueued = true;
+    requestAnimationFrame(() => {
+        pagePerfRefreshQueued = false;
+        if (typeof window.refreshPagesPerf === "function") window.refreshPagesPerf();
+    });
+}
+
+window.registerPageForPerf = function(page) {
+    if (!page || !page.container) return;
+    pagePerfByContainer.set(page.container, page);
+    const observer = ensurePagePerfObserver();
+    if (observer) observer.observe(page.container);
+    setPagePerfInteractive(page, window.__enablePagePerfSleep ? isPageNearViewport(page.container) : true);
+};
+
+window.refreshPagesPerf = function() {
+    const list = Array.isArray(window.pages) ? window.pages : [];
+    const observer = ensurePagePerfObserver();
+    list.forEach((page) => {
+        if (!page || !page.container) return;
+        pagePerfByContainer.set(page.container, page);
+        if (observer) observer.observe(page.container);
+        setPagePerfInteractive(page, window.__enablePagePerfSleep ? isPageNearViewport(page.container) : true);
+    });
+};
+
+window.addEventListener("resize", queueRefreshPagesPerf, { passive: true });
+window.addEventListener("orientationchange", queueRefreshPagesPerf, { passive: true });
+window.addEventListener("canvasCreated", queueRefreshPagesPerf);
+window.addEventListener("excelImported", queueRefreshPagesPerf);
+patchKonvaDrawPerf();
+
+async function ensurePagesReadyForExport(targetPages) {
+    if (typeof window.ensureAllPagesHydrated !== "function") return;
+    await window.ensureAllPagesHydrated(targetPages, { reason: "export" });
+}
 
 // ============================================
 // 🔒 NORMALIZACJA ZAZNACZENIA (dziecko → GROUP)
@@ -223,8 +1082,10 @@ const TRANSFORMER_ANCHORS_DEFAULT = [
 ];
 
 const TRANSFORMER_ANCHORS_CROP = [
+    // Pełne uchwyty: narożniki + boki (crop działa tylko na środkowych bokach)
+    'top-left', 'top-center', 'top-right',
     'middle-left', 'middle-right',
-    'top-center', 'bottom-center'
+    'bottom-left', 'bottom-center', 'bottom-right'
 ];
 
 function isCropAnchorName(anchor) {
@@ -1110,7 +1971,7 @@ window.W = 794 + PAGE_MARGIN * 2;
 window.H = 1123 + PAGE_MARGIN * 2;
 // Użyj szerokości strony jako odniesienie dla paneli UI
 document.documentElement.style.setProperty('--page-width', `${window.W}px`);
-document.documentElement.style.setProperty('--panel-center-offset', `36px`);
+document.documentElement.style.setProperty('--panel-center-offset', `0px`);
 
 function setupImportPanelToggle() {
     const panel = document.getElementById('importPanel');
@@ -1364,8 +2225,9 @@ const ZOOM_MAX = 3.0;
 function applyZoomToPage(page, scale) {
     const wrapper = page.container.querySelector('.canvas-wrapper');
     if (!wrapper) return;
+    const zoomWrapWidth = Math.round(W);
 
-    // Upewnij się, że wrapper i przycisk są w jednym kontenerze zoomu
+    // Zoom obejmuje CAŁY blok strony: toolbar + canvas + przycisk dodawania strony.
     let zoomWrap = page.container.querySelector('.page-zoom-wrap');
     const toolbar = page.container.querySelector('.page-toolbar');
     const addBtnWrap = page.container.querySelector('.add-page-btn-wrapper');
@@ -1373,18 +2235,26 @@ function applyZoomToPage(page, scale) {
     if (!zoomWrap) {
         zoomWrap = document.createElement('div');
         zoomWrap.className = 'page-zoom-wrap';
-        zoomWrap.style.width = `${W}px`;
+        zoomWrap.style.width = `${zoomWrapWidth}px`;
         zoomWrap.style.margin = '0 auto';
         zoomWrap.style.position = 'relative';
         wrapper.parentNode.insertBefore(zoomWrap, wrapper);
-        if (toolbar) zoomWrap.appendChild(toolbar);
+    }
+
+    // Uporządkuj strukturę: toolbar -> canvas -> add button w środku zoomWrap.
+    if (toolbar && toolbar.parentNode !== zoomWrap) {
+        zoomWrap.appendChild(toolbar);
+    }
+    if (wrapper.parentNode !== zoomWrap) {
         zoomWrap.appendChild(wrapper);
-        if (addBtnWrap) zoomWrap.appendChild(addBtnWrap);
-    } else if (addBtnWrap && addBtnWrap.parentNode !== zoomWrap) {
+    }
+    if (addBtnWrap && addBtnWrap.parentNode !== zoomWrap) {
         zoomWrap.appendChild(addBtnWrap);
     }
-    if (toolbar && toolbar.parentNode !== zoomWrap) {
-        zoomWrap.insertBefore(toolbar, zoomWrap.firstChild || null);
+
+    zoomWrap.style.width = `${zoomWrapWidth}px`;
+    if (page && page.container && page.container.style) {
+        page.container.style.width = `${zoomWrapWidth}px`;
     }
 
     // Reset transformy na dzieciach — skaluje tylko kontener
@@ -1392,9 +2262,16 @@ function applyZoomToPage(page, scale) {
     wrapper.style.transform = 'none';
     if (addBtnWrap) addBtnWrap.style.transform = 'none';
 
-    if (!page._zoomBaseHeight) {
-        // Bazowa wysokość do obliczenia odstępu przy zoomie
+    const layoutSignature = `${toolbar ? 1 : 0}|${addBtnWrap ? 1 : 0}|${zoomWrap.childElementCount}`;
+    if (page._zoomLayoutSignature !== layoutSignature || !Number.isFinite(page._zoomBaseHeight)) {
+        const prevTransition = zoomWrap.style.transition;
+        const prevTransform = zoomWrap.style.transform;
+        zoomWrap.style.transition = 'none';
+        zoomWrap.style.transform = 'none';
         page._zoomBaseHeight = zoomWrap.getBoundingClientRect().height || (H + 160);
+        page._zoomLayoutSignature = layoutSignature;
+        zoomWrap.style.transform = prevTransform || 'none';
+        zoomWrap.style.transition = prevTransition || '';
     }
 
     zoomWrap.style.transition = 'transform 0.15s ease-out';
@@ -1784,12 +2661,18 @@ function createPage(n, prods) {
 
     // (usuniete: ensurePageInteractive - wywolanie bylo zbyt wczesne)
     // === OBRYSY DLA MULTI-SELECT (CANVA STYLE) ===
+    const MAX_SELECTION_OUTLINES = 12;
     function highlightSelection() {
     // Usuń stare obrysy
     page.layer.find('.selectionOutline').forEach(n => n.destroy());
 
-    // Dodaj dla każdego zaznaczonego obiektu
-    page.selectedNodes.forEach(node => {
+    const selected = Array.isArray(page.selectedNodes) ? page.selectedNodes : [];
+    const nodesToOutline = selected.length > MAX_SELECTION_OUTLINES
+        ? selected.slice(0, MAX_SELECTION_OUTLINES)
+        : selected;
+
+    // Dodaj dla części zaznaczenia (duże multi-zaznaczenia bez setek obrysów)
+    nodesToOutline.forEach(node => {
         if (!node) return;
         if (typeof node.isDestroyed === "function" && node.isDestroyed()) return;
         if (node.getAttr && node.getAttr("isBgBlur")) return;
@@ -2062,9 +2945,9 @@ selectionRect.moveToTop();
     page.selectedNodes = [];
 page.transformer.nodes([]);
 page.layer.find('.selectionOutline').forEach(n => n.destroy());
-page.layer.batchDraw();
-floatingButtons?.remove();
+hideFloatingButtons();
     disableCropMode(page);
+page.layer.batchDraw();
 
 
 });
@@ -2092,13 +2975,13 @@ stage.on('mousemove.marquee', () => {
             visible: true
         });
 
-        page.selectedNodes = [];
-        page.transformer.nodes([]);
-        page.layer.find('.selectionOutline').forEach(n => n.destroy());
-        page.layer.batchDraw();
-        floatingButtons?.remove();
-        disableCropMode(page);
-    }
+	        page.selectedNodes = [];
+	        page.transformer.nodes([]);
+	        page.layer.find('.selectionOutline').forEach(n => n.destroy());
+	        hideFloatingButtons();
+	        disableCropMode(page);
+	        page.layer.batchDraw();
+	    }
 
     if (!marqueeActive) return;
     if (!marqueeStart) return;
@@ -2334,56 +3217,97 @@ stage.container().addEventListener('dragleave', () => {
   stage.container().style.border = "none";
 });
 
-stage.container().addEventListener('drop', (e) => {
+stage.container().addEventListener('drop', async (e) => {
   e.preventDefault();
   stage.container().style.border = "none";
 
   const file = e.dataTransfer.files[0];
   if (!file || !file.type.startsWith("image/")) return;
 
-  const reader = new FileReader();
+  let variants = null;
+  try {
+      if (typeof window.createImageVariantsFromFile === "function") {
+          variants = await window.createImageVariantsFromFile(file, {
+              cacheKey: `drop:${file.name}:${file.size}:${file.lastModified}`
+          });
+      }
+  } catch (_e) {}
+  if (!variants) {
+      try {
+          const fallback = await (new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result || ""));
+              reader.onerror = () => reject(new Error("file_read_error"));
+              reader.readAsDataURL(file);
+          }));
+          variants = (typeof window.normalizeImageVariantPayload === "function")
+              ? window.normalizeImageVariantPayload(fallback)
+              : { original: fallback, editor: fallback, thumb: fallback };
+      } catch (_e) {
+          return;
+      }
+  }
+  const editorSrc = (typeof window.getImageVariantSource === "function")
+      ? window.getImageVariantSource(variants, "editor")
+      : String(variants?.editor || variants?.original || "");
+  if (!editorSrc) return;
+  const originalSrc = (typeof window.getImageVariantSource === "function")
+      ? window.getImageVariantSource(variants, "original")
+      : String(variants?.original || editorSrc);
+  const thumbSrc = (typeof window.getImageVariantSource === "function")
+      ? window.getImageVariantSource(variants, "thumb")
+      : String(variants?.thumb || editorSrc);
 
-  reader.onload = (ev) => {
-      Konva.Image.fromURL(ev.target.result, (img) => {
+  Konva.Image.fromURL(editorSrc, (img) => {
+      const pos = stage.getPointerPosition() || {
+          x: Math.max(0, e.clientX - stage.container().getBoundingClientRect().left),
+          y: Math.max(0, e.clientY - stage.container().getBoundingClientRect().top)
+      };
+      img.x(pos.x);
+      img.y(pos.y);
 
-          const pos = stage.getPointerPosition();
-          img.x(pos.x);
-          img.y(pos.y);
+      const maxWidth = W * 0.6;
+      const scale = Math.min(maxWidth / img.width(), 1);
 
-          const maxWidth = W * 0.6;
-          const scale = Math.min(maxWidth / img.width(), 1);
+      img.scale({ x: scale, y: scale });
+      img.draggable(true);
+      img.listening(true);
 
-          img.scale({ x: scale, y: scale });
-          img.draggable(true);
-          img.listening(true);
-
-          img.setAttrs({
-            isProductImage: false,
-            isUserImage: true,
-            slotIndex: null,
-            originalSrc: ev.target.result
-        });
-        
-        // 🔥 KROK 3 — dodajemy nazwę obiektu, aby działał transform, multi-select i menu warstw
-        img.name("droppedImage");
-        
-        // ustawienia: w pełni edytowalne, tak jak wszystkie obiekty
-        img.draggable(true);
-        img.listening(true);
-        
-        layer.add(img);
-        
-        
-        layer.batchDraw();
-        page.transformerLayer.batchDraw(); // ważne dla transformera
-        
+      img.setAttrs({
+        isProductImage: false,
+        isUserImage: true,
+        slotIndex: null
       });
-  };
+      if (typeof window.applyImageVariantsToKonvaNode === "function") {
+          window.applyImageVariantsToKonvaNode(img, {
+              original: originalSrc || editorSrc,
+              editor: editorSrc,
+              thumb: thumbSrc || editorSrc
+          });
+      } else {
+          img.setAttr("originalSrc", originalSrc || editorSrc);
+          img.setAttr("editorSrc", editorSrc);
+          img.setAttr("thumbSrc", thumbSrc || editorSrc);
+      }
 
-  reader.readAsDataURL(file);
+      // 🔥 KROK 3 — dodajemy nazwę obiektu, aby działał transform, multi-select i menu warstw
+      img.name("droppedImage");
+
+      // ustawienia: w pełni edytowalne, tak jak wszystkie obiekty
+      img.draggable(true);
+      img.listening(true);
+
+      layer.add(img);
+      layer.batchDraw();
+      page.transformerLayer.batchDraw(); // ważne dla transformera
+  });
 });
 // === ANIMACJA DRAG & DROP — CANVA STYLE ===
 let multiDragState = null;
+let dragMoveRafId = 0;
+let dragMovePendingNode = null;
+let dragGuideStopsCache = null;
+let dragGuideNode = null;
 const safeStartNodeDrag = (node, stageRef) => {
     if (!node || typeof node.startDrag !== "function") return false;
     if (typeof node.isDestroyed === "function" && node.isDestroyed()) return false;
@@ -2459,6 +3383,24 @@ const safeStopNodeDrag = (node) => {
 stage.on('dragstart', (e) => {
     const node = e.target;
     if (!node.draggable()) return;
+    if (dragMoveRafId) {
+        cancelAnimationFrame(dragMoveRafId);
+        dragMoveRafId = 0;
+    }
+    dragMovePendingNode = null;
+    dragGuideNode = node;
+    try {
+        dragGuideStopsCache = getSmartGuideStops(node);
+    } catch (_e) {
+        dragGuideStopsCache = null;
+    }
+    try {
+        const outlines = page.layer.find('.selectionOutline');
+        if (outlines && typeof outlines.forEach === "function") {
+            outlines.forEach((n) => n.destroy());
+            page.layer.batchDraw();
+        }
+    } catch (_e) {}
 
     // Nie przepinamy ręcznie drag między nodami.
     // Ręczne stop/start powodowało race condition z DD._dragElements w Konva 9.
@@ -2583,9 +3525,15 @@ const SMART_GUIDE_NAME = "smartGuideLine";
 const SMART_GUIDE_THRESHOLD = 5;
 
 function clearSmartGuides() {
+    let removed = false;
     try {
-        page.layer.find(`.${SMART_GUIDE_NAME}`).forEach((n) => n.destroy());
+        const guides = page.layer.find(`.${SMART_GUIDE_NAME}`);
+        if (guides && typeof guides.length === "number" && guides.length > 0) {
+            removed = true;
+            guides.forEach((n) => n.destroy());
+        }
     } catch (_err) {}
+    return removed;
 }
 
 function drawSmartGuideLine(points) {
@@ -2660,13 +3608,13 @@ function getSmartGuideStops(skipNode) {
     return { vertical, horizontal };
 }
 
-function applySmartGuidesAndSnap(node) {
+function applySmartGuidesAndSnap(node, stopsOverride) {
     if (!node || !node.getClientRect || !node.getAbsolutePosition || !node.setAbsolutePosition) return;
     const box = node.getClientRect({ relativeTo: page.layer, skipShadow: true, skipStroke: false });
     if (!box || !Number.isFinite(box.x) || !Number.isFinite(box.y)) return;
 
     const edges = nodeRectToEdges(box);
-    const stops = getSmartGuideStops(node);
+    const stops = stopsOverride || getSmartGuideStops(node);
 
     let bestV = null;
     edges.vertical.forEach((edge) => {
@@ -2689,8 +3637,7 @@ function applySmartGuidesAndSnap(node) {
     });
 
     if (!bestV && !bestH) {
-        clearSmartGuides();
-        return;
+        return clearSmartGuides();
     }
 
     const abs = node.getAbsolutePosition();
@@ -2700,43 +3647,71 @@ function applySmartGuidesAndSnap(node) {
     };
     node.setAbsolutePosition(next);
 
-    clearSmartGuides();
+    const hadOldGuides = clearSmartGuides();
     const stageW = stage.width ? stage.width() : 0;
     const stageH = stage.height ? stage.height() : 0;
     if (bestV) drawSmartGuideLine([bestV.stop, 0, bestV.stop, stageH]);
     if (bestH) drawSmartGuideLine([0, bestH.stop, stageW, bestH.stop]);
+    return hadOldGuides || !!bestV || !!bestH;
 }
 
-stage.on('dragmove', (e) => {
-    const node = e && e.target ? e.target : null;
-    if (node && node !== stage && typeof node.draggable === "function" && node.draggable()) {
-        try { applySmartGuidesAndSnap(node); } catch (_err) {}
-        if (multiDragState && multiDragState.leader === node) {
-            const dx = Number(node.x?.() || 0) - Number(multiDragState.leaderStartX || 0);
-            const dy = Number(node.y?.() || 0) - Number(multiDragState.leaderStartY || 0);
-            multiDragState.members.forEach((entry) => {
-                if (!entry || !entry.node) return;
-                const nx = Number(entry.startX) + dx;
-                const ny = Number(entry.startY) + dy;
-                if (Number.isFinite(nx)) entry.node.x(nx);
-                if (Number.isFinite(ny)) entry.node.y(ny);
-            });
-            page.layer.find('.selectionOutline').forEach(n => n.destroy());
-            highlightSelection();
+const flushDragMoveFrame = () => {
+    dragMoveRafId = 0;
+    const node = dragMovePendingNode;
+    dragMovePendingNode = null;
+    if (!node || node === stage || typeof node.draggable !== "function" || !node.draggable()) return;
+
+    let needsLayerDraw = false;
+    try {
+        if (dragGuideNode !== node || !dragGuideStopsCache) {
+            dragGuideNode = node;
+            dragGuideStopsCache = getSmartGuideStops(node);
         }
+        needsLayerDraw = !!applySmartGuidesAndSnap(node, dragGuideStopsCache) || needsLayerDraw;
+    } catch (_err) {}
+
+    if (multiDragState && multiDragState.leader === node) {
+        const dx = Number(node.x?.() || 0) - Number(multiDragState.leaderStartX || 0);
+        const dy = Number(node.y?.() || 0) - Number(multiDragState.leaderStartY || 0);
+        multiDragState.members.forEach((entry) => {
+            if (!entry || !entry.node) return;
+            const nx = Number(entry.startX) + dx;
+            const ny = Number(entry.startY) + dy;
+            if (Number.isFinite(nx)) entry.node.x(nx);
+            if (Number.isFinite(ny)) entry.node.y(ny);
+        });
+        needsLayerDraw = true;
     }
-    // Odśwież także transformerLayer – inaczej uchwyty potrafią "zostać"
-    // w starym miejscu do następnego kliknięcia.
+
     if (page.transformer && page.transformer.nodes && page.transformer.nodes().length) {
         try { page.transformer.forceUpdate && page.transformer.forceUpdate(); } catch (_e) {}
         page.transformerLayer && page.transformerLayer.batchDraw && page.transformerLayer.batchDraw();
     }
-    stage.batchDraw(); // 🚀 turbo płynność
+    if (needsLayerDraw) {
+        page.layer && page.layer.batchDraw && page.layer.batchDraw();
+    }
+};
+
+stage.on('dragmove', (e) => {
+    const node = e && e.target ? e.target : null;
+    dragMovePendingNode = node;
+    if (!dragMoveRafId) {
+        dragMoveRafId = requestAnimationFrame(flushDragMoveFrame);
+    }
 });
 
 stage.on('dragend', (e) => {
+    if (dragMoveRafId) {
+        cancelAnimationFrame(dragMoveRafId);
+        dragMoveRafId = 0;
+    }
+    dragMovePendingNode = null;
+    dragGuideStopsCache = null;
+    dragGuideNode = null;
+
     clearSmartGuides();
-    page.layer.find('.selectionOutline').forEach(n => n.destroy());
+    const hadOutlines = page.layer.find('.selectionOutline');
+    if (hadOutlines && typeof hadOutlines.forEach === "function") hadOutlines.forEach(n => n.destroy());
     multiDragState = null;
     
 
@@ -2757,6 +3732,7 @@ stage.on('dragend', (e) => {
 
     stage.container().style.cursor = 'grab';
     node.getLayer().batchDraw();
+    highlightSelection();
     if (page.transformer && page.transformer.nodes && page.transformer.nodes().length) {
         try { page.transformer.forceUpdate && page.transformer.forceUpdate(); } catch (_e) {}
         page.transformerLayer && page.transformerLayer.batchDraw && page.transformerLayer.batchDraw();
@@ -2789,7 +3765,7 @@ const setGridVisible = (visible) => {
     }
 };
 
-btnSettings.onclick = (e) => {
+btnSettings.onclick = async (e) => {
     e.stopPropagation();
 
     // Jeśli to okładka → blokujemy edycję
@@ -2798,11 +3774,11 @@ btnSettings.onclick = (e) => {
         return;
     }
 
-    // Preferujemy kontekstowe floating menu (jak Canva).
-    if (typeof showPageFloatingMenu === "function") {
-        showPageFloatingMenu();
-    } else if (typeof window.openPageEdit === "function") {
-        // Fallback do starszego panelu.
+    if (typeof window.ensurePageHydrated === "function") {
+        try { await window.ensurePageHydrated(page, { reason: "settings" }); } catch (_e) {}
+    }
+
+    if (typeof window.openPageEdit === "function") {
         window.openPageEdit(page);
     } else {
         console.error("Brak funkcji openPageEdit!");
@@ -4138,8 +5114,10 @@ stage.on("mousedown.pickSmallest", (e) => {
         )
     ) {
         const pickIsPriceLike = !!(pick.getAttr && (pick.getAttr("isPriceGroup") || pick.getAttr("isDirectPriceRectBg")));
+        const pickIsProductImage = !!(pick.getAttr && pick.getAttr("isProductImage"));
         // W grupie użytkownika zawsze wybieramy całą grupę (także dla ceny/prostokąta ceny).
-        if (!pickIsPriceLike || pick.getParent().getAttr("isUserGroup")) {
+        // Wyjątek: zdjęcie produktu musi dać się zaznaczyć bezpośrednio, aby działało kadrowanie.
+        if ((!pickIsPriceLike || pick.getParent().getAttr("isUserGroup")) && !pickIsProductImage) {
             pick = pick.getParent();
         }
     }
@@ -4346,8 +5324,17 @@ stage.on("click tap", (e) => {
         if (forcedDirectPriceTarget && isSelectableTarget(forcedDirectPriceTarget)) {
             page.selectedNodes = [forcedDirectPriceTarget];
         } else {
-            const normalized = normalizeSelection([autoTarget]);
-            page.selectedNodes = normalized.length ? normalized : [autoTarget];
+            const isDirectCropImage = !!(
+                autoTarget instanceof Konva.Image &&
+                autoTarget.getAttr &&
+                autoTarget.getAttr("isProductImage")
+            );
+            if (isDirectCropImage) {
+                page.selectedNodes = [autoTarget];
+            } else {
+                const normalized = normalizeSelection([autoTarget]);
+                page.selectedNodes = normalized.length ? normalized : [autoTarget];
+            }
         }
 
     }
@@ -4364,7 +5351,8 @@ stage.on("click tap", (e) => {
     if (singleImage) {
         const img = page.selectedNodes[0];
         const isUserImage = !!(img.getAttr && img.getAttr("isUserImage"));
-        if (isUserImage) {
+        const isProductImage = !!(img.getAttr && img.getAttr("isProductImage"));
+        if (isUserImage || isProductImage) {
             const cropEnabled = enableCropMode(page, img);
             if (!cropEnabled) {
                 disableCropMode(page);
@@ -4448,7 +5436,9 @@ page.layer.find('.selectionOutline').forEach(n => n.destroy());
 });
     
     // === EVENTY TRANSFORMACJI ===
-    stage.on('dragstart dragend transformend', () => {
+    // Nie wysyłamy canvasModified na dragstart — to powodowało
+    // kosztowne snapshoty historii/autosave jeszcze przed realną zmianą.
+    stage.on('dragend transformend', () => {
         try {
             if (page.transformer && page.transformer.nodes && page.transformer.nodes().length) {
                 page.transformer.forceUpdate && page.transformer.forceUpdate();
@@ -4469,6 +5459,9 @@ page.layer.find('.selectionOutline').forEach(n => n.destroy());
     }, 100);
 
     applyZoomToPage(page, currentZoom);
+    if (typeof window.registerPageForPerf === "function") {
+        window.registerPageForPerf(page);
+    }
     return page;
     // === ZAWSZE KOREKTUJEMY ROZMIAR WRAPPERA DO ROZMIARU STRONY ===
 // 🔥 TO JEST JEDYNY WAŻNY FRAGMENT — on usuwa białe linie w PDF
@@ -4500,6 +5493,9 @@ setTimeout(wrapperFixer, 500);
 window.deletePage = function(page) {
     const index = pages.indexOf(page);
     if (index === -1) return;
+    if (pagePerfObserver && page?.container) {
+        try { pagePerfObserver.unobserve(page.container); } catch (_e) {}
+    }
 
     page.stage.destroy();
     page.container.remove();
@@ -4510,6 +5506,9 @@ window.deletePage = function(page) {
         const h3 = p.container.querySelector('h3 span');
         if (h3) h3.textContent = `Strona ${i + 1}`;
     });
+    if (typeof window.refreshPagesPerf === "function") {
+        window.refreshPagesPerf();
+    }
 };
 
 // 🔧 Globalna naprawa interakcji (gdyby coś się "zawiesiło")
@@ -4525,6 +5524,9 @@ window.repairPageInteractions = function() {
         p.stage.container().style.pointerEvents = 'auto';
         p.stage.container().style.touchAction = 'none';
     });
+    if (typeof window.refreshPagesPerf === "function") {
+        window.refreshPagesPerf();
+    }
 };
 
 // === RYSOWANIE STRONY ===
@@ -5305,56 +6307,91 @@ if (familyImageUrls.length > 1) {
     for (let fi = 0; fi < count; fi++) {
         const srcUrl = familyImageUrls[fi];
         if (!srcUrl) continue;
-        Konva.Image.fromURL(srcUrl, (img) => {
-            if (!img || (typeof img.isDestroyed === "function" && img.isDestroyed())) return;
-
-            let frameX = boxX;
-            let frameY = boxY;
-            let frameW = boxW;
-            let frameH = boxH;
-
-            // Domyślny układ rodziny: pionowo, jedno pod drugim.
-            const gap = Math.max(2, Math.round(boxH * 0.02));
-            const stackCount = Math.max(1, count);
-            frameW = boxW * 0.74;
-            frameH = Math.max(1, (boxH - gap * (stackCount - 1)) / stackCount);
-            frameX = boxX;
-            frameY = boxY + fi * (frameH + gap);
-
-            // Ręczny układ z `styl-wlasny.js` (jeśli zdefiniowany dla produktu).
-            const manualLayout = normalizeLayoutItem(customImageLayouts[fi]);
-            if (manualLayout) {
-                frameX = boxX + boxW * manualLayout.x;
-                frameY = boxY + boxH * manualLayout.y;
-                frameW = boxW * manualLayout.w;
-                frameH = boxH * manualLayout.h;
+        (async () => {
+            let variants = (typeof window.normalizeImageVariantPayload === "function")
+                ? window.normalizeImageVariantPayload(srcUrl)
+                : { original: srcUrl, editor: srcUrl, thumb: srcUrl };
+            if (typeof window.createImageVariantsFromSource === "function") {
+                try {
+                    variants = await window.createImageVariantsFromSource(srcUrl, {
+                        cacheKey: `family:${srcUrl}`
+                    });
+                } catch (_e) {}
             }
+            const originalSrc = (typeof window.getImageVariantSource === "function")
+                ? window.getImageVariantSource(variants, "original")
+                : srcUrl;
+            const editorSrc = (typeof window.getImageVariantSource === "function")
+                ? window.getImageVariantSource(variants, "editor")
+                : (variants?.editor || srcUrl);
+            const thumbSrc = (typeof window.getImageVariantSource === "function")
+                ? window.getImageVariantSource(variants, "thumb")
+                : (variants?.thumb || editorSrc || srcUrl);
+            const renderSrc = String(editorSrc || srcUrl || "").trim();
+            if (!renderSrc) return;
 
-            const scale = frameW / Math.max(1, img.width());
-            const imgH = img.height() * scale;
+            Konva.Image.fromURL(renderSrc, (img) => {
+                if (!img || (typeof img.isDestroyed === "function" && img.isDestroyed())) return;
 
-            img.x(frameX);
-            img.y(frameY + (frameH - imgH) / 2);
-            img.scaleX(scale);
-            img.scaleY(scale);
-            img.draggable(true);
-            img.dragBoundFunc(pos => pos);
-            img.listening(true);
-            img.setAttrs({
-                width: img.width(),
-                height: img.height(),
-                isProductImage: true,
-                slotIndex: i,
-                familyImageIndex: fi
+                let frameX = boxX;
+                let frameY = boxY;
+                let frameW = boxW;
+                let frameH = boxH;
+
+                // Domyślny układ rodziny: pionowo, jedno pod drugim.
+                const gap = Math.max(2, Math.round(boxH * 0.02));
+                const stackCount = Math.max(1, count);
+                frameW = boxW * 0.74;
+                frameH = Math.max(1, (boxH - gap * (stackCount - 1)) / stackCount);
+                frameX = boxX;
+                frameY = boxY + fi * (frameH + gap);
+
+                // Ręczny układ z `styl-wlasny.js` (jeśli zdefiniowany dla produktu).
+                const manualLayout = normalizeLayoutItem(customImageLayouts[fi]);
+                if (manualLayout) {
+                    frameX = boxX + boxW * manualLayout.x;
+                    frameY = boxY + boxH * manualLayout.y;
+                    frameW = boxW * manualLayout.w;
+                    frameH = boxH * manualLayout.h;
+                }
+
+                const scale = frameW / Math.max(1, img.width());
+                const imgH = img.height() * scale;
+
+                img.x(frameX);
+                img.y(frameY + (frameH - imgH) / 2);
+                img.scaleX(scale);
+                img.scaleY(scale);
+                img.draggable(true);
+                img.dragBoundFunc(pos => pos);
+                img.listening(true);
+                img.setAttrs({
+                    width: img.width(),
+                    height: img.height(),
+                    isProductImage: true,
+                    slotIndex: i,
+                    familyImageIndex: fi
+                });
+                if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                    window.applyImageVariantsToKonvaNode(img, {
+                        original: originalSrc || renderSrc,
+                        editor: renderSrc,
+                        thumb: thumbSrc || renderSrc
+                    });
+                } else {
+                    img.setAttr("originalSrc", originalSrc || renderSrc);
+                    img.setAttr("editorSrc", renderSrc);
+                    img.setAttr("thumbSrc", thumbSrc || renderSrc);
+                }
+                layer.add(img);
+                setupProductImageDrag(img, layer);
+                addImageShadow(layer, img);
+                const priceGroupTop = layer.findOne((n) => n && n.getAttr && n.getAttr("isPriceGroup") && n.getAttr("slotIndex") === i);
+                if (priceGroupTop && priceGroupTop.moveToTop) priceGroupTop.moveToTop();
+                layer.batchDraw();
+                transformerLayer?.batchDraw?.();
             });
-            layer.add(img);
-            setupProductImageDrag(img, layer);
-            addImageShadow(layer, img);
-            const priceGroupTop = layer.findOne((n) => n && n.getAttr && n.getAttr("isPriceGroup") && n.getAttr("slotIndex") === i);
-            if (priceGroupTop && priceGroupTop.moveToTop) priceGroupTop.moveToTop();
-            layer.batchDraw();
-            transformerLayer?.batchDraw?.();
-        });
+        })();
     }
 } else if (page.slotObjects[i]) {
     const img = page.slotObjects[i];
@@ -5435,65 +6472,100 @@ addImageShadow(layer, img);
     if (window.LAYOUT_MODE === "layout8") imageExtraY = -160;
     const srcUrl = familyImageUrls[0];
     if (srcUrl) {
-        Konva.Image.fromURL(srcUrl, (img) => {
-            if (!img || (typeof img.isDestroyed === "function" && img.isDestroyed())) return;
-            let scale = Math.min(
-                (BW * 0.45 - 20) / img.width(),
-                (BH * 0.6) / img.height(),
-                1
-            );
-            let imgX = x + 20;
-            let imgY = imgTop + imageExtraY;
-            if (window.LAYOUT_MODE === "layout8") {
-                const boxW = BW_dynamic * 0.48;
-                const boxH = BH_dynamic * 0.52;
-                scale = Math.min(boxW / img.width(), boxH / img.height(), 1);
-                imgX = x + 12 + (boxW - img.width() * scale) / 2;
-                imgY = imgTop + imageExtraY + (boxH - img.height() * scale) / 2;
+        (async () => {
+            let variants = (typeof window.normalizeImageVariantPayload === "function")
+                ? window.normalizeImageVariantPayload(srcUrl)
+                : { original: srcUrl, editor: srcUrl, thumb: srcUrl };
+            if (typeof window.createImageVariantsFromSource === "function") {
+                try {
+                    variants = await window.createImageVariantsFromSource(srcUrl, {
+                        cacheKey: `family-single:${srcUrl}`
+                    });
+                } catch (_e) {}
             }
-            const manualSingle = normalizeLayoutItem(customImageLayouts[0]);
-            if (manualSingle) {
-                let boxX = x + 20;
-                let boxY = imgTop + imageExtraY;
-                let boxW = (BW * 0.45 - 20);
-                let boxH = (BH * 0.6);
-                if (window.LAYOUT_MODE === "layout8") {
-                    boxW = BW_dynamic * 0.48;
-                    boxH = BH_dynamic * 0.52;
-                    boxX = x + 12;
-                    boxY = imgTop + imageExtraY;
-                }
-                const frameX = boxX + boxW * manualSingle.x;
-                const frameY = boxY + boxH * manualSingle.y;
-                const frameW = boxW * manualSingle.w;
-                const frameH = boxH * manualSingle.h;
-                scale = frameW / Math.max(1, img.width());
-                const imgH = img.height() * scale;
-                imgX = frameX;
-                imgY = frameY + (frameH - imgH) / 2;
-            }
+            const originalSrc = (typeof window.getImageVariantSource === "function")
+                ? window.getImageVariantSource(variants, "original")
+                : srcUrl;
+            const editorSrc = (typeof window.getImageVariantSource === "function")
+                ? window.getImageVariantSource(variants, "editor")
+                : (variants?.editor || srcUrl);
+            const thumbSrc = (typeof window.getImageVariantSource === "function")
+                ? window.getImageVariantSource(variants, "thumb")
+                : (variants?.thumb || editorSrc || srcUrl);
+            const renderSrc = String(editorSrc || srcUrl || "").trim();
+            if (!renderSrc) return;
 
-            img.x(imgX);
-            img.y(imgY);
-            img.scaleX(scale);
-            img.scaleY(scale);
-            img.draggable(true);
-            img.dragBoundFunc(pos => pos);
-            img.listening(true);
-            img.setAttrs({
-                width: img.width(),
-                height: img.height(),
-                isProductImage: true,
-                slotIndex: i
+            Konva.Image.fromURL(renderSrc, (img) => {
+                if (!img || (typeof img.isDestroyed === "function" && img.isDestroyed())) return;
+                let scale = Math.min(
+                    (BW * 0.45 - 20) / img.width(),
+                    (BH * 0.6) / img.height(),
+                    1
+                );
+                let imgX = x + 20;
+                let imgY = imgTop + imageExtraY;
+                if (window.LAYOUT_MODE === "layout8") {
+                    const boxW = BW_dynamic * 0.48;
+                    const boxH = BH_dynamic * 0.52;
+                    scale = Math.min(boxW / img.width(), boxH / img.height(), 1);
+                    imgX = x + 12 + (boxW - img.width() * scale) / 2;
+                    imgY = imgTop + imageExtraY + (boxH - img.height() * scale) / 2;
+                }
+                const manualSingle = normalizeLayoutItem(customImageLayouts[0]);
+                if (manualSingle) {
+                    let boxX = x + 20;
+                    let boxY = imgTop + imageExtraY;
+                    let boxW = (BW * 0.45 - 20);
+                    let boxH = (BH * 0.6);
+                    if (window.LAYOUT_MODE === "layout8") {
+                        boxW = BW_dynamic * 0.48;
+                        boxH = BH_dynamic * 0.52;
+                        boxX = x + 12;
+                        boxY = imgTop + imageExtraY;
+                    }
+                    const frameX = boxX + boxW * manualSingle.x;
+                    const frameY = boxY + boxH * manualSingle.y;
+                    const frameW = boxW * manualSingle.w;
+                    const frameH = boxH * manualSingle.h;
+                    scale = frameW / Math.max(1, img.width());
+                    const imgH = img.height() * scale;
+                    imgX = frameX;
+                    imgY = frameY + (frameH - imgH) / 2;
+                }
+
+                img.x(imgX);
+                img.y(imgY);
+                img.scaleX(scale);
+                img.scaleY(scale);
+                img.draggable(true);
+                img.dragBoundFunc(pos => pos);
+                img.listening(true);
+                img.setAttrs({
+                    width: img.width(),
+                    height: img.height(),
+                    isProductImage: true,
+                    slotIndex: i
+                });
+                if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                    window.applyImageVariantsToKonvaNode(img, {
+                        original: originalSrc || renderSrc,
+                        editor: renderSrc,
+                        thumb: thumbSrc || renderSrc
+                    });
+                } else {
+                    img.setAttr("originalSrc", originalSrc || renderSrc);
+                    img.setAttr("editorSrc", renderSrc);
+                    img.setAttr("thumbSrc", thumbSrc || renderSrc);
+                }
+                layer.add(img);
+                setupProductImageDrag(img, layer);
+                addImageShadow(layer, img);
+                const priceGroupTop = layer.findOne((n) => n && n.getAttr && n.getAttr("isPriceGroup") && n.getAttr("slotIndex") === i);
+                if (priceGroupTop && priceGroupTop.moveToTop) priceGroupTop.moveToTop();
+                layer.batchDraw();
+                transformerLayer?.batchDraw?.();
             });
-            layer.add(img);
-            setupProductImageDrag(img, layer);
-            addImageShadow(layer, img);
-            const priceGroupTop = layer.findOne((n) => n && n.getAttr && n.getAttr("isPriceGroup") && n.getAttr("slotIndex") === i);
-            if (priceGroupTop && priceGroupTop.moveToTop) priceGroupTop.moveToTop();
-            layer.batchDraw();
-            transformerLayer?.batchDraw?.();
-        });
+        })();
     }
 }
 
@@ -5551,25 +6623,61 @@ addImageShadow(layer, img);
         const oldBanner = layer.getChildren().find(o => o.getAttr('name') === 'banner');
         if (oldBanner) oldBanner.destroy();
 
-        Konva.Image.fromURL(page.settings.bannerUrl, img => {
-            const scale = Math.min(W / img.width(), 113 / img.height());
-            img.scaleX(scale);
-            img.scaleY(scale);
-            img.x(0);
-            img.y(0);
-            img.setAttr('name', 'banner');
-            img.draggable(true);
-            img.dragBoundFunc(pos => pos);
-            layer.add(img);
-            img.listening(true);
-            img.setAttrs({
-                width: img.width(),
-                height: img.height()
+        (async () => {
+            const src = String(page.settings.bannerUrl || "").trim();
+            let variants = (typeof window.normalizeImageVariantPayload === "function")
+                ? window.normalizeImageVariantPayload(src)
+                : { original: src, editor: src, thumb: src };
+            if (src && typeof window.createImageVariantsFromSource === "function") {
+                try {
+                    variants = await window.createImageVariantsFromSource(src, {
+                        cacheKey: `banner:${src}`
+                    });
+                } catch (_e) {}
+            }
+            const originalSrc = (typeof window.getImageVariantSource === "function")
+                ? window.getImageVariantSource(variants, "original")
+                : src;
+            const editorSrc = (typeof window.getImageVariantSource === "function")
+                ? window.getImageVariantSource(variants, "editor")
+                : (variants?.editor || src);
+            const thumbSrc = (typeof window.getImageVariantSource === "function")
+                ? window.getImageVariantSource(variants, "thumb")
+                : (variants?.thumb || editorSrc || src);
+            const renderSrc = String(editorSrc || src || "").trim();
+            if (!renderSrc) return;
+
+            Konva.Image.fromURL(renderSrc, img => {
+                const scale = Math.min(W / img.width(), 113 / img.height());
+                img.scaleX(scale);
+                img.scaleY(scale);
+                img.x(0);
+                img.y(0);
+                img.setAttr('name', 'banner');
+                img.draggable(true);
+                img.dragBoundFunc(pos => pos);
+                layer.add(img);
+                img.listening(true);
+                img.setAttrs({
+                    width: img.width(),
+                    height: img.height()
+                });
+                if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                    window.applyImageVariantsToKonvaNode(img, {
+                        original: originalSrc || renderSrc,
+                        editor: renderSrc,
+                        thumb: thumbSrc || renderSrc
+                    });
+                } else {
+                    img.setAttr("originalSrc", originalSrc || renderSrc);
+                    img.setAttr("editorSrc", renderSrc);
+                    img.setAttr("thumbSrc", thumbSrc || renderSrc);
+                }
+                img.moveToBottom();
+                layer.batchDraw();
+                transformerLayer.batchDraw();
             });
-            img.moveToBottom();
-            layer.batchDraw();
-            transformerLayer.batchDraw();
-        });
+        })();
     } else {
         layer.batchDraw();
         transformerLayer.batchDraw();
@@ -5588,10 +6696,14 @@ const pageToolbarStyle = document.createElement('style');
 pageToolbarStyle.textContent = `
 .page-toolbar {
     width: ${W}px;
-    margin-bottom: 6px;
+    margin: 0 auto 8px;
+    padding: 0 6px;
+    box-sizing: border-box;
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 8px;
+    overflow: visible;
     color: #5a6673;
     font-family: Arial;
 }
@@ -5599,12 +6711,17 @@ pageToolbarStyle.textContent = `
 .page-title {
     font-size: 18px;
     font-weight: 600;
-    margin-left: 10px;
+    margin-left: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: left;
 }
 
 .page-tools {
     display: flex;
     gap: 8px;
+    white-space: nowrap;
+    flex: 0 0 auto;
 }
 
 .page-btn {
@@ -6195,7 +7312,7 @@ document.addEventListener("click", (e) => {
 
 
 
-window.importImagesFromFiles = function(filesOverride) {
+window.importImagesFromFiles = async function(filesOverride) {
     const input = document.getElementById('imageInput');
     const files = filesOverride || input?.files;
     if (!files || files.length === 0) return alert('Wybierz zdjęcia!');
@@ -6244,88 +7361,133 @@ window.importImagesFromFiles = function(filesOverride) {
         }, 0);
     };
 
-    matched.forEach(({ file, positions, indeksKey }) => {
-      const reader = new FileReader();
-      reader.onload = e => {
-          const imgData = e.target.result;
-          if (indeksKey) {
-              window.productImageCache[indeksKey] = imgData;
-          }
-  
-          Konva.Image.fromURL(imgData, img => {
-  
-              positions.forEach(({ pageIndex, slotIndex }) => {
-                  const page = pages[pageIndex];
-  
-                  if (page.slotObjects[slotIndex]) {
-                      page.slotObjects[slotIndex].destroy();
-                  }
-  
-                  let scale = Math.min(
-                      (BW * 0.45 - 20) / img.width(),
-                      (BH * 0.6) / img.height(),
-                      1
-                  );
-  
-                  let x = ML + (slotIndex % COLS) * (BW + GAP) + 20;
-let y = MT + Math.floor(slotIndex / COLS) * (BH + GAP) + 100;
+    let importedCount = 0;
+    for (const { file, positions, indeksKey } of matched) {
+        let variants = null;
+        try {
+            if (typeof window.createImageVariantsFromFile === "function") {
+                variants = await window.createImageVariantsFromFile(file, {
+                    cacheKey: `product:${indeksKey}:${file.name}:${file.size}:${file.lastModified}`
+                });
+            }
+        } catch (_e) {}
+        if (!variants) {
+            try {
+                const fallback = await (new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(String(reader.result || ""));
+                    reader.onerror = () => reject(new Error("file_read_error"));
+                    reader.readAsDataURL(file);
+                }));
+                variants = (typeof window.normalizeImageVariantPayload === "function")
+                    ? window.normalizeImageVariantPayload(fallback)
+                    : { original: fallback, editor: fallback, thumb: fallback };
+            } catch (_e) {
+                continue;
+            }
+        }
 
-// 🔥 przesunięcie zdjęć tylko w layout8
-if (window.LAYOUT_MODE === "layout8") {
-    y -= 80;   // podnieś zdjęcie wyżej
-    x += 5;    // opcjonalnie wyrównanie w poziomie
+        const originalSrc = (typeof window.getImageVariantSource === "function")
+            ? window.getImageVariantSource(variants, "original")
+            : String(variants?.original || "");
+        const editorSrc = (typeof window.getImageVariantSource === "function")
+            ? window.getImageVariantSource(variants, "editor")
+            : String(variants?.editor || originalSrc);
+        const thumbSrc = (typeof window.getImageVariantSource === "function")
+            ? window.getImageVariantSource(variants, "thumb")
+            : String(variants?.thumb || editorSrc || originalSrc);
+        if (!editorSrc) continue;
 
-    // ✅ stała ramka, równe pozycje i skala
-    const boxW = BW_dynamic * 0.48;
-    const boxH = BH_dynamic * 0.52;
-    scale = Math.min(boxW / img.width(), boxH / img.height(), 1);
-    x = x + 12 + (boxW - img.width() * scale) / 2;
-    y = y + (boxH - img.height() * scale) / 2;
-}
+        if (indeksKey) {
+            _setProductImageCacheEntry(indeksKey, {
+                original: originalSrc || editorSrc,
+                editor: editorSrc,
+                thumb: thumbSrc || editorSrc
+            });
+        }
 
-  
-                  const clone = img.clone();
-                  clone.x(x);
-                  clone.y(y);
-                  clone.scaleX(scale);
-                  clone.scaleY(scale);
-                  clone.draggable(true);
-                  clone.dragBoundFunc(pos => pos);
-  
-                  page.layer.add(clone);
-                  clone.listening(true);
-  
-                  clone.setAttrs({
-                      width: clone.width(),
-                      height: clone.height(),
-                      isProductImage: true,
-                      slotIndex: slotIndex,
-                      originalSrc: imgData
-                  });
-  // 🔥 CANVA STYLE SHADOW DLA PNG
-setupProductImageDrag(clone, page.layer);
-addImageShadow(page.layer, clone);
-                  clone.moveToTop();
+        await new Promise((resolveLoad) => {
+            Konva.Image.fromURL(editorSrc, (img) => {
+                positions.forEach(({ pageIndex, slotIndex }) => {
+                    const page = pages[pageIndex];
+                    if (!page || !page.layer) return;
 
-              
-                  page.slotObjects[slotIndex] = clone;
-  
-                  page.layer.batchDraw();
-                  page.transformerLayer.batchDraw();
-              });
-              refreshCatalogStyleAfterImages();
-          });
-      };
-      reader.readAsDataURL(file);
-  });
-  
-          
+                    if (page.slotObjects[slotIndex]) {
+                        page.slotObjects[slotIndex].destroy();
+                    }
+
+                    let scale = Math.min(
+                        (BW * 0.45 - 20) / img.width(),
+                        (BH * 0.6) / img.height(),
+                        1
+                    );
+
+                    let x = ML + (slotIndex % COLS) * (BW + GAP) + 20;
+                    let y = MT + Math.floor(slotIndex / COLS) * (BH + GAP) + 100;
+
+                    // 🔥 przesunięcie zdjęć tylko w layout8
+                    if (window.LAYOUT_MODE === "layout8") {
+                        y -= 80;   // podnieś zdjęcie wyżej
+                        x += 5;    // opcjonalnie wyrównanie w poziomie
+
+                        // ✅ stała ramka, równe pozycje i skala
+                        const boxW = BW_dynamic * 0.48;
+                        const boxH = BH_dynamic * 0.52;
+                        scale = Math.min(boxW / img.width(), boxH / img.height(), 1);
+                        x = x + 12 + (boxW - img.width() * scale) / 2;
+                        y = y + (boxH - img.height() * scale) / 2;
+                    }
+
+                    const clone = img.clone();
+                    clone.x(x);
+                    clone.y(y);
+                    clone.scaleX(scale);
+                    clone.scaleY(scale);
+                    clone.draggable(true);
+                    clone.dragBoundFunc(pos => pos);
+
+                    page.layer.add(clone);
+                    clone.listening(true);
+
+                    clone.setAttrs({
+                        width: clone.width(),
+                        height: clone.height(),
+                        isProductImage: true,
+                        slotIndex: slotIndex
+                    });
+                    if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                        window.applyImageVariantsToKonvaNode(clone, {
+                            original: originalSrc || editorSrc,
+                            editor: editorSrc,
+                            thumb: thumbSrc || editorSrc
+                        });
+                    } else {
+                        clone.setAttr("originalSrc", originalSrc || editorSrc);
+                        clone.setAttr("editorSrc", editorSrc);
+                        clone.setAttr("thumbSrc", thumbSrc || editorSrc);
+                    }
+                    // 🔥 CANVA STYLE SHADOW DLA PNG
+                    setupProductImageDrag(clone, page.layer);
+                    addImageShadow(page.layer, clone);
+                    clone.moveToTop();
+
+                    page.slotObjects[slotIndex] = clone;
+
+                    page.layer.batchDraw();
+                    page.transformerLayer.batchDraw();
+                });
+                importedCount += 1;
+                refreshCatalogStyleAfterImages();
+                resolveLoad();
+            });
+        });
+    }
 
     if (!filesOverride && input) input.value = '';
     if (typeof window.quickStatusUpdate === "function") {
         window.quickStatusUpdate("images", matched.length > 0);
     }
-    if (matched.length > 0) {
+    if (importedCount > 0) {
         const quickImagesBtn = document.getElementById('quickImagesBtn');
         if (quickImagesBtn) {
             quickImagesBtn.classList.remove('error');
@@ -6333,13 +7495,13 @@ addImageShadow(page.layer, clone);
         }
     }
     if (typeof window.showAppToast === "function") {
-        window.showAppToast(`Zaimportowano ${matched.length} zdjęć`, matched.length > 0 ? "success" : "error");
+        window.showAppToast(`Zaimportowano ${importedCount}/${matched.length} zdjec`, importedCount > 0 ? "success" : "error");
     } else {
-        alert(`Zaimportowano ${matched.length} zdjęć`);
+        alert(`Zaimportowano ${importedCount}/${matched.length} zdjec`);
     }
 };
 
-window.applyCachedProductImages = function() {
+window.applyCachedProductImages = async function() {
     if (!window.productImageCache) return;
     if (!Array.isArray(pages) || pages.length === 0) return;
     if (!window.allProducts || !window.allProducts.length) return;
@@ -6371,64 +7533,102 @@ window.applyCachedProductImages = function() {
         }, 0);
     };
 
-    Object.keys(window.productImageCache).forEach((indeksKey) => {
-        const imgData = window.productImageCache[indeksKey];
+    const keys = Object.keys(window.productImageCache);
+    for (const indeksKey of keys) {
+        const cachedValue = window.productImageCache[indeksKey];
         const positions = map.get(indeksKey);
-        if (!imgData || !positions || positions.length === 0) return;
+        if (!cachedValue || !positions || positions.length === 0) continue;
 
-        Konva.Image.fromURL(imgData, img => {
-            positions.forEach(({ pageIndex, slotIndex }) => {
-                const page = pages[pageIndex];
-                if (!page) return;
+        let variants = (typeof window.normalizeImageVariantPayload === "function")
+            ? window.normalizeImageVariantPayload(cachedValue)
+            : { original: String(cachedValue || ""), editor: String(cachedValue || ""), thumb: String(cachedValue || "") };
 
-                if (page.slotObjects[slotIndex]) {
-                    page.slotObjects[slotIndex].destroy();
-                }
-
-                const scale = Math.min(
-                    (BW * 0.45 - 20) / img.width(),
-                    (BH * 0.6) / img.height(),
-                    1
-                );
-
-                let x = ML + (slotIndex % COLS) * (BW + GAP) + 20;
-                let y = MT + Math.floor(slotIndex / COLS) * (BH + GAP) + 100;
-
-                if (window.LAYOUT_MODE === "layout8") {
-                    y -= 80;
-                    x += 5;
-                }
-
-                const clone = img.clone();
-                clone.x(x);
-                clone.y(y);
-                clone.scaleX(scale);
-                clone.scaleY(scale);
-                clone.draggable(true);
-                clone.dragBoundFunc(pos => pos);
-
-                page.layer.add(clone);
-                clone.listening(true);
-
-                clone.setAttrs({
-                    width: clone.width(),
-                    height: clone.height(),
-                    isProductImage: true,
-                    slotIndex: slotIndex,
-                    originalSrc: imgData
+        if (typeof cachedValue === "string" && typeof window.createImageVariantsFromSource === "function") {
+            try {
+                variants = await window.createImageVariantsFromSource(cachedValue, {
+                    cacheKey: `product-cache:${indeksKey}`
                 });
+                _setProductImageCacheEntry(indeksKey, variants);
+            } catch (_e) {}
+        }
 
-                setupProductImageDrag(clone, page.layer);
-                addImageShadow(page.layer, clone);
-                clone.moveToTop();
+        const originalSrc = (typeof window.getImageVariantSource === "function")
+            ? window.getImageVariantSource(variants, "original")
+            : String(variants?.original || "");
+        const editorSrc = (typeof window.getImageVariantSource === "function")
+            ? window.getImageVariantSource(variants, "editor")
+            : String(variants?.editor || originalSrc);
+        const thumbSrc = (typeof window.getImageVariantSource === "function")
+            ? window.getImageVariantSource(variants, "thumb")
+            : String(variants?.thumb || editorSrc || originalSrc);
+        if (!editorSrc) continue;
 
-                page.slotObjects[slotIndex] = clone;
-                page.layer.batchDraw();
-                page.transformerLayer.batchDraw();
+        await new Promise((resolveLoad) => {
+            Konva.Image.fromURL(editorSrc, (img) => {
+                positions.forEach(({ pageIndex, slotIndex }) => {
+                    const page = pages[pageIndex];
+                    if (!page) return;
+
+                    if (page.slotObjects[slotIndex]) {
+                        page.slotObjects[slotIndex].destroy();
+                    }
+
+                    const scale = Math.min(
+                        (BW * 0.45 - 20) / img.width(),
+                        (BH * 0.6) / img.height(),
+                        1
+                    );
+
+                    let x = ML + (slotIndex % COLS) * (BW + GAP) + 20;
+                    let y = MT + Math.floor(slotIndex / COLS) * (BH + GAP) + 100;
+
+                    if (window.LAYOUT_MODE === "layout8") {
+                        y -= 80;
+                        x += 5;
+                    }
+
+                    const clone = img.clone();
+                    clone.x(x);
+                    clone.y(y);
+                    clone.scaleX(scale);
+                    clone.scaleY(scale);
+                    clone.draggable(true);
+                    clone.dragBoundFunc(pos => pos);
+
+                    page.layer.add(clone);
+                    clone.listening(true);
+
+                    clone.setAttrs({
+                        width: clone.width(),
+                        height: clone.height(),
+                        isProductImage: true,
+                        slotIndex: slotIndex
+                    });
+                    if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                        window.applyImageVariantsToKonvaNode(clone, {
+                            original: originalSrc || editorSrc,
+                            editor: editorSrc,
+                            thumb: thumbSrc || editorSrc
+                        });
+                    } else {
+                        clone.setAttr("originalSrc", originalSrc || editorSrc);
+                        clone.setAttr("editorSrc", editorSrc);
+                        clone.setAttr("thumbSrc", thumbSrc || editorSrc);
+                    }
+
+                    setupProductImageDrag(clone, page.layer);
+                    addImageShadow(page.layer, clone);
+                    clone.moveToTop();
+
+                    page.slotObjects[slotIndex] = clone;
+                    page.layer.batchDraw();
+                    page.transformerLayer.batchDraw();
+                });
+                refreshCatalogStyleAfterImages();
+                resolveLoad();
             });
-            refreshCatalogStyleAfterImages();
         });
-    });
+    }
 };
 
 // Auto-import po wybraniu plików (bez klikania przycisku)
@@ -6441,13 +7641,6 @@ if (imageInputAuto) {
 
 window.generatePDF = async function(pageSelection) {
     if (!pages.length) return alert('Brak stron');
-
-    const pdf = new jsPDF({
-        orientation: 'p',
-        unit: 'px',
-        format: [W, H]
-    });
-
     let exportPages = pages;
     if (Array.isArray(pageSelection) && pageSelection.length > 0) {
         const byNumber = new Map(pages.map(p => [p.number, p]));
@@ -6460,52 +7653,89 @@ window.generatePDF = async function(pageSelection) {
         }
     }
 
+    try {
+        await ensurePagesReadyForExport(exportPages);
+    } catch (_e) {
+        alert("Nie udało się przygotować stron do eksportu.");
+        return;
+    }
+
+    const releaseForceDraw = (typeof window.beginForcePageDraw === "function")
+        ? window.beginForcePageDraw()
+        : null;
+    if (typeof window.forceDrawAllPagesForExport === "function") {
+        window.forceDrawAllPagesForExport();
+    }
+    try {
+
+    const pdf = new jsPDF({
+        orientation: 'p',
+        unit: 'px',
+        format: [W, H]
+    });
+
     for (let i = 0; i < exportPages.length; i++) {
         const page = exportPages[i];
-
-        // 🔹 1. Ukryj transformer na tej stronie na czas eksportu
-        if (page.transformer) {
-            page.transformer.visible(false);
-        }
-        if (page.transformerLayer) {
-            page.transformerLayer.hide();
-            page.transformerLayer.batchDraw();
-        }
-
-        // 🔹 2. Ukryj siatkę (jeśli jest) na czas eksportu
         const overlay = document.getElementById(`g${page.number}`);
-        if (overlay) overlay.style.display = 'none';
+        const restoreImages = (typeof window.swapPageImagesToOriginalForExport === "function")
+            ? await window.swapPageImagesToOriginalForExport(page)
+            : null;
 
-        // 🔹 3. Render sceny do obrazka (JUŻ BEZ UCHWYTÓW)
-        const data = page.stage.toDataURL({
-    mimeType: "image/jpeg",
-    quality: 1.0,    // bardzo dobra jakość
-    pixelRatio: 3   // bardzo ostry PDF
-});
+        try {
+            // 🔹 1. Ukryj transformer na tej stronie na czas eksportu
+            if (page.transformer) {
+                page.transformer.visible(false);
+            }
+            if (page.transformerLayer) {
+                page.transformerLayer.hide();
+                page.transformerLayer.batchDraw();
+            }
 
-        // 🔹 4. Dodaj stronę do PDF
-        if (i > 0) pdf.addPage();
-        pdf.addImage(data, 'PNG', 0, 0, W, H);
+            // 🔹 2. Ukryj siatkę (jeśli jest) na czas eksportu
+            if (overlay) overlay.style.display = 'none';
 
-        // 🔹 5. Przywróć siatkę
-        if (overlay) overlay.style.display = '';
+            // 🔹 3. Render sceny do obrazka (JUŻ BEZ UCHWYTÓW)
+            const data = page.stage.toDataURL({
+                mimeType: "image/jpeg",
+                quality: 1.0,
+                pixelRatio: 3
+            });
 
-        // 🔹 6. Przywróć transformer po eksporcie
-        if (page.transformer) {
-            page.transformer.visible(true);
-        }
-        if (page.transformerLayer) {
-            page.transformerLayer.show();
-            page.transformerLayer.batchDraw();
+            // 🔹 4. Dodaj stronę do PDF
+            if (i > 0) pdf.addPage();
+            pdf.addImage(data, 'PNG', 0, 0, W, H);
+        } finally {
+            // 🔹 5. Przywróć siatkę + obrazy + transformer
+            if (overlay) overlay.style.display = '';
+            if (typeof restoreImages === "function") restoreImages();
+            if (page.transformer) {
+                page.transformer.visible(true);
+            }
+            if (page.transformerLayer) {
+                page.transformerLayer.show();
+                page.transformerLayer.batchDraw();
+            }
         }
     }
 
     pdf.save('katalog.pdf');
+    } finally {
+        if (typeof window.releaseExportImageCache === "function") window.releaseExportImageCache();
+        if (typeof releaseForceDraw === "function") releaseForceDraw();
+    }
 };
 
 
 window.generatePDFBlob = async function() {
     if (!pages.length) throw new Error();
+    await ensurePagesReadyForExport(pages);
+    const releaseForceDraw = (typeof window.beginForcePageDraw === "function")
+        ? window.beginForcePageDraw()
+        : null;
+    if (typeof window.forceDrawAllPagesForExport === "function") {
+        window.forceDrawAllPagesForExport();
+    }
+    try {
 
     const pdf = new jsPDF({
         orientation: 'p',
@@ -6515,40 +7745,49 @@ window.generatePDFBlob = async function() {
 
 
     for (let i = 0; i < pages.length; i++) {
+        const page = pages[i];
+        const overlay = document.getElementById(`g${page.number}`);
+        let overlayParent = null;
+        const restoreImages = (typeof window.swapPageImagesToOriginalForExport === "function")
+            ? await window.swapPageImagesToOriginalForExport(page)
+            : null;
 
-    // --- USUNIĘCIE overlay PRZED renderem PDF ---
-    const overlay = document.getElementById(`g${pages[i].number}`);
-    let overlayParent = null;
+        try {
+            // --- USUNIĘCIE overlay PRZED renderem PDF ---
+            if (overlay) {
+                overlayParent = overlay.parentNode;
+                overlay.remove();
+            }
 
-    if (overlay) {
-        overlayParent = overlay.parentNode;
-        overlay.remove();  // 🔥 to usuwa białą linię na 100%
+            // --- RENDER STRONY ---
+            const data = page.stage.toDataURL({
+                mimeType: "image/jpeg",
+                quality: 0.82,
+                pixelRatio: 1.35
+            });
+
+            if (i > 0) pdf.addPage();
+            pdf.addImage(data, 'PNG', 0, 0, W, H);
+        } finally {
+            if (overlay && overlayParent) {
+                overlayParent.appendChild(overlay);
+            }
+            if (typeof restoreImages === "function") restoreImages();
+        }
     }
-
-    // --- RENDER STRONY ---
-    // JPEG zamiast PNG + mniejszy pixelRatio
-const data = pages[i].stage.toDataURL({
-    mimeType: "image/jpeg",
-    quality: 0.82,   // 🔥 lepsza jakość
-    pixelRatio: 1.35 // 🔥 ostro, ale nadal lekko
-});
-
-
-
-    if (i > 0) pdf.addPage();
-    pdf.addImage(data, 'PNG', 0, 0, W, H);
-
-    // --- PRZYWRÓCENIE overlay PO renderze ---
-    if (overlay && overlayParent) {
-        overlayParent.appendChild(overlay);
-    }
-}
 
 return pdf.output('blob');
+    } finally {
+        if (typeof window.releaseExportImageCache === "function") window.releaseExportImageCache();
+        if (typeof releaseForceDraw === "function") releaseForceDraw();
+    }
 
 };
 
 window.clearAll = function() {
+    if (typeof window.releaseImageMemoryCaches === "function") {
+        window.releaseImageMemoryCaches();
+    }
     pages.forEach(p => {
         p.stage?.destroy();
         p.container?.remove();
@@ -6835,6 +8074,19 @@ window.generateCanvaPDF = async function (pageNumbers) {
         alert("Brak stron");
         return;
     }
+    try {
+        await ensurePagesReadyForExport(pages);
+    } catch (_e) {
+        alert("Nie udało się przygotować stron do eksportu.");
+        return;
+    }
+    const releaseForceDraw = (typeof window.beginForcePageDraw === "function")
+        ? window.beginForcePageDraw()
+        : null;
+    if (typeof window.forceDrawAllPagesForExport === "function") {
+        window.forceDrawAllPagesForExport();
+    }
+    try {
 
     const pdf = new jsPDF({
         orientation: "p",
@@ -6943,30 +8195,95 @@ if (node instanceof Konva.Group && node.getAttr("isPriceGroup")) {
     }
 
     pdf.save("katalog_canva_editable.pdf");
+    } finally {
+        if (typeof window.releaseExportImageCache === "function") window.releaseExportImageCache();
+        if (typeof releaseForceDraw === "function") releaseForceDraw();
+    }
 };
 
 
 window.ExcelImporterReady = false;
+if (!window.__pageToolbarSettingsDelegated) {
+    window.__pageToolbarSettingsDelegated = true;
+    document.addEventListener('click', async (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('.page-toolbar .settings') : null;
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        const pageContainer = btn.closest('.page-container');
+        const list = Array.isArray(window.pages) ? window.pages : (Array.isArray(pages) ? pages : []);
+        const page = list.find(p => p && p.container === pageContainer) || list[0] || null;
+        if (!page || page.isCover) return;
+
+        if (page.stage) {
+            document.activeStage = page.stage;
+        }
+
+        if (
+            window._activePageFloatingOwner &&
+            typeof window._activePageFloatingOwner.hidePageFloatingMenu === "function"
+        ) {
+            window._activePageFloatingOwner.hidePageFloatingMenu();
+        }
+
+        if (typeof window.ensurePageHydrated === "function") {
+            try { await window.ensurePageHydrated(page, { reason: "settings" }); } catch (_e) {}
+        }
+
+        if (typeof window.openPageEdit === "function") {
+            window.openPageEdit(page);
+            return;
+        }
+
+        console.error("Brak funkcji openPageEdit!");
+    }, true);
+}
 // === GLOBALNE ODZNACZANIE POZA KONTENEREM ROBOCZYM ===
 document.addEventListener('click', (e) => {
-  if (e.target && e.target.type === "color") return;
-  const clickedInsidePage = e.target.closest('.page-container');
+  const targetEl =
+    (e.target && e.target.nodeType === 1 && e.target) ||
+    (e.target && e.target.parentElement) ||
+    null;
+  if (!targetEl) return;
+  if (targetEl.type === "color") return;
+
+  const clickedInsideCanvas =
+    targetEl.closest('.canvas-wrapper') ||
+    targetEl.closest('.page-zoom-wrap') ||
+    targetEl.closest('[id^="k"]');
   const clickedInsideMenus =
-    e.target.closest('#floatingMenu') ||
-    e.target.closest('#floatingSubmenu') ||
-    e.target.closest('#shapePanel');
+    targetEl.closest('#floatingMenu') ||
+    targetEl.closest('#floatingSubmenu') ||
+    targetEl.closest('#groupQuickMenu') ||
+    targetEl.closest('#shapePanel');
 
-  if (!clickedInsidePage && !clickedInsideMenus) {
-    pages.forEach(page => {
-      page.selectedNodes = [];
-      page.transformer.nodes([]);
+  if (!clickedInsideCanvas && !clickedInsideMenus) {
+		    const hasAnyFloatingUi =
+		      !!document.getElementById('groupQuickMenu') ||
+		      !!document.getElementById('floatingMenu') ||
+		      !!document.getElementById('floatingSubmenu');
+		    pages.forEach(page => {
+	          const hadSelection = Array.isArray(page.selectedNodes) && page.selectedNodes.length > 0;
+	          let hadTransformer = false;
+	          try {
+	              hadTransformer = !!(page.transformer && page.transformer.nodes && page.transformer.nodes().length);
+	          } catch (_e) {}
+	          const outlines = page.layer.find('.selectionOutline');
+	          const hadOutlines = !!(outlines && typeof outlines.length === "number" && outlines.length > 0);
+	          const hadCropMode = !!page._cropMode;
+	          if (hasAnyFloatingUi && typeof page.hideFloatingButtons === "function") {
+	              page.hideFloatingButtons();
+	          }
+	          if (!hadSelection && !hadTransformer && !hadOutlines && !hadCropMode) return;
 
-      // 🔥 USUNIĘCIE WSZYSTKICH DASH-OUTLINE
-      page.layer.find('.selectionOutline').forEach(n => n.destroy());
-      page.layer.batchDraw();
-
-      page.transformerLayer.batchDraw();
-    });
+		      page.selectedNodes = [];
+		      page.transformer.nodes([]);
+		      outlines.forEach(n => n.destroy());
+		      disableCropMode(page);
+		      page.layer.batchDraw();
+		      page.transformerLayer.batchDraw();
+		    });
 
     const menu = document.getElementById('floatingMenu');
     if (menu) {
@@ -7072,24 +8389,20 @@ function getActivePage() {
 }
 
 window.toggleActivePageSettingsMenu = function(anchorEl) {
+    void anchorEl;
     const page = getActivePage();
     if (!page || page.isCover) return;
-    if (page._pageFloatingMenuOpen) {
-        if (typeof page.hidePageFloatingMenu === "function") {
-            page.hidePageFloatingMenu();
-        }
-        return;
-    }
     if (
         window._activePageFloatingOwner &&
-        window._activePageFloatingOwner !== page &&
         typeof window._activePageFloatingOwner.hidePageFloatingMenu === "function"
     ) {
         window._activePageFloatingOwner.hidePageFloatingMenu();
     }
-    if (typeof page.showPageFloatingMenu === "function") {
-        page.showPageFloatingMenu({ anchorEl: anchorEl || document.getElementById('pageSettingsToggleBtn') });
+    if (typeof window.openPageEdit === "function") {
+        window.openPageEdit(page);
+        return;
     }
+    console.error("Brak funkcji openPageEdit!");
 };
 
 function pasteClipboardToPage(page, pointer) {
@@ -7355,6 +8668,9 @@ window.movePage = function(page, direction) {
         const title = p.container.querySelector('.page-title');
         if (title) title.textContent = `Page ${i + 1}`;
     });
+    if (typeof window.refreshPagesPerf === "function") {
+        window.refreshPagesPerf();
+    }
 
     console.log(`Strona przesunięta na pozycję ${newIndex + 1}`);
 };
@@ -7752,25 +9068,70 @@ function enableAddImageModeFallback() {
             const input = document.createElement('input');
             input.type = 'file';
             input.accept = 'image/*';
-            input.onchange = (ev) => {
+            input.onchange = async (ev) => {
                 const file = ev.target.files && ev.target.files[0];
                 if (!file) return;
-                const reader = new FileReader();
-                reader.onload = (re) => {
-                    Konva.Image.fromURL(re.target.result, (img) => {
-                        img.x(pos.x);
-                        img.y(pos.y);
-                        img.draggable(true);
-                        img.listening(true);
-                        page.layer.add(img);
-                        setupProductImageDrag(img, page.layer);
-                        page.layer.batchDraw();
-                        try {
-                            window.dispatchEvent(new CustomEvent('canvasModified', { detail: page.stage }));
-                        } catch (_e) {}
+                let variants = null;
+                try {
+                    if (typeof window.createImageVariantsFromFile === "function") {
+                        variants = await window.createImageVariantsFromFile(file, {
+                            cacheKey: `fallback:${file.name}:${file.size}:${file.lastModified}`
+                        });
+                    }
+                } catch (_e) {}
+                if (!variants) {
+                    try {
+                        const fallback = await (new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(String(reader.result || ""));
+                            reader.onerror = () => reject(new Error("fallback_image_read_error"));
+                            reader.readAsDataURL(file);
+                        }));
+                        variants = (typeof window.normalizeImageVariantPayload === "function")
+                            ? window.normalizeImageVariantPayload(fallback)
+                            : { original: fallback, editor: fallback, thumb: fallback };
+                    } catch (_e) {
+                        return;
+                    }
+                }
+                const originalSrc = (typeof window.getImageVariantSource === "function")
+                    ? window.getImageVariantSource(variants, "original")
+                    : String(variants?.original || "");
+                const editorSrc = (typeof window.getImageVariantSource === "function")
+                    ? window.getImageVariantSource(variants, "editor")
+                    : String(variants?.editor || originalSrc);
+                const thumbSrc = (typeof window.getImageVariantSource === "function")
+                    ? window.getImageVariantSource(variants, "thumb")
+                    : String(variants?.thumb || editorSrc || originalSrc);
+                if (!editorSrc) return;
+
+                Konva.Image.fromURL(editorSrc, (img) => {
+                    img.x(pos.x);
+                    img.y(pos.y);
+                    img.draggable(true);
+                    img.listening(true);
+                    img.setAttrs({
+                        isProductImage: false,
+                        isUserImage: true
                     });
-                };
-                reader.readAsDataURL(file);
+                    if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                        window.applyImageVariantsToKonvaNode(img, {
+                            original: originalSrc || editorSrc,
+                            editor: editorSrc,
+                            thumb: thumbSrc || editorSrc
+                        });
+                    } else {
+                        img.setAttr("originalSrc", originalSrc || editorSrc);
+                        img.setAttr("editorSrc", editorSrc);
+                        img.setAttr("thumbSrc", thumbSrc || editorSrc);
+                    }
+                    page.layer.add(img);
+                    setupProductImageDrag(img, page.layer);
+                    page.layer.batchDraw();
+                    try {
+                        window.dispatchEvent(new CustomEvent('canvasModified', { detail: page.stage }));
+                    } catch (_e) {}
+                });
             };
             input.click();
             addImageFallback = false;
@@ -8077,6 +9438,13 @@ window.generateCanvaPDF = async function (pageNumbers) {
     alert("Brak stron do eksportu");
     return;
   }
+  const releaseForceDraw = (typeof window.beginForcePageDraw === "function")
+    ? window.beginForcePageDraw()
+    : null;
+  if (typeof window.forceDrawAllPagesForExport === "function") {
+    window.forceDrawAllPagesForExport();
+  }
+  try {
 
   const pageSet = Array.isArray(pageNumbers) && pageNumbers.length
     ? new Set(pageNumbers.map(n => parseInt(n, 10)).filter(n => Number.isFinite(n)))
@@ -8088,6 +9456,13 @@ window.generateCanvaPDF = async function (pageNumbers) {
 
   if (!pagesToExport.length) {
     alert("Brak stron do eksportu");
+    return;
+  }
+
+  try {
+    await ensurePagesReadyForExport(pagesToExport);
+  } catch (_e) {
+    alert("Nie udało się przygotować stron do eksportu.");
     return;
   }
 
@@ -8159,10 +9534,10 @@ window.generateCanvaPDF = async function (pageNumbers) {
       pdf.text(lines, x, y + (opts.baselineTop ? 0 : fontSize), opts.baselineTop ? { baseline: "top" } : undefined);
     };
 
-    const drawImageNodeToPdf = async (imgNode) => {
-      if (!(imgNode instanceof Konva.Image) || !imgNode.image()) return;
-      if (imgNode.getAttr && imgNode.getAttr("isPriceHitArea")) return;
-      if (typeof imgNode.visible === "function" && !imgNode.visible()) return;
+	    const drawImageNodeToPdf = async (imgNode) => {
+	      if (!(imgNode instanceof Konva.Image) || !imgNode.image()) return;
+	      if (imgNode.getAttr && imgNode.getAttr("isPriceHitArea")) return;
+	      if (typeof imgNode.visible === "function" && !imgNode.visible()) return;
 
       const abs = imgNode.getAbsolutePosition ? imgNode.getAbsolutePosition() : { x: imgNode.x(), y: imgNode.y() };
       const absScale = imgNode.getAbsoluteScale ? imgNode.getAbsoluteScale() : { x: imgNode.scaleX?.() || 1, y: imgNode.scaleY?.() || 1 };
@@ -8170,40 +9545,47 @@ window.generateCanvaPDF = async function (pageNumbers) {
       const h = (imgNode.height() || 0) * (Number(absScale.y) || 1);
       if (!(w > 0 && h > 0)) return;
 
-      const isOverlay =
-        imgNode.getAttr("isOverlayElement") ||
-        imgNode.getAttr("isTNZBadge") ||
-        imgNode.getAttr("isCountryBadge") ||
-        imgNode.getAttr("isBarcode");
+	      const isOverlay =
+	        imgNode.getAttr("isOverlayElement") ||
+	        imgNode.getAttr("isTNZBadge") ||
+	        imgNode.getAttr("isCountryBadge") ||
+	        imgNode.getAttr("isBarcode");
 
-      const exportScale = 2.2;
-      const pngUrl = imgNode.toDataURL({
-        pixelRatio: exportScale,
-        mimeType: "image/png"
-      });
+	      const exportScale = 2.2;
+	      const restoreOriginalImage = (!isOverlay && typeof window.swapKonvaImageToOriginalForExport === "function")
+	        ? await window.swapKonvaImageToOriginalForExport(imgNode)
+	        : null;
+	      try {
+	        const pngUrl = imgNode.toDataURL({
+	          pixelRatio: exportScale,
+	          mimeType: "image/png"
+	        });
 
-      if (isOverlay) {
-        pdf.addImage(pngUrl, "PNG", abs.x, abs.y, w, h);
-        return;
-      }
+	        if (isOverlay) {
+	          pdf.addImage(pngUrl, "PNG", abs.x, abs.y, w, h);
+	          return;
+	        }
 
-      const imgEl = new Image();
-      imgEl.src = pngUrl;
-      await new Promise((res, rej) => {
-        imgEl.onload = res;
-        imgEl.onerror = rej;
-      });
+	        const imgEl = new Image();
+	        imgEl.src = pngUrl;
+	        await new Promise((res, rej) => {
+	          imgEl.onload = res;
+	          imgEl.onerror = rej;
+	        });
 
-      const c = document.createElement("canvas");
-      c.width = Math.max(1, Math.round(w * exportScale));
-      c.height = Math.max(1, Math.round(h * exportScale));
-      const ctx = c.getContext("2d");
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, c.width, c.height);
-      ctx.drawImage(imgEl, 0, 0, c.width, c.height);
-      const jpegUrl = c.toDataURL("image/jpeg", 0.88);
-      pdf.addImage(jpegUrl, "JPEG", abs.x, abs.y, w, h);
-    };
+	        const c = document.createElement("canvas");
+	        c.width = Math.max(1, Math.round(w * exportScale));
+	        c.height = Math.max(1, Math.round(h * exportScale));
+	        const ctx = c.getContext("2d");
+	        ctx.fillStyle = "#ffffff";
+	        ctx.fillRect(0, 0, c.width, c.height);
+	        ctx.drawImage(imgEl, 0, 0, c.width, c.height);
+	        const jpegUrl = c.toDataURL("image/jpeg", 0.88);
+	        pdf.addImage(jpegUrl, "JPEG", abs.x, abs.y, w, h);
+	      } finally {
+	        if (typeof restoreOriginalImage === "function") restoreOriginalImage();
+	      }
+	    };
 
     const drawNodeRecursive = async (node) => {
       if (!node || !node.getAttr) return;
@@ -8324,4 +9706,8 @@ window.generateCanvaPDF = async function (pageNumbers) {
   }
 
   pdf.save("katalog_canva_editable.pdf");
+  } finally {
+    if (typeof window.releaseExportImageCache === "function") window.releaseExportImageCache();
+    if (typeof releaseForceDraw === "function") releaseForceDraw();
+  }
 };
