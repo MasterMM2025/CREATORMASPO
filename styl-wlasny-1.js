@@ -125,21 +125,28 @@
       `;
     };
     list.innerHTML = currentDrafts.map((draft) => {
-      const familyThumb = (Array.isArray(draft?.familyProducts) ? draft.familyProducts : [])
-        .map((item) => String(item?.url || "").trim())
-        .find(Boolean);
-      const thumb = String(familyThumb || draft?.previewImageUrl || "").trim();
       const title = String(draft?.nameOverrides?.[draft?.productId] || draft?.productName || "").trim();
       const index = String(draft?.productIndex || "").trim();
       const familyCount = Math.max(1, Array.isArray(draft?.familyProducts) ? draft.familyProducts.length : 1);
       const currency = String(draft?.settings?.customCurrencySymbol || "£");
+      const isGroupedImport = !!(draft?.importMeta?.source === "excel" && draft?.importMeta?.isNativeGroup);
+      const isSingleImport = !!(draft?.importMeta?.source === "excel" && !draft?.importMeta?.isNativeGroup);
+      const isTnzImport = !!(draft?.importMeta?.tnz || String(draft?.settings?.customPriceBadgeStyleId || "").includes("tnz"));
+      const cardBg = isTnzImport ? "#f5f3ff" : (isGroupedImport ? "#fff1f4" : (isSingleImport ? "#ecfdf3" : "#fff"));
+      const cardBorder = isTnzImport ? "#a78bfa" : (isGroupedImport ? "#f9a8d4" : (isSingleImport ? "#86efac" : "#dbe4ef"));
+      const groupLabel = isGroupedImport ? String(draft?.importMeta?.groupLabel || "Grupa rodzima") : "";
+      const tnzBadge = isTnzImport
+        ? `<span style="display:inline-flex;align-items:center;height:16px;padding:0 6px;border-radius:999px;border:1px solid #8b5cf6;background:#ede9fe;color:#6d28d9;font-size:9px;font-weight:800;">TNZ</span>`
+        : "";
       return `
         <div data-draft-id="${escapeHtml(String(draft.id || ""))}" draggable="true"
-             style="display:grid;grid-template-columns:88px 1fr;gap:10px;align-items:center;border:1px solid #dbe4ef;border-radius:10px;padding:8px;background:#fff;cursor:grab;">
+             style="display:grid;grid-template-columns:88px 1fr;gap:10px;align-items:center;border:1px solid ${cardBorder};border-radius:10px;padding:8px;background:${cardBg};cursor:grab;">
           ${buildThumbMarkup(draft)}
           <div style="min-width:0;">
             <div style="font-size:11px;font-weight:700;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(index ? `[${index}] ${title || draft?.productId || ""}` : (title || draft?.productId || ""))}</div>
+            ${groupLabel ? `<div style="font-size:9px;font-weight:700;color:#9d174d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;">${escapeHtml(groupLabel)}</div>` : ""}
             <div style="font-size:10px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Rodzina: ${familyCount} • ${escapeHtml(currency)}</div>
+            ${tnzBadge ? `<div style="margin-top:3px;">${tnzBadge}</div>` : ""}
           </div>
         </div>
       `;
