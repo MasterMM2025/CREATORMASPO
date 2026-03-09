@@ -7,6 +7,61 @@ let currentLayer = null;
 let pageEditPanel = null;
 let currentPage = null;
 
+window.destroyPageEditPanel = function() {
+  if (!pageEditPanel) return;
+  try { pageEditPanel.remove(); } catch (_e) {}
+  pageEditPanel = null;
+};
+
+function syncPageEditLayoutState(expanded) {
+  document.body.classList.toggle('page-edit-panel-visible', !!expanded);
+}
+
+function syncPageEditToggleState(expanded) {
+  const pageSettingsToggleBtn = document.getElementById('pageSettingsToggleBtn');
+  if (!pageSettingsToggleBtn) return;
+  pageSettingsToggleBtn.classList.toggle('active', !!expanded);
+  pageSettingsToggleBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+}
+
+window.hidePageEditPanel = function() {
+  if (!pageEditPanel) return;
+  pageEditPanel.style.display = 'none';
+  syncPageEditLayoutState(false);
+  syncPageEditToggleState(false);
+};
+
+window.isPageEditPanelVisible = function() {
+  return !!(pageEditPanel && pageEditPanel.style.display !== 'none');
+};
+
+window.togglePageEditForPage = function(page) {
+  if (!page || page.isCover || typeof window.openPageEdit !== 'function') return false;
+  if (window.isPageEditPanelVisible && window.isPageEditPanelVisible() && currentPage === page) {
+    if (typeof window.hidePageEditPanel === 'function') {
+      window.hidePageEditPanel();
+      return true;
+    }
+    return false;
+  }
+  window.openPageEdit(page);
+  return true;
+};
+
+window.showPageEditForCurrentPage = function() {
+  const list = Array.isArray(window.pages) ? window.pages : [];
+  if (!list.length || typeof window.openPageEdit !== 'function') return false;
+  const activeStage = document.activeStage || null;
+  const preferredPage =
+    list.find((page) => page && page.stage === activeStage && !page.isCover) ||
+    list.find((page) => page && !page.isCover) ||
+    list[0] ||
+    null;
+  if (!preferredPage || preferredPage.isCover) return false;
+  window.openPageEdit(preferredPage);
+  return true;
+};
+
 
 // === DOMYŚLNE STYLE DLA KAŻDEGO TYPU ===
 const DEFAULT_STYLES = {
@@ -52,6 +107,12 @@ function repopulateFontSelect(selectEl, preferredValue = "Arial") {
   selectEl.innerHTML = fonts.map((f) => `<option value="${f}">${f}</option>`).join("");
   selectEl.value = fonts.includes(current) ? current : (fonts[0] || "Arial");
   applyFontPreviewToSelect(selectEl);
+}
+
+function updateCheckStyle(checkbox) {
+  const label = checkbox && checkbox.parentElement;
+  if (!label) return;
+  label.classList.toggle('is-active', !!checkbox.checked);
 }
 
 // === TWORZENIE PANELU EDYCJI TEKSTU (ROZBUDOWANY) ===
@@ -333,6 +394,9 @@ window.openEditPanel = function(textNode, stage) {
 
 // === TWORZENIE PANELU EDYCJI STRONY ===
 function createPageEditPanel() {
+  if (pageEditPanel && pageEditPanel.classList?.contains('imgfx-side-panel')) {
+    window.destroyPageEditPanel?.();
+  }
   if (pageEditPanel) return pageEditPanel;
 
   pageEditPanel = document.createElement('div');
@@ -344,96 +408,85 @@ function createPageEditPanel() {
 
   const fonts = getDynamicFonts();
   const fontOptions = fonts.map(f => `<option value="${f}">${f}</option>`).join('');
+  const makeStyleSection = (key, title, icon, sizeValue, sizeMax) => `
+    <div class="style-section">
+      <div class="style-section-head">
+        <h4><i class="fas ${icon}"></i><span>${title}</span></h4>
+      </div>
+      <label><span class="field-label"><i class="fas fa-text-height"></i>Rozmiar</span><input type="number" id="${key}Size" min="8" max="${sizeMax}" value="${sizeValue}"></label>
+      <label><span class="field-label"><i class="fas fa-font"></i>Czcionka</span><select id="${key}Font">${fontOptions}</select></label>
+      <div class="color-row">
+        <input type="color" id="${key}Color" value="#000000">
+        <div class="palette">${palette}</div>
+      </div>
+      <div class="style-checks">
+        <label class="style-toggle" title="Pogrubienie" aria-label="Pogrubienie">
+          <input type="checkbox" id="${key}Bold">
+          <span class="style-toggle-icon style-toggle-icon-bold">B</span>
+          <span class="style-toggle-label">Bold</span>
+        </label>
+        <label class="style-toggle" title="Kursywa" aria-label="Kursywa">
+          <input type="checkbox" id="${key}Italic">
+          <span class="style-toggle-icon style-toggle-icon-italic">I</span>
+          <span class="style-toggle-label">Italic</span>
+        </label>
+        <label class="style-toggle" title="Podkreślenie" aria-label="Podkreślenie">
+          <input type="checkbox" id="${key}Underline">
+          <span class="style-toggle-icon style-toggle-icon-underline">U</span>
+          <span class="style-toggle-label">Underline</span>
+        </label>
+      </div>
+      <button class="reset-btn" data-type="${key}"><i class="fas fa-rotate-left"></i><span>Przywróć domyślne</span></button>
+    </div>
+  `;
 
   pageEditPanel.innerHTML = `
     <div class="pe-header">
-      <div class="pe-title">Edycja strony</div>
-      <div class="pe-subtitle">Ustawienia widoku i stylów</div>
+      <div class="pe-header-copy">
+        <div class="pe-kicker">Page Style</div>
+        <div class="pe-title">Ustawienia strony</div>
+      </div>
+      <button type="button" id="hidePageEditBtn" class="pe-panel-hide-btn" aria-label="Ukryj panel" title="Ukryj panel">
+        <i class="fas fa-chevron-right"></i>
+      </button>
+    </div>
+
+    <div class="pe-top-tools">
+      <button type="button" id="pagePanelUndoBtn" class="pe-tool-btn" aria-label="Cofnij">
+        <i class="fas fa-rotate-left"></i>
+        <span>Cofnij</span>
+      </button>
+      <button type="button" id="pagePanelRedoBtn" class="pe-tool-btn" aria-label="Ponów">
+        <i class="fas fa-rotate-right"></i>
+        <span>Ponów</span>
+      </button>
     </div>
 
     <div class="pe-section pe-section-compact">
+      <div class="pe-section-title"><i class="fas fa-panorama"></i><span>Baner</span></div>
       <div class="pe-row">
-        <label class="pe-label">Baner</label>
+        <label class="pe-label">Plik</label>
         <input type="file" id="pageBannerInput" accept="image/*" class="pe-input-file">
       </div>
-      <button id="removeBannerBtn" class="pe-btn pe-btn-danger">Usuń baner</button>
+      <button id="removeBannerBtn" class="pe-btn pe-btn-danger"><i class="fas fa-trash"></i><span>Usuń baner</span></button>
     </div>
 
     <div class="pe-section">
-      <div class="pe-section-title">Waluta ceny</div>
+      <div class="pe-section-title"><i class="fas fa-sterling-sign"></i><span>Waluta ceny</span></div>
       <select id="currencySelect" class="pe-select">
+        <option value="GBP" selected>GBP (£)</option>
         <option value="PLN">PLN (zł)</option>
         <option value="EUR">EUR (€)</option>
-        <option value="GBP">GBP (£)</option>
       </select>
     </div>
 
-    <div class="style-section">
-      <h4>Nazwa produktu</h4>
-      <label>Rozmiar: <input type="number" id="nameSize" min="8" max="30" value="14"></label>
-      <label>Czcionka: <select id="nameFont">${fontOptions}</select></label>
-      <div class="color-row">
-        <input type="color" id="nameColor" value="#000000">
-        <div class="palette">${palette}</div>
-      </div>
-      <div class="style-checks">
-        <label><input type="checkbox" id="nameBold"> <span class="check-label">Pogrubienie</span></label>
-        <label><input type="checkbox" id="nameItalic"> <span class="check-label">Kursywa</span></label>
-        <label><input type="checkbox" id="nameUnderline"> <span class="check-label">Podkreślenie</span></label>
-      </div>
-      <button class="reset-btn" data-type="name">Przywróć domyślne</button>
-    </div>
-
-    <div class="style-section">
-      <h4>Indeks</h4>
-      <label>Rozmiar: <input type="number" id="indexSize" min="8" max="20" value="12"></label>
-      <label>Czcionka: <select id="indexFont">${fontOptions}</select></label>
-      <div class="color-row">
-        <input type="color" id="indexColor" value="#000000">
-        <div class="palette">${palette}</div>
-      </div>
-      <div class="style-checks">
-        <label><input type="checkbox" id="indexBold"> <span class="check-label">Pogrubienie</span></label>
-        <label><input type="checkbox" id="indexItalic"> <span class="check-label">Kursywa</span></label>
-        <label><input type="checkbox" id="indexUnderline"> <span class="check-label">Podkreślenie</span></label>
-      </div>
-      <button class="reset-btn" data-type="index">Przywróć domyślne</button>
-    </div>
-
-    <div class="style-section">
-      <h4>Cena</h4>
-      <label>Rozmiar: <input type="number" id="priceSize" min="8" max="30" value="16"></label>
-      <label>Czcionka: <select id="priceFont">${fontOptions}</select></label>
-      <div class="color-row">
-        <input type="color" id="priceColor" value="#000000">
-        <div class="palette">${palette}</div>
-      </div>
-      <div class="style-checks">
-        <label><input type="checkbox" id="priceBold"> <span class="check-label">Pogrubienie</span></label>
-        <label><input type="checkbox" id="priceItalic"> <span class="check-label">Kursywa</span></label>
-        <label><input type="checkbox" id="priceUnderline"> <span class="check-label">Podkreślenie</span></label>
-      </div>
-      <button class="reset-btn" data-type="price">Przywróć domyślne</button>
-    </div>
-
-    <div class="style-section">
-      <h4>Ranking</h4>
-      <label>Rozmiar: <input type="number" id="ratingSize" min="8" max="20" value="12"></label>
-      <label>Czcionka: <select id="ratingFont">${fontOptions}</select></label>
-      <div class="color-row">
-        <input type="color" id="ratingColor" value="#000000">
-        <div class="palette">${palette}</div>
-      </div>
-      <div class="style-checks">
-        <label><input type="checkbox" id="ratingBold"> <span class="check-label">Pogrubienie</span></label>
-        <label><input type="checkbox" id="ratingItalic"> <span class="check-label">Kursywa</span></label>
-        <label><input type="checkbox" id="ratingUnderline"> <span class="check-label">Podkreślenie</span></label>
-      </div>
-      <button class="reset-btn" data-type="rating">Przywróć domyślne</button>
-    </div>
+    ${makeStyleSection('name', 'Nazwa produktu', 'fa-tag', 14, 30)}
+    ${makeStyleSection('index', 'Indeks', 'fa-hashtag', 12, 20)}
+    ${makeStyleSection('price', 'Cena', 'fa-badge-dollar', 16, 30)}
+    ${makeStyleSection('rating', 'Ranking', 'fa-ranking-star', 12, 20)}
 
     <div class="apply-scope" id="applyScopeBox">
-      <div class="apply-scope-title">Zakres zastosowania</div>
+      <div class="apply-scope-title"><i class="fas fa-layer-group"></i><span>Zakres zastosowania</span></div>
       <label class="apply-scope-row" id="applyScopeRow">
         <input type="checkbox" id="applyToAllPages">
         <span class="apply-scope-text">
@@ -445,35 +498,31 @@ function createPageEditPanel() {
     </div>
 
     <div class="pe-actions">
-      <button id="applyPageEditBtn" class="pe-btn pe-btn-primary">Zastosuj</button>
-      <button id="cancelPageEditBtn" class="pe-btn pe-btn-ghost">Anuluj</button>
+      <button id="applyPageEditBtn" class="pe-btn pe-btn-primary"><i class="fas fa-check"></i><span>Zastosuj</span></button>
+      <button id="cancelPageEditBtn" class="pe-btn pe-btn-ghost"><i class="fas fa-xmark"></i><span>Anuluj</span></button>
     </div>
     
 
   `;
 
   document.body.appendChild(pageEditPanel);
+  pageEditPanel.querySelector('#hidePageEditBtn').onclick = () => {
+    if (typeof window.hidePageEditPanel === 'function') {
+      window.hidePageEditPanel();
+    }
+  };
+  pageEditPanel.querySelector('#pagePanelUndoBtn').onclick = () => {
+    if (typeof window.undoProject === "function") window.undoProject();
+  };
+  pageEditPanel.querySelector('#pagePanelRedoBtn').onclick = () => {
+    if (typeof window.redoProject === "function") window.redoProject();
+  };
   pageEditPanel.querySelectorAll('.color-preset').forEach(preset => {
     preset.onclick = () => {
       const input = preset.closest('.color-row').querySelector('input[type="color"]');
       input.value = preset.dataset.color;
     };
   });
-
-  const updateCheckStyle = (checkbox) => {
-    const label = checkbox.parentElement;
-    const span = label.querySelector('.check-label');
-    if (!span) return;
-    if (checkbox.checked) {
-      label.style.backgroundColor = '#007cba';
-      label.style.color = 'white';
-      span.style.color = 'white';
-    } else {
-      label.style.backgroundColor = '';
-      label.style.color = '';
-      span.style.color = '';
-    }
-  };
 
   pageEditPanel.querySelectorAll('input[type="checkbox"]').forEach(cb => {
     cb.addEventListener('change', () => updateCheckStyle(cb));
@@ -533,8 +582,19 @@ if (obj instanceof Konva.Group) {
 }
 
 window.openPageEdit = function(page) {
+  if (pageEditPanel && pageEditPanel.classList?.contains('imgfx-side-panel')) {
+    window.destroyPageEditPanel?.();
+  }
   currentPage = page;
   const panel = createPageEditPanel();
+  const closePanel = () => {
+    if (typeof window.hidePageEditPanel === 'function') {
+      window.hidePageEditPanel();
+      return;
+    }
+    panel.style.display = 'none';
+    syncPageEditToggleState(false);
+  };
 
 
   const bannerInput = document.getElementById('pageBannerInput');
@@ -569,22 +629,19 @@ window.openPageEdit = function(page) {
     const underline = document.getElementById(type + 'Underline');
     bold.checked = s.bold; italic.checked = s.italic; underline.checked = s.underline;
     [bold, italic, underline].forEach(cb => {
-      const label = cb.parentElement;
-      const span = label.querySelector('.check-label');
-      if (cb.checked) {
-        label.style.backgroundColor = '#007cba';
-        label.style.color = 'white';
-        if (span) span.style.color = 'white';
-      }
+      updateCheckStyle(cb);
     });
   };
 
   ['name', 'index', 'price', 'rating'].forEach(loadStyle);
-  currencySelect.value = page.settings?.currency || 'GBP';
+  const normalizedCurrency = String(page.settings?.currency || 'GBP').trim().toUpperCase();
+  currencySelect.value = ['PLN', 'EUR', 'GBP'].includes(normalizedCurrency) ? normalizedCurrency : 'GBP';
   applyToAllCheckbox.checked = false;
   updateApplyScopeUI();
 
   panel.style.display = 'block';
+  syncPageEditLayoutState(true);
+  syncPageEditToggleState(true);
 
   document.getElementById('removeBannerBtn').onclick = () => {
     const old = page.layer.findOne(o => o.getAttr('name') === 'banner');
@@ -712,12 +769,12 @@ p.layer.batchDraw();
       
            // === Zamykamy panel po zapisie zmian strony ===
       
-      panel.style.display = 'none';
+      closePanel();
     };
 
     // === Anuluj zmiany (nie dotykamy pudełek) ===
     document.getElementById('cancelPageEditBtn').onclick = () => {
-      panel.style.display = 'none';
+      closePanel();
     };
   };
 
@@ -878,74 +935,199 @@ document.addEventListener('click', (e) => {
   if (editPanel && !editPanel.contains(e.target) && !e.target.classList.contains('konvajs-content')) {
     editPanel.style.display = 'none';
   }
-  if (pageEditPanel && !pageEditPanel.contains(e.target) && !e.target.classList.contains('edit-page-btn')) {
-    pageEditPanel.style.display = 'none';
-  }
 });
 
 const style = document.createElement('style');
 style.textContent = `
   .page-edit-panel {
     position: fixed;
-    top: 56px;
-    right: 16px;
-    width: min(380px, 92vw);
-    max-height: min(86vh, 900px);
+    top: 92px;
+    right: 28px;
+    width: 344px;
+    max-width: calc(100vw - 28px);
+    min-width: 0;
+    bottom: 28px;
+    max-height: none;
     overflow: auto;
-    background: #ffffff;
-    border: 1px solid #e4e7ec;
-    border-radius: 14px;
-    box-shadow: 0 18px 40px rgba(16, 24, 40, 0.12);
+    background: linear-gradient(180deg, rgba(14, 19, 31, 0.98) 0%, rgba(9, 14, 24, 0.98) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 24px;
+    box-shadow: -20px 0 40px rgba(0, 0, 0, 0.32);
     z-index: 10000;
     font-family: "Inter", "Segoe UI", Arial, sans-serif;
-    font-size: 14px;
+    font-size: 13px;
     display: none;
-    padding: 16px;
+    padding: 10px 10px 24px 10px;
+    backdrop-filter: blur(12px);
   }
-  .pe-header { border-bottom: 1px solid #eef2f6; padding-bottom: 10px; margin-bottom: 14px; }
-  .pe-title { font-size: 18px; font-weight: 700; color: #101828; }
-  .pe-subtitle { font-size: 12px; color: #667085; margin-top: 2px; }
-  .pe-section { border: 1px solid #eef2f6; background: #f9fafb; padding: 12px; border-radius: 10px; margin-bottom: 12px; }
-  .pe-section-compact { background: #ffffff; }
-  .pe-section-title { font-weight: 700; color: #1d2939; margin-bottom: 8px; }
-  .pe-row { display: grid; grid-template-columns: 90px 1fr; gap: 10px; align-items: center; margin-bottom: 10px; }
-  .pe-label { font-weight: 600; color: #344054; }
-  .pe-input-file { width: 100%; }
-  .pe-select { width: 100%; padding: 8px 10px; border: 1px solid #d0d5dd; border-radius: 8px; background: #fff; }
-  .pe-btn { padding: 9px 12px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; font-weight: 600; }
-  .pe-btn-primary { background: #0b74c8; color: #fff; }
-  .pe-btn-ghost { background: #f2f4f7; border-color: #e4e7ec; color: #111827; }
+  .pe-header {
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    padding-bottom: 12px;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .pe-header-copy { min-width: 0; display: block; }
+  .pe-kicker { font-size: 10px; font-weight: 800; letter-spacing: 0.16em; text-transform: uppercase; color: #7f8aa0; margin-bottom: 4px; }
+  .pe-title { font-size: 18px; font-weight: 800; color: #f5f7fb; letter-spacing: -0.02em; }
+  .pe-panel-hide-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 11px;
+    border: 1px solid rgba(255,255,255,0.08);
+    background: linear-gradient(180deg, rgba(28, 36, 54, 0.96) 0%, rgba(16, 22, 34, 0.98) 100%);
+    color: #d8e0ee;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+  }
+  .pe-top-tools {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .pe-tool-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 11px;
+    border: 1px solid rgba(255,255,255,0.08);
+    background: linear-gradient(180deg, rgba(24, 34, 54, 0.92) 0%, rgba(16, 22, 35, 0.98) 100%);
+    color: #e8edf6;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 10px 22px rgba(0,0,0,0.18);
+  }
+  .pe-tool-btn i { color: #a8b4c9; }
+  .pe-tool-btn span { letter-spacing: -0.01em; }
+  .pe-tool-btn:hover {
+    background: rgba(39,203,173,0.12);
+    border-color: rgba(39,203,173,0.24);
+    color: #8df5e2;
+  }
+  .pe-panel-hide-btn:hover {
+    background: rgba(39,203,173,0.12);
+    border-color: rgba(39,203,173,0.28);
+    color: #8df5e2;
+  }
+  .pe-section { border: 1px solid rgba(255, 255, 255, 0.08); background: linear-gradient(180deg, rgba(19, 27, 42, 0.88) 0%, rgba(12, 18, 30, 0.94) 100%); padding: 12px; border-radius: 16px; margin-bottom: 10px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.03); }
+  .pe-section-compact { background: linear-gradient(180deg, rgba(20, 29, 46, 0.94) 0%, rgba(12, 18, 30, 0.98) 100%); }
+  .pe-section-title { font-weight: 800; color: #f5f7fb; margin-bottom: 10px; font-size: 15px; display: flex; align-items: center; gap: 10px; letter-spacing: -0.02em; }
+  .pe-section-title i { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border-radius: 9px; background: rgba(62, 195, 173, 0.12); color: #63e6d3; }
+  .pe-row { display: grid; grid-template-columns: 74px 1fr; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .pe-label { font-weight: 700; color: #d8e0ee; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .pe-input-file { width: 100%; color: #d8e0ee; }
+  .pe-select { width: 100%; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; background: linear-gradient(90deg, rgba(31, 39, 56, 0.96) 0%, rgba(26, 33, 49, 0.96) 100%); color: #f5f7fb; box-shadow: inset 0 1px 0 rgba(255,255,255,0.03); }
+  .pe-btn { padding: 10px 12px; border-radius: 12px; border: 1px solid transparent; cursor: pointer; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; gap: 8px; letter-spacing: -0.01em; }
+  .pe-btn-primary { background: linear-gradient(135deg, #24b5a2 0%, #2ad0bf 100%); color: #07110f; }
+  .pe-btn-ghost { background: linear-gradient(180deg, rgba(28, 36, 54, 0.94) 0%, rgba(17, 24, 39, 0.98) 100%); border-color: rgba(255,255,255,0.08); color: #f5f7fb; }
   .pe-btn-danger { background: #e11d48; color: #fff; border: none; }
-  .pe-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px; position: sticky; bottom: -1px; background: #ffffff; padding-top: 10px; }
+  .pe-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; position: sticky; bottom: 0; background: linear-gradient(180deg, rgba(14,19,31,0) 0%, rgba(14,19,31,0.96) 18%, rgba(14,19,31,0.98) 100%); padding-top: 10px; padding-bottom: 10px; }
 
-  .style-section { border: 1px solid #eef2f6; padding: 12px; margin-bottom: 12px; border-radius: 10px; background: #ffffff; }
-  .style-section h4 { margin: 0 0 8px; font-size: 14px; color: #1d2939; }
-  .style-section label { display: block; margin: 6px 0; }
-  .style-section input[type="number"], .style-section select { width: 100%; padding: 6px 8px; margin-top: 2px; border-radius: 6px; border: 1px solid #d0d5dd; }
-  .color-row { display: flex; align-items: center; gap: 4px; margin: 6px 0; }
-  .color-row input[type="color"] { width: 56px; height: 32px; padding: 2px; border-radius: 6px; border: 1px solid #d0d5dd; }
-  .palette { display: flex; flex-wrap: wrap; width: 160px; gap: 4px; }
-  .style-checks { display: flex; gap: 8px; margin: 8px 0 6px; }
-  .style-checks label { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: all 0.2s; background: #f2f4f7; }
-  .check-label { pointer-events: none; }
-  .reset-btn { margin-top: 8px; font-size: 12px; padding: 5px 8px; background: #f2f4f7; border: 1px solid #e4e7ec; border-radius: 6px; }
-  .reset-btn:hover { background: #e9edf2; }
-  .apply-scope { border: 1px solid #eef2f6; background: #f9fafb; padding: 12px; border-radius: 10px; margin: 12px 0; }
-  .apply-scope-title { font-size: 13px; font-weight: 700; color: #1d2939; margin-bottom: 6px; }
+  .style-section { border: 1px solid rgba(255,255,255,0.08); padding: 14px; margin-bottom: 12px; border-radius: 18px; background: linear-gradient(180deg, rgba(18, 26, 40, 0.92) 0%, rgba(11, 18, 30, 0.98) 100%); box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 14px 28px rgba(0,0,0,0.18); }
+  .style-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .style-section h4 { margin: 0; font-size: 18px; color: #f5f7fb; display: flex; align-items: center; gap: 10px; letter-spacing: -0.02em; }
+  .style-section h4 i { width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; background: linear-gradient(180deg, rgba(58, 168, 255, 0.18) 0%, rgba(39, 203, 173, 0.12) 100%); color: #7bdfff; font-size: 13px; }
+  .style-section label { display: block; margin: 8px 0; color: #a9b5c8; font-size: 11px; }
+  .field-label { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 11px; font-weight: 800; color: #9fb0c8; text-transform: uppercase; letter-spacing: 0.08em; }
+  .field-label i { color: #5ec9ff; font-size: 11px; }
+  .style-section input[type="number"], .style-section select { width: 100%; padding: 10px 12px; margin-top: 0; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: linear-gradient(90deg, rgba(31, 39, 56, 0.96) 0%, rgba(26, 33, 49, 0.96) 100%); color: #f5f7fb; box-shadow: inset 0 1px 0 rgba(255,255,255,0.03); }
+  .color-row { display: flex; align-items: center; gap: 10px; margin: 10px 0 12px; }
+  .color-row input[type="color"] { width: 52px; height: 40px; padding: 3px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: linear-gradient(180deg, rgba(25, 34, 50, 0.95) 0%, rgba(17, 25, 39, 0.98) 100%); box-shadow: inset 0 1px 0 rgba(255,255,255,0.03); }
+  .palette { display: flex; flex-wrap: wrap; width: 162px; gap: 8px; }
+  .color-preset { box-shadow: 0 6px 14px rgba(0,0,0,0.18); border: 2px solid rgba(255,255,255,0.08) !important; border-radius: 10px !important; }
+  .style-checks { display: flex; gap: 8px; margin: 8px 0 6px; flex-wrap: wrap; }
+  .style-toggle {
+    min-width: 54px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 0 10px;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: transform 0.16s ease, background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+    background: linear-gradient(180deg, rgba(25, 34, 52, 0.94) 0%, rgba(17, 23, 36, 0.98) 100%);
+    color: #cdd7e7;
+    border: 1px solid rgba(255,255,255,0.06);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 6px 14px rgba(0,0,0,0.12);
+  }
+  .style-toggle:hover {
+    background: linear-gradient(180deg, rgba(31, 42, 63, 0.96) 0%, rgba(20, 28, 44, 0.98) 100%);
+    border-color: rgba(94, 201, 255, 0.28);
+    color: #f5f7fb;
+    transform: translateY(-1px);
+  }
+  .style-toggle input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+    width: 0;
+    height: 0;
+  }
+  .style-toggle-icon {
+    pointer-events: none;
+    font-size: 18px;
+    line-height: 1;
+    letter-spacing: -0.04em;
+    color: inherit;
+    font-family: Georgia, "Times New Roman", serif;
+    text-rendering: geometricPrecision;
+    -webkit-font-smoothing: antialiased;
+  }
+  .style-toggle-icon-bold { font-weight: 800; font-family: Inter, "Segoe UI", Arial, sans-serif; }
+  .style-toggle-icon-italic { font-style: italic; font-weight: 600; transform: translateX(1px); }
+  .style-toggle-icon-underline {
+    text-decoration: underline;
+    text-decoration-thickness: 1.5px;
+    text-underline-offset: 2px;
+    font-weight: 700;
+    font-family: Inter, "Segoe UI", Arial, sans-serif;
+  }
+  .style-toggle-label {
+    display: none;
+    pointer-events: none;
+  }
+  .style-toggle.is-active {
+    background: linear-gradient(180deg, #d8ff1f 0%, #bff211 100%);
+    border-color: rgba(216, 255, 31, 0.92);
+    color: #081014;
+    box-shadow:
+      0 0 0 1px rgba(216, 255, 31, 0.42),
+      0 0 12px rgba(216, 255, 31, 0.36),
+      0 0 24px rgba(216, 255, 31, 0.22),
+      inset 0 1px 0 rgba(255,255,255,0.24);
+  }
+  .reset-btn { margin-top: 8px; font-size: 11px; padding: 8px 10px; background: linear-gradient(180deg, rgba(26, 34, 50, 0.94) 0%, rgba(17, 24, 39, 0.98) 100%); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; color: #f5f7fb; display: inline-flex; align-items: center; gap: 8px; }
+  .reset-btn:hover { background: rgba(255,255,255,0.08); }
+  .apply-scope { border: 1px solid rgba(255,255,255,0.08); background: linear-gradient(180deg, rgba(18, 26, 40, 0.92) 0%, rgba(11, 18, 30, 0.98) 100%); padding: 14px; border-radius: 18px; margin: 12px 0; }
+  .apply-scope-title { font-size: 14px; font-weight: 800; color: #f5f7fb; margin-bottom: 10px; display: flex; align-items: center; gap: 10px; }
+  .apply-scope-title i { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border-radius: 9px; background: rgba(216,255,31,0.12); color: #d8ff1f; font-size: 12px; }
   .apply-scope-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; cursor: pointer; }
   .apply-scope-row input { margin-top: 2px; }
-  .apply-scope-hint { display: inline-block; font-size: 12px; color: #667085; margin-top: 2px; }
-  .apply-scope-text { line-height: 1.2; }
-  .apply-scope-toggle { width: 44px; height: 24px; border-radius: 999px; background: #d0d5dd; position: relative; transition: background 0.2s; }
+  .apply-scope-hint { display: inline-block; font-size: 12px; color: #93a0b5; margin-top: 2px; }
+  .apply-scope-text { line-height: 1.2; color: #d8e0ee; }
+  .apply-scope-toggle { width: 44px; height: 24px; border-radius: 999px; background: rgba(255,255,255,0.14); position: relative; transition: background 0.2s; }
   .apply-scope-toggle::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; background: #fff; border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,0.2); transition: transform 0.2s; }
-  .apply-scope.is-all { border-color: #d1e9ff; background: #f0f7ff; }
-  .apply-scope.is-all .apply-scope-title { color: #175cd3; }
-  .apply-scope.is-all .apply-scope-toggle { background: #1570ef; }
+  .apply-scope.is-all { border-color: rgba(39,203,173,0.24); background: rgba(39,203,173,0.08); }
+  .apply-scope.is-all .apply-scope-title { color: #8df5e2; }
+  .apply-scope.is-all .apply-scope-toggle { background: #24b5a2; }
   .apply-scope.is-all .apply-scope-toggle::after { transform: translateX(20px); }
+  #undoRedoControls { display: none !important; }
   @media (max-width: 700px) {
-    .page-edit-panel { left: 8px; right: 8px; top: 8px; width: auto; }
+    .page-edit-panel { left: 8px; right: 8px; top: 72px; width: auto; min-width: 0; bottom: 76px; border-radius: 18px; border-right: 1px solid rgba(255,255,255,0.08); }
     .pe-row { grid-template-columns: 1fr; }
     .pe-actions { grid-template-columns: 1fr; }
+    .pe-top-tools { grid-template-columns: 1fr 1fr; }
   }
 `;
 document.head.appendChild(style);//dziala

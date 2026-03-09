@@ -241,6 +241,8 @@ markAsEditable(img);
 
     btnContainer.innerHTML = `
       <button class="fab-btn fab-copy" data-action="copy">Kopiuj</button>
+      <button class="fab-btn fab-copy-style" data-action="copy-module-style">Kopiuj styl modułu</button>
+      <button class="fab-btn fab-paste-style" data-action="paste-module-style">Wklej styl modułu</button>
       <button class="fab-btn fab-cut" data-action="cut">Wytnij</button>
       <button class="fab-btn fab-delete" data-action="delete">Usuń</button>
       <button class="fab-btn fab-front" data-action="front">Na wierzch</button>
@@ -294,6 +296,39 @@ markAsEditable(img);
 
         const obj = page.selectedNodes[0];
         if (!obj) return;
+
+        if (action === 'copy-module-style') {
+          const copyFn = (typeof window.copyDirectModuleVisualStyleFromNode === "function")
+            ? window.copyDirectModuleVisualStyleFromNode
+            : null;
+          if (!copyFn) {
+            return alert("Kopiowanie stylu modułu jest niedostępne.");
+          }
+          const res = copyFn(obj);
+          if (!res || res.ok !== true) {
+            return alert("Zaznacz moduł produktu (grupę), aby skopiować jego styl.");
+          }
+          return;
+        }
+
+        if (action === 'paste-module-style') {
+          const pasteFn = (typeof window.pasteDirectModuleVisualStyleToNode === "function")
+            ? window.pasteDirectModuleVisualStyleToNode
+            : null;
+          if (!pasteFn) {
+            return alert("Wklejanie stylu modułu jest niedostępne.");
+          }
+          const res = pasteFn(obj);
+          if (!res || res.ok !== true) {
+            if (res && res.reason === "clipboard_empty") {
+              return alert("Najpierw skopiuj styl modułu.");
+            }
+            return alert("Zaznacz moduł produktu (grupę), aby wkleić styl.");
+          }
+          layer.batchDraw();
+          transformerLayer.batchDraw();
+          return;
+        }
 
         if (action === 'copy') {
           const nodes = normalizeForMenu(page.selectedNodes);
@@ -445,6 +480,22 @@ markAsEditable(img);
 
     page.layer.batchDraw();
     page.transformerLayer.batchDraw();
+  });
+
+  // === DRAG & DROP MIĘDZY STRONAMI ===
+  stage.on('dragend', (e) => {
+    const node = e && e.target ? e.target : null;
+    if (!node || node === stage) return;
+    if (typeof node.draggable === 'function' && !node.draggable()) return;
+
+    if (typeof window.transferDraggedSelectionAcrossPages === 'function') {
+      const moved = window.transferDraggedSelectionAcrossPages({
+        sourcePage: page,
+        dragNode: node,
+        evt: e.evt
+      });
+      if (moved) return;
+    }
   });
 
   // === GLOBALNE WKLEJANIE — identycznie jak w głównym systemie ===
@@ -702,7 +753,11 @@ div.querySelector(".duplicate").onclick = () => {
 
 // ＋ Dodaj stronę pod spodem
 div.querySelector(".add").onclick = () => {
-    window.createEmptyPageUnder(page);
+    if (typeof window.createBlankPageFromMainButton === "function") {
+      window.createBlankPageFromMainButton(page);
+    } else {
+      window.createEmptyPageUnder(page);
+    }
 };
 
 // ⚙️ Ustawienia strony – pełna obsługa
@@ -737,7 +792,13 @@ div.querySelector(".delete").onclick = () => {
 
   // Przycisk "Dodaj stronę" POD TĄ stroną
   const addBtn = div.querySelector('.add-page-btn');
-  addBtn.onclick = () => window.createEmptyPageUnder(page);
+  addBtn.onclick = () => {
+    if (typeof window.createBlankPageFromMainButton === "function") {
+      window.createBlankPageFromMainButton(page);
+    } else {
+      window.createEmptyPageUnder(page);
+    }
+  };
 
   // Wstaw do tablicy pages w dobrej kolejności
   const parentIndex = pages.indexOf(parentPage);
@@ -748,6 +809,9 @@ div.querySelector(".delete").onclick = () => {
   }
 
   applyZoomToPage(page, currentZoom);
+  if (typeof window.registerPageForPerf === "function") {
+    window.registerPageForPerf(page);
+  }
   // 🔥 Powiadom edycja-1.js, że powstał nowy Stage
 setTimeout(() => {
     window.dispatchEvent(
@@ -774,7 +838,17 @@ function addAddButtonUnderPage(page) {
   wrapper.innerHTML = `<button class="add-page-btn"><span class="add-page-plus">+</span> Dodaj stronę</button>`;
   page.container.appendChild(wrapper);
 
-  wrapper.querySelector('.add-page-btn').onclick = () => window.createEmptyPageUnder(page);
+  wrapper.querySelector('.add-page-btn').onclick = () => {
+    if (typeof window.createBlankPageFromMainButton === "function") {
+      window.createBlankPageFromMainButton(page);
+    } else {
+      window.createEmptyPageUnder(page);
+    }
+  };
+  if (typeof applyZoomToPage === "function") {
+    const zoomNow = (typeof currentZoom === "number" && Number.isFinite(currentZoom)) ? currentZoom : 1;
+    applyZoomToPage(page, zoomNow);
+  }
 }
 
 // Po imporcie Excela
@@ -909,4 +983,7 @@ window.reorderPages = function () {
         p.number = i + 1;
         p.container.querySelector(".page-title").textContent = "Page " + (i + 1);
     });
+    if (typeof window.refreshPagesPerf === "function") {
+        window.refreshPagesPerf();
+    }
 };

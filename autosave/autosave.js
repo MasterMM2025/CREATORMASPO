@@ -67,6 +67,60 @@
       p.objects.some((obj) => obj && obj.type && obj.type !== 'background')
     );
     if (!hasRealContent) return null;
+    compactProjectDataForHistoryInPlace(data);
+    return data;
+  }
+
+  function isLargeDataUrl(src) {
+    const text = String(src || '').trim();
+    return /^data:/i.test(text) && text.length > 160000;
+  }
+
+  function compactDirectNodePayloadInPlace(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    if (payload.type === 'imageNode') {
+      const attrs = payload.attrs && typeof payload.attrs === 'object' ? payload.attrs : null;
+      const src = String(payload.src || '').trim();
+      const editorSrc = String((attrs && attrs.editorSrc) || '').trim();
+      const thumbSrc = String((attrs && attrs.thumbSrc) || '').trim();
+
+      if (isLargeDataUrl(src)) {
+        payload.src = editorSrc || thumbSrc || src;
+      }
+      if (attrs && isLargeDataUrl(attrs.thumbSrc) && editorSrc) {
+        attrs.thumbSrc = editorSrc;
+      }
+      return;
+    }
+
+    if (Array.isArray(payload.children)) {
+      payload.children.forEach((child) => compactDirectNodePayloadInPlace(child));
+    }
+  }
+
+  function compactProjectDataForHistoryInPlace(data) {
+    if (!data || !Array.isArray(data.pages)) return data;
+    data.pages.forEach((page) => {
+      const objects = Array.isArray(page && page.objects) ? page.objects : [];
+      objects.forEach((obj) => {
+        if (!obj || typeof obj !== 'object') return;
+        if (obj.type === 'image') {
+          const src = String(obj.src || '').trim();
+          const editorSrc = String(obj.editorSrc || '').trim();
+          const thumbSrc = String(obj.thumbSrc || '').trim();
+          if (isLargeDataUrl(src)) {
+            obj.src = editorSrc || thumbSrc || src;
+          }
+          if (isLargeDataUrl(obj.thumbSrc) && editorSrc) {
+            obj.thumbSrc = editorSrc;
+          }
+          return;
+        }
+        if ((obj.type === 'directGroup' || obj.type === 'directNode' || obj.type === 'genericGroup') && obj.data) {
+          compactDirectNodePayloadInPlace(obj.data);
+        }
+      });
+    });
     return data;
   }
 
@@ -106,20 +160,20 @@
     window.PROJECT_AUTOSAVE_STORE_KEY = storeKey;
 
     window.initProjectHistoryBridge({
-      limit: 40,
+      limit: 14,
       eventName: 'canvasModified',
-      debounceMs: 220,
+      debounceMs: 900,
       snapshotFn: snapshotProject,
       applyFn: applyProjectState,
       previewFn: captureAutosavePreview,
       projectIdentityFn: getProjectIdentity,
       storeKey,
-      autosaveDebounceMs: 1200,
-      autosaveArchiveLimit: 40,
-      autosaveArchiveMinIntervalMs: 12000,
-      persistUndoDepth: 10,
-      persistRedoDepth: 3,
-      autoRestoreOnLoad: true,
+      autosaveDebounceMs: 4800,
+      autosaveArchiveLimit: 14,
+      autosaveArchiveMinIntervalMs: 30000,
+      persistUndoDepth: 3,
+      persistRedoDepth: 1,
+      autoRestoreOnLoad: false,
       autoRestoreMaxAgeMs: 1000 * 60 * 60 * 24 * 7
     });
   }

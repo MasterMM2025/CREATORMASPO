@@ -14,6 +14,54 @@ function rgbToHex(rgb) {
     }).join("");
 }
 
+function getPageBackgroundState(page) {
+    const bgRect = page?.stage?.findOne?.((n) => n.getAttr && n.getAttr("isPageBg") === true) || null;
+    const fill =
+        bgRect?.getAttr?.("backgroundFill") ||
+        (typeof bgRect?.fill === "function" ? bgRect.fill() : null) ||
+        "#ffffff";
+    const opacityRaw = typeof bgRect?.opacity === "function" ? bgRect.opacity() : 1;
+    const opacity = Number.isFinite(Number(opacityRaw)) ? Number(opacityRaw) : 1;
+    return {
+        bgRect,
+        color: rgbToHex(String(fill || "#ffffff")),
+        opacity: Math.max(0, Math.min(1, opacity))
+    };
+}
+
+function applyPageBackgroundState(page, color, opacity) {
+    const state = getPageBackgroundState(page);
+    const bgRect = state.bgRect;
+    if (!bgRect) return;
+
+    const normalizedOpacity = Number.isFinite(Number(opacity)) ? Math.max(0, Math.min(1, Number(opacity))) : 1;
+    const backgroundKind = String(bgRect.getAttr("backgroundKind") || "color");
+
+    if (backgroundKind === "color") {
+        bgRect.fill(color);
+    }
+    bgRect.setAttr("backgroundFill", color);
+    bgRect.opacity(normalizedOpacity);
+    bgRect.moveToBottom();
+    bgRect.getLayer()?.batchDraw?.();
+
+    const wrapper = page?.container?.querySelector?.(".canvas-wrapper");
+    if (wrapper) {
+        wrapper.style.background = "transparent";
+        wrapper.style.opacity = 1;
+    }
+
+    const canvas = page?.stage?.container?.()?.querySelector?.(".konvajs-content");
+    if (canvas) {
+        canvas.style.background = "transparent";
+        canvas.style.opacity = 1;
+    }
+
+    page.settings = page.settings || {};
+    page.settings.pageBgColor = color;
+    page.settings.pageOpacity = normalizedOpacity;
+}
+
 document.addEventListener("DOMContentLoaded", () => {
 
     let currentText = null;
@@ -47,6 +95,89 @@ document.addEventListener("DOMContentLoaded", () => {
         if (typeof node.scaleX === "function") node.scaleX(1);
         if (typeof node.scaleY === "function") node.scaleY(1);
         if (typeof window.compactSidebarTextNode === "function") window.compactSidebarTextNode(node);
+    };
+    const isAutoBoundsTextNode = (node) => {
+        if (!node || !(node instanceof Konva.Text) || !node.getAttr) return false;
+        if (node.getAttr("isSidebarText")) return true;
+        return !!(
+            node.getAttr("directModuleId") ||
+            node.getAttr("isName") ||
+            node.getAttr("isIndex") ||
+            node.getAttr("isCustomPackageInfo")
+        );
+    };
+    const getReliableWrappedLineCount = (node) => {
+        if (!node || !(node instanceof Konva.Text)) return 1;
+        const fallback = Math.max(
+            1,
+            (Array.isArray(node.textArr) ? node.textArr.length : 0) || String(node.text?.() || "").split("\n").length
+        );
+        try {
+            const probe = new Konva.Text({
+                text: String(node.text?.() || ""),
+                fontFamily: String(node.fontFamily?.() || "Arial"),
+                fontSize: Number(node.fontSize?.() || 12),
+                fontStyle: String(node.fontStyle?.() || ""),
+                textDecoration: String(node.textDecoration?.() || ""),
+                lineHeight: Number(node.lineHeight?.() || 1.2),
+                letterSpacing: Number(node.letterSpacing?.() || 0),
+                wrap: String(node.wrap?.() || "word"),
+                align: String(node.align?.() || "left"),
+                width: Math.max(1, Number(node.width?.() || 1)),
+                height: 100000,
+                padding: Number(node.padding?.() || 0),
+                stroke: String(node.stroke?.() || ""),
+                strokeWidth: Number(node.strokeWidth?.() || 0),
+                listening: false
+            });
+            probe.getClientRect?.();
+            const lines = Array.isArray(probe.textArr) ? probe.textArr.length : fallback;
+            probe.destroy?.();
+            return Math.max(1, Number(lines) || fallback);
+        } catch (_err) {
+            return fallback;
+        }
+    };
+    const expandTextNodeBoundsAfterStyleChange = (node) => {
+        if (!isAutoBoundsTextNode(node)) return;
+        const getNum = (val, fallback) => {
+            const n = Number(val);
+            return Number.isFinite(n) ? n : fallback;
+        };
+        const wrapMode = String((typeof node.wrap === "function" ? node.wrap() : "") || "").toLowerCase();
+        const pad = Math.max(0, getNum(typeof node.padding === "function" ? node.padding() : 0, 0));
+        const lineHeightMult = Math.max(0.7, getNum(typeof node.lineHeight === "function" ? node.lineHeight() : 1.2, 1.2));
+        const fontSize = Math.max(1, getNum(typeof node.fontSize === "function" ? node.fontSize() : 12, 12));
+        const fallbackTextHeight = fontSize * lineHeightMult;
+        const singleLineH = Math.max(1, getNum(node.textHeight, fallbackTextHeight));
+        const lineCount = getReliableWrappedLineCount(node);
+        const strokeW = Math.max(0, getNum(typeof node.strokeWidth === "function" ? node.strokeWidth() : 0, 0));
+        const minH = Math.max(12, Math.ceil((lineCount * singleLineH) + (pad * 2) + strokeW + 2));
+        if (typeof node.height === "function") {
+            const currentH = Math.max(0, getNum(node.height(), 0));
+            node.height(Math.max(currentH, minH));
+        }
+
+        const shouldGrowWidth =
+            wrapMode === "none" ||
+            !!node.getAttr("isIndex") ||
+            !!node.getAttr("isCustomPackageInfo") ||
+            !!node.getAttr("isSidebarText");
+        if (!shouldGrowWidth || typeof node.width !== "function") return;
+
+        const lines = String(node.text?.() || "").replace(/\r\n/g, "\n").split("\n");
+        const maxChars = lines.reduce((max, line) => Math.max(max, String(line || "").length), 0);
+        const letterSpacing = Math.max(0, getNum(typeof node.letterSpacing === "function" ? node.letterSpacing() : 0, 0));
+        const measuredW = lines.reduce((max, line) => {
+            const txt = String(line || " ");
+            const m = (typeof node.measureSize === "function") ? node.measureSize(txt) : null;
+            const w = getNum(m && m.width, 0);
+            return Math.max(max, w);
+        }, 0);
+        const extraSpacingW = Math.max(0, maxChars - 1) * letterSpacing;
+        const minW = Math.max(20, Math.ceil(measuredW + extraSpacingW + strokeW + (pad * 2) + 2));
+        const currentW = Math.max(0, getNum(node.width(), 0));
+        node.width(Math.max(currentW, minW));
     };
     const getDynamicFonts = () => {
         const list = (typeof window.getAvailableFonts === "function") ? window.getAvailableFonts() : [];
@@ -228,6 +359,7 @@ document.addEventListener("DOMContentLoaded", () => {
         node.fontStyle(style.fontStyle || "");
         node.setAttr("underline", !!style.underline);
         node.align(style.align || node.align() || "left");
+        expandTextNodeBoundsAfterStyleChange(node);
     };
 
     window.showTextToolbar = (node) => {
@@ -390,6 +522,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (!t) return;
             normalizeTextNodeScale(t);
             fn(t);
+            expandTextNodeBoundsAfterStyleChange(t);
             if (typeof window.compactSidebarTextNode === "function") {
                 window.compactSidebarTextNode(t);
             }
@@ -746,15 +879,14 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (title) title.textContent = "Edytuj tło strony";
                 const applyBtn = document.getElementById("applyEdit");
                 if (applyBtn) applyBtn.textContent = "Zastosuj tło";
-                const wrapper = page.container.querySelector(".canvas-wrapper");
-                const cs = getComputedStyle(wrapper);
+                const pageBgState = getPageBackgroundState(page);
                 document.getElementById("pageEditor").style.display = "block";
                 document.getElementById("boxEditor").style.display = "none";
                 document.getElementById("textEditor").style.display = "none";
 
-                document.getElementById("pageBgColor").value = rgbToHex(cs.backgroundColor);
+                document.getElementById("pageBgColor").value = pageBgState.color;
                 document.getElementById("pageBgColor").dispatchEvent(new Event("input", { bubbles: true }));
-                document.getElementById("pageOpacity").value = parseFloat(cs.opacity) || 1;
+                document.getElementById("pageOpacity").value = pageBgState.opacity;
             }
             // === TŁO STRONY — kliknięto w Stage albo w bgRect ===
 if (node === stage || node.getAttr("isPageBg") === true) {
@@ -762,16 +894,15 @@ if (node === stage || node.getAttr("isPageBg") === true) {
     currentPage = pages.find(p => p.stage === stage);
     if (!currentPage) return;
 
-    const wrapper = currentPage.container.querySelector(".canvas-wrapper");
-    const cs = getComputedStyle(wrapper);
+    const pageBgState = getPageBackgroundState(currentPage);
 
     document.getElementById("pageEditor").style.display = "block";
     document.getElementById("boxEditor").style.display = "none";
     document.getElementById("textEditor").style.display = "none";
 
-    document.getElementById("pageBgColor").value = rgbToHex(cs.backgroundColor);
+    document.getElementById("pageBgColor").value = pageBgState.color;
     document.getElementById("pageBgColor").dispatchEvent(new Event("input", { bubbles: true }));
-    document.getElementById("pageOpacity").value = parseFloat(cs.opacity) || 1;
+    document.getElementById("pageOpacity").value = pageBgState.opacity;
 
     panel.style.display = "block";
     return;
@@ -798,6 +929,7 @@ if (node === stage || node.getAttr("isPageBg") === true) {
             currentText.fontStyle(style.trim());
             currentText.setAttr("underline", document.getElementById("textUnderline").checked);
             currentText.align(document.getElementById("textAlign").value);
+            expandTextNodeBoundsAfterStyleChange(currentText);
             if (typeof window.compactSidebarTextNode === "function") {
                 window.compactSidebarTextNode(currentText);
             }
@@ -819,25 +951,7 @@ if (node === stage || node.getAttr("isPageBg") === true) {
     const bg = document.getElementById("pageBgColor").value;
     const opacity = Number(document.getElementById("pageOpacity").value);
 
-    const bgRect = currentPage.stage.findOne(n => n.getAttr('isPageBg') === true);
-
-    if (bgRect) {
-        bgRect.fill(bg);
-        bgRect.opacity(opacity);
-        bgRect.moveToBottom();
-        bgRect.getLayer().batchDraw();
-    }
-
-    // 🔥 usuń CSS — tylko Konva decyduje
-    const wrapper = currentPage.container.querySelector(".canvas-wrapper");
-    wrapper.style.background = "transparent";
-    wrapper.style.opacity = 1;
-
-    const canvas = currentPage.stage.container().querySelector(".konvajs-content");
-    if (canvas) {
-        canvas.style.background = "transparent";
-        canvas.style.opacity = 1;
-    }
+    applyPageBackgroundState(currentPage, bg, opacity);
 
     currentPage.layer.draw(); // 🔥 pełne odświeżenie!
     window.dispatchEvent(new CustomEvent("canvasModified",{detail:currentStage}));
@@ -885,23 +999,7 @@ document.getElementById("applyPageBgToAll").onclick = () => {
     const opacity = Number(document.getElementById("pageOpacity").value);
 
     pages.forEach(p => {
-        const bgRect = p.stage.findOne(n => n.getAttr('isPageBg') === true);
-        if (!bgRect) return;
-
-        bgRect.fill(bg);
-        bgRect.opacity(opacity);
-        bgRect.moveToBottom();
-        bgRect.getLayer().batchDraw();
-
-        const wrapper = p.container.querySelector(".canvas-wrapper");
-        wrapper.style.background = "transparent";
-        wrapper.style.opacity = 1;
-
-        const canvas = p.stage.container().querySelector(".konvajs-content");
-        if (canvas) {
-            canvas.style.background = "transparent";
-            canvas.style.opacity = 1;
-        }
+        applyPageBackgroundState(p, bg, opacity);
     });
 
     pages.forEach(p => p.layer.draw()); // 🔥 pełne odświeżenie!

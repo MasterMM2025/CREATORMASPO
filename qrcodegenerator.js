@@ -16,7 +16,7 @@
 
   // ================= INIT =================
   function init() {
-    const btn = document.querySelector('.sidebar-item[title="Kod QR"]');
+    const btn = document.querySelector('.sidebar-item[data-tooltip="Kod QR"]');
     if (!btn || btn._qrBound) return;
     btn._qrBound = true;
     btn.addEventListener('click', openQRModal);
@@ -41,36 +41,36 @@
     qrModal.style.cssText = `
       position:fixed;top:50%;left:50%;
       transform:translate(-50%,-50%);
-      background:#fff;padding:20px;width:360px;
-      border-radius:12px;
-      box-shadow:0 8px 25px rgba(0,0,0,.25);
-      z-index:20000;font-family:Arial;
+      background:linear-gradient(180deg,#0d1320 0%,#09101a 100%);padding:18px;width:360px;
+      border-radius:18px;
+      box-shadow:0 24px 56px rgba(0,0,0,.42);border:1px solid rgba(255,255,255,.08);
+      z-index:20000;font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;color:#f4f7fb;
     `;
 
     qrModal.innerHTML = `
-      <h3 style="margin:0 0 12px;text-align:center;">Generator QR Code</h3>
+      <h3 style="margin:0 0 14px;text-align:center;font-size:24px;font-weight:800;color:#f5f7fb;">Generator QR Code</h3>
 
       <input id="qrInput" type="text"
         placeholder="wklej link lub tekst"
-        style="width:100%;padding:8px;font-size:15px;
-               border-radius:6px;border:1px solid #999;">
+        style="width:100%;padding:14px 16px;font-size:15px;
+               border-radius:14px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.05);color:#f5f7fb;outline:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.04);">
 
       <div id="qrPreview"
-        style="margin:14px 0;min-height:120px;
-               background:#f3f3f3;border-radius:6px;
-               display:flex;align-items:center;justify-content:center;">
+        style="margin:16px 0;min-height:120px;
+               background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;
+               display:flex;align-items:center;justify-content:center;padding:12px;">
       </div>
 
       <button id="makeQR"
-        style="width:100%;padding:10px;
-               background:#007cba;border:none;
-               border-radius:8px;color:#fff;cursor:pointer;">
+        style="width:100%;padding:13px 16px;
+               background:linear-gradient(135deg,#18c8bb 0%,#31c6c8 100%);border:none;
+               border-radius:14px;color:#071015;font-weight:800;cursor:pointer;box-shadow:0 12px 28px rgba(24,200,187,.22);">
         Generuj i wstaw
       </button>
 
       <button id="closeQR"
-        style="margin-top:6px;width:100%;
-               padding:10px;border-radius:8px;">
+        style="margin-top:8px;width:100%;
+               padding:13px 16px;border-radius:14px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.05);color:#f5f7fb;font-weight:700;cursor:pointer;">
         Anuluj
       </button>
     `;

@@ -35,8 +35,14 @@ function repopulateFontSelect(selectEl, preferredValue = "Arial") {
 // ===== LAZY LOAD ELEMENTÓW (SIDEBAR) =====
 let elementsAllItems = [];
 let elementsRenderIndex = 0;
-const ELEMENTS_BATCH_SIZE = 8; // ← zmień na 6 jeśli chcesz
+let elementsFilteredItems = [];
+const ELEMENTS_BATCH_SIZE = 24;
 let elementsLoading = false;
+let elementsLazyObserver = null;
+let elementsPendingRows = [];
+let elementsUrlWorkersActive = 0;
+let elementsSearchDebounce = null;
+let elementsScrollRaf = 0;
 
 // === AUTO-CROP — usuwa przezroczyste marginesy z PNG ===
 function autoCropKonvaImage(kImg) {
@@ -115,13 +121,68 @@ let addTextMode = false;
 let addImageMode = false;
 let addPSDMode = false;
 
+function normalizeVariantPayloadLocal(value) {
+  if (typeof window.normalizeImageVariantPayload === "function") {
+    return window.normalizeImageVariantPayload(value);
+  }
+  const src = String(value || "").trim();
+  return { original: src, editor: src, thumb: src };
+}
+
+function variantSrcLocal(variants, kind = "editor") {
+  if (typeof window.getImageVariantSource === "function") {
+    return window.getImageVariantSource(variants, kind);
+  }
+  const payload = normalizeVariantPayloadLocal(variants);
+  if (kind === "original") return payload.original || payload.editor || payload.thumb || "";
+  if (kind === "thumb") return payload.thumb || payload.editor || payload.original || "";
+  return payload.editor || payload.original || payload.thumb || "";
+}
+
+async function getImageVariantsFromSourceLocal(src, cacheKeyPrefix = "sidebar-src") {
+  const safeSrc = String(src || "").trim();
+  if (!safeSrc) return normalizeVariantPayloadLocal("");
+  if (typeof window.createImageVariantsFromSource === "function") {
+    try {
+      return await window.createImageVariantsFromSource(safeSrc, {
+        cacheKey: `${cacheKeyPrefix}:${safeSrc}`,
+        thumbMaxEdge: 128,
+        editorMaxEdge: 560
+      });
+    } catch (_e) {}
+  }
+  return normalizeVariantPayloadLocal(safeSrc);
+}
+
+async function getImageVariantsFromFileLocal(file, cacheKeyPrefix = "sidebar-file") {
+  if (typeof window.createImageVariantsFromFile === "function") {
+    try {
+      return await window.createImageVariantsFromFile(file, {
+        cacheKey: `${cacheKeyPrefix}:${file?.name || "file"}:${file?.size || 0}:${file?.lastModified || 0}`,
+        thumbMaxEdge: 128,
+        editorMaxEdge: 560
+      });
+    } catch (_e) {}
+  }
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(normalizeVariantPayloadLocal(String(reader.result || "")));
+    reader.onerror = () => reject(new Error("image_read_error"));
+    reader.readAsDataURL(file);
+  });
+}
+
 
 // ====================== SIDEBAR – PRZYCISKI ======================
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.sidebar-item').forEach(item => {
     item.addEventListener('click', () => {
 
-      const title = item.getAttribute('title');
+      const title =
+        item.getAttribute('data-tooltip') ||
+        item.getAttribute('aria-label') ||
+        item.getAttribute('title') ||
+        '';
 
       if (title === 'Import PSD') enableAddPSDMode();
 
@@ -159,8 +220,11 @@ window.enableAddImageMode = enableAddImageMode;
 
 
 
-function isWithinPageArea(x, y) {
-  return x >= 0 && x <= 794 && y >= 0 && y <= 1123;
+function isWithinPageArea(x, y, stage = null) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+  const width = Number(stage && typeof stage.width === "function" ? stage.width() : 794);
+  const height = Number(stage && typeof stage.height === "function" ? stage.height() : 1123);
+  return x >= 0 && x <= width && y >= 0 && y <= height;
 }
 
 // ====================== DODAJ TEKST Z SIDEBARU ======================
@@ -175,7 +239,7 @@ function enableAddTextMode() {
     const handler = e => {
       if (!addTextMode || e.evt.button !== 0) return;
       const pos = page.stage.getPointerPosition();
-      if (pos && isWithinPageArea(pos.x, pos.y)) {
+      if (pos && isWithinPageArea(pos.x, pos.y, page.stage)) {
         addTextAtPosition(page, pos.x, pos.y);
       }
       addTextMode = false;
@@ -264,6 +328,22 @@ function addTextAtPosition(page, x, y) {
 function enableAddImageMode() {
   if (addTextMode || addImageMode) return;
   addImageMode = true;
+  const resolveStagePointer = (stage, nativeEvt = null) => {
+    if (!stage) return null;
+    if (nativeEvt && typeof stage.setPointersPositions === "function") {
+      stage.setPointersPositions(nativeEvt);
+    }
+    const pos = stage.getPointerPosition();
+    if (!pos) return null;
+    if (!isWithinPageArea(pos.x, pos.y, stage)) return null;
+    return pos;
+  };
+  const commitImagePlacement = (page, pos) => {
+    if (!addImageMode || !page || !pos) return;
+    addImageMode = false;
+    disableAddImageMode();
+    openImagePickerAtPosition(page, pos.x, pos.y);
+  };
   const img = new Image();
   img.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMwMGM0YjQiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cmVjdCB3aWR0aD0iMTgiIGhlaWdodD0iMTgiIHg9IjMiIHk9IjMiIHJ4PSIyIiByeT0iMiIvPjxjaXJjbGUgY3g9IjguNSIgY3k9IjguNSIgcj0iMS41Ii8+PHBhdGggZD0iTTE3IDEzaC0xLjVMMTAuMjUgNy43NWEuNzUuNzUgMCAwIDAtMS4wNiAwTDQgMTMiLz48L3N2Zz4=';
   img.onload = () => {
@@ -273,15 +353,16 @@ function enableAddImageMode() {
       c.style.outline = '2px solid #00c4b4';
       c.style.outlineOffset = '2px';
       c.style.cursor = cursor;
-      const handler = e => {
-        if (!addImageMode || e.evt.button !== 0) return;
-        const pos = page.stage.getPointerPosition();
-        if (pos && isWithinPageArea(pos.x, pos.y)) openImagePickerAtPosition(page, pos.x, pos.y);
-        addImageMode = false;
-        disableAddImageMode();
+      const stageHandler = (e) => {
+        if (!addImageMode) return;
+        if (e && e.evt && Number.isFinite(e.evt.button) && e.evt.button !== 0) return;
+        const pos = resolveStagePointer(page.stage, e && e.evt ? e.evt : null);
+        if (!pos) return;
+        if (e) e.cancelBubble = true;
+        commitImagePlacement(page, pos);
       };
-      page.stage.on('mousedown.imagemode', handler);
-      page._imageHandler = handler;
+      page.stage.on('mousedown.imagemode touchstart.imagemode contentMousedown.imagemode contentTouchstart.imagemode', stageHandler);
+      page._imageHandler = stageHandler;
     });
   };
 }
@@ -292,8 +373,12 @@ function disableAddImageMode() {
     c.style.outline = c.style.outlineOffset = '';
     c.style.cursor = 'default';
     if (page._imageHandler) {
-      page.stage.off('mousedown.imagemode', page._imageHandler);
+      page.stage.off('mousedown.imagemode touchstart.imagemode contentMousedown.imagemode contentTouchstart.imagemode', page._imageHandler);
       page._imageHandler = null;
+    }
+    if (page._imageDomCaptureHandler) {
+      c.removeEventListener('pointerdown', page._imageDomCaptureHandler, true);
+      page._imageDomCaptureHandler = null;
     }
   });
 }
@@ -301,50 +386,88 @@ function disableAddImageMode() {
 function openImagePickerAtPosition(page, x, y) {
   const input = document.createElement('input');
   input.type = 'file'; input.accept = 'image/*';
-  input.onchange = e => {
+  input.onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      Konva.Image.fromURL(ev.target.result, img => {
-        img.setAttr("originalSrc", ev.target.result);
+    let variants = null;
+    try {
+      variants = await getImageVariantsFromFileLocal(file, "sidebar-manual");
+    } catch (_e) {
+      return;
+    }
+    const editorSrc = variantSrcLocal(variants, "editor");
+    const originalSrc = variantSrcLocal(variants, "original") || editorSrc;
+    const thumbSrc = variantSrcLocal(variants, "thumb") || editorSrc;
+    if (!editorSrc) return;
 
-  // 🔥 duże zdjęcie, ładne jak w Canva
-const maxSize = 500;  // możesz zmienić na 800 jeśli chcesz
+    Konva.Image.fromURL(editorSrc, img => {
+      if (!img) return;
+      if (typeof window.applyImageVariantsToKonvaNode === "function") {
+        window.applyImageVariantsToKonvaNode(img, {
+          original: originalSrc,
+          editor: editorSrc,
+          thumb: thumbSrc
+        });
+      } else {
+        img.setAttr("originalSrc", originalSrc);
+        img.setAttr("editorSrc", editorSrc);
+        img.setAttr("thumbSrc", thumbSrc);
+      }
 
-const s = Math.min(maxSize / img.width(), maxSize / img.height(), 1);
+      // 🔥 duże zdjęcie, ładne jak w Canva
+      const maxSize = 500;  // możesz zmienić na 800 jeśli chcesz
+
+      const s = Math.min(maxSize / img.width(), maxSize / img.height(), 1);
 
 
-  img.setAttrs({
-    x: x - img.width() * s / 2,
-    y: y - img.height() * s / 2,
-    scaleX: s,
-    scaleY: s,
-    draggable: true,
-    listening: true,
+      img.setAttrs({
+        x: x - img.width() * s / 2,
+        y: y - img.height() * s / 2,
+        scaleX: s,
+        scaleY: s,
+        draggable: true,
+        listening: true,
 
-    // 🔥 ULTRA WAŻNE — pozwala odróżnić od tła/koloru strony
-    isSidebarImage: true,
-    isDesignElement: true,
-    isEditable: true,
-    isSelectable: true,
-    isDraggable: true,
-    isPageBg: false,
-    name: "design-image"
-    
-    
+        // 🔥 ULTRA WAŻNE — pozwala odróżnić od tła/koloru strony
+        isSidebarImage: true,
+        isUserImage: true,
+        isProductImage: false,
+        isDesignElement: true,
+        isEditable: true,
+        isSelectable: true,
+        isDraggable: true,
+        slotIndex: null,
+        preservedSlotIndex: null,
+        isPageBg: false,
+        name: "design-image"
+      });
 
-  });
+      markAsEditable(img);
+      if (img.hitStrokeWidth) img.hitStrokeWidth(20);
 
-  markAsEditable(img);
-  if (img.hitStrokeWidth) img.hitStrokeWidth(20);
-
-  page.layer.add(img);
-  page.layer.batchDraw();
-});
-
-    };
-    reader.readAsDataURL(file);
+      page.layer.add(img);
+      page.layer.batchDraw();
+      if (typeof window.activateNewImageCropSelection === "function") {
+        try { window.activateNewImageCropSelection(page, img, { autoCrop: false }); } catch (_e) {}
+      }
+      // Po zamknięciu file pickera przeglądarka potrafi zostawić transformer
+      // w stanie "wizualnie zaznaczony, ale jeszcze niegotowy do pierwszego resize".
+      // Dodatkowe uzbrojenie selekcji na kolejnych klatkach stabilizuje pierwszy drag.
+      const armSelection = () => {
+        try { page.selectedNodes = [img]; } catch (_e) {}
+        try { page.transformer?.nodes?.([img]); } catch (_e) {}
+        try { page.transformer?.forceUpdate?.(); } catch (_e) {}
+        try { page.layer?.batchDraw?.(); } catch (_e) {}
+        try { page.transformerLayer?.batchDraw?.(); } catch (_e) {}
+      };
+      armSelection();
+      requestAnimationFrame(() => {
+        armSelection();
+        requestAnimationFrame(() => {
+          armSelection();
+        });
+      });
+    });
   };
   input.click();
 }
@@ -364,7 +487,7 @@ function enableAddPSDMode() {
       if (!addPSDMode || e.evt.button !== 0) return;
 
       const pos = page.stage.getPointerPosition();
-      if (pos && isWithinPageArea(pos.x, pos.y)) {
+      if (pos && isWithinPageArea(pos.x, pos.y, page.stage)) {
         openPSDPickerAtPosition(page, pos.x, pos.y);
       }
 
@@ -655,8 +778,8 @@ document.getElementById("teApply").onclick = () => {
 
 const elementsPanel = document.createElement('div');
 elementsPanel.id = "elementsPanel";
-const ELEMENTS_PANEL_LEFT_OPEN = 130;
-const ELEMENTS_PANEL_WIDTH = 380;
+const ELEMENTS_PANEL_LEFT_OPEN = 82;
+const ELEMENTS_PANEL_WIDTH = 286;
 const ELEMENTS_PANEL_LEFT_CLOSED = -(ELEMENTS_PANEL_WIDTH + 20);
 const ELEMENTS_TOGGLE_LEFT_OPEN = ELEMENTS_PANEL_LEFT_OPEN + ELEMENTS_PANEL_WIDTH - 10;
 elementsPanel.style.cssText = `
@@ -665,27 +788,29 @@ transition: left 0.25s ease;
   left: ${ELEMENTS_PANEL_LEFT_OPEN}px;
   top: 60px;
   width: ${ELEMENTS_PANEL_WIDTH}px;
-  height: calc(100vh - 80px);
-  background: #fff;
+  height: calc(100vh - 92px);
+  background: linear-gradient(180deg, #0b1019 0%, #070c14 100%);
   border-radius: 16px 16px 0 0;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+  box-shadow: 0 18px 48px rgba(0,0,0,0.42);
+  border: 1px solid rgba(148, 163, 184, 0.16);
   overflow-y: auto;
   overflow-x: hidden;
   display: none;
   z-index: 99999;
-  padding: 20px;
+  padding: 12px;
   box-sizing: border-box;
   font-family: 'Inter', sans-serif;
+  color: #e5edf9;
 `;
 
 elementsPanel.innerHTML = `
-  <h3 style="font-size:18px;color:#00c4b4;font-weight:600;margin-bottom:12px;">Elementy</h3>
+  <h3 style="font-size:14px;color:#f3f6fb;font-weight:700;margin-bottom:8px;letter-spacing:.01em;">Elementy</h3>
 
   <input type="text" id="searchElements" placeholder="Wyszukaj elementy"
-    style="width:100%;padding:10px 14px;border-radius:10px;border:1px solid #ddd;font-size:15px;margin-bottom:15px;">
+    style="width:100%;padding:9px 11px;border-radius:12px;border:1px solid rgba(155,171,199,.16);font-size:13px;margin-bottom:10px;background:#121927;color:#f3f6fb;outline:none;">
 
   <!-- 🔥 ZAKŁADKI -->
-  <div id="elementsTabs" style="display:flex; gap:10px; margin-bottom:12px;">
+  <div id="elementsTabs" style="display:flex; gap:6px; margin-bottom:8px;">
     <button class="tabBtn active" data-folder="PHOTO PNG/BANNERS">BANNERS-PNG</button>
 <button class="tabBtn" data-folder="PHOTO PNG/FOOD">FOOD-PNG</button>
 <button class="tabBtn" data-folder="PHOTO PNG/COUNTRY">COUNTRY-PNG</button>
@@ -700,58 +825,86 @@ const btnStyle = document.createElement("style");
 btnStyle.textContent = `
   .tabBtn {
     flex: 1;
-    padding: 6px 8px;        /* MNIEJSZE WEWNĘTRZNE ODSUNIECIE */
-    background: #f2f2f2;
-    border: none;
-    border-radius: 8px;      /* MNIEJSZE ZAOKRĄGLENIE */
-    font-size: 13px;         /* MNIEJSZA CZCIONKA */
-    font-weight: 600;
+    padding: 5px 6px;
+    background: linear-gradient(180deg, #121927 0%, #0d1320 100%);
+    border: 1px solid rgba(155,171,199,.16);
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #d7e2f0;
     cursor: pointer;
     transition: 0.25s ease;
-    height: 32px;            /* MNIEJSZA WYSOKOŚĆ CAŁKOWITA */
+    height: 30px;
     display: flex;
     align-items: center;
     justify-content: center;
   }
 
   .tabBtn:hover {
-    background: #e6e6e6;
+    background: linear-gradient(180deg, #171f2f 0%, #111827 100%);
+    border-color: rgba(45, 212, 191, 0.35);
   }
 
   .tabBtn.active {
-    background: #00c4b4;
-    color: white;
-    box-shadow: 0 3px 10px rgba(0,196,180,0.35);
+    background: linear-gradient(135deg, #11847d 0%, #25c7b7 100%);
+    color: #f8fffe;
+    border-color: rgba(45, 212, 191, 0.7);
+    box-shadow: 0 8px 18px rgba(18, 184, 166, 0.26);
     transform: translateY(-1px);
   }
 
   .elementTile {
     width: 100%;
-    height: 80px;
-    border-radius: 10px;
-    border: 2px solid transparent;
-    background: #fff;
+    min-height: 82px;
+    border-radius: 12px;
+    border: 1px solid rgba(148,163,184,.14);
+    background: linear-gradient(180deg, #121927 0%, #0d1320 100%);
     position: relative;
     overflow: hidden;
     cursor: grab;
-    transition: 0.2s;
+    transition: 0.2s ease;
     box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px;
   }
   .elementTile:active {
     cursor: grabbing;
   }
 
+  .elementTile:hover {
+    border-color: rgba(45, 212, 191, 0.4);
+    box-shadow: 0 10px 22px rgba(2, 8, 23, 0.35);
+    transform: translateY(-1px);
+  }
+
   .elementTile.is-selected {
-    border-color: #00c4b4;
+    border-color: #2dd4bf;
+    box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.45), 0 12px 28px rgba(13, 148, 136, 0.22);
   }
 
   .elementSkeleton {
     position: absolute;
     inset: 0;
-    background: linear-gradient(90deg, #efefef 0%, #f7f7f7 45%, #efefef 100%);
+    background: linear-gradient(90deg, #0d1320 0%, #151d2d 45%, #0d1320 100%);
     background-size: 220% 100%;
     animation: elementShimmer 1.2s ease-in-out infinite;
     pointer-events: none;
+  }
+
+  #elementsPanel::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  #elementsPanel::-webkit-scrollbar-track {
+    background: rgba(12, 18, 29, 0.92);
+    border-radius: 999px;
+  }
+
+  #elementsPanel::-webkit-scrollbar-thumb {
+    background: rgba(95, 109, 133, 0.82);
+    border-radius: 999px;
   }
 
   @keyframes elementShimmer {
@@ -776,6 +929,15 @@ document.querySelectorAll('.tabBtn').forEach(btn => {
     loadFirebaseFolder(currentFolder);     // 🔥 wczytaj odpowiedni folder
   });
 });
+const searchElementsInput = document.getElementById('searchElements');
+if (searchElementsInput) {
+  searchElementsInput.addEventListener('input', () => {
+    if (elementsSearchDebounce) clearTimeout(elementsSearchDebounce);
+    elementsSearchDebounce = setTimeout(() => {
+      loadFirebaseFolder(currentFolder);
+    }, 140);
+  });
+}
 
 const toggleBtn = document.createElement('button');
 toggleBtn.id = 'toggleElementsPanel';
@@ -785,33 +947,66 @@ toggleBtn.style.cssText = `
   left: ${ELEMENTS_TOGGLE_LEFT_OPEN}px;
   top: 50%;
   transform: translateY(-50%);
-  background: #fff;
-  border: 1px solid #ddd;
+  background: linear-gradient(180deg, #111827 0%, #0f172a 100%);
+  border: 1px solid rgba(148,163,184,.18);
   border-radius: 0 10px 10px 0;
-  width: 34px;
-  height: 70px;
+  width: 30px;
+  height: 60px;
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.1);
+  box-shadow: 0 10px 24px rgba(0,0,0,0.34);
   z-index: 100000;
   transition: all 0.25s ease;
-  font-size: 18px;
-  color: #333;
+  font-size: 16px;
+  color: #dce8f7;
   display: flex;
   align-items: center;
   justify-content: center;
 `;
 document.body.appendChild(toggleBtn)
 toggleBtn.style.display = 'none';
+
+function getElementsUiZoom() {
+  const raw = window.getComputedStyle(document.body).zoom;
+  const zoom = Number.parseFloat(raw);
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+}
+
+function applyElementsPanelLayout() {
+  const zoom = getElementsUiZoom();
+  const openLeft = ELEMENTS_PANEL_LEFT_OPEN / zoom;
+  const closedLeft = ELEMENTS_PANEL_LEFT_CLOSED / zoom;
+  const toggleLeftOpen = ELEMENTS_TOGGLE_LEFT_OPEN / zoom;
+  const panelHeight = Math.max(300, window.innerHeight - 92);
+
+  elementsPanel.style.top = `${60 / zoom}px`;
+  elementsPanel.style.width = `${ELEMENTS_PANEL_WIDTH / zoom}px`;
+  elementsPanel.style.height = `${panelHeight / zoom}px`;
+  elementsPanel.style.padding = `${20 / zoom}px`;
+  elementsPanel.style.borderRadius = `${16 / zoom}px ${16 / zoom}px 0 0`;
+
+  toggleBtn.style.top = `${window.innerHeight / 2 / zoom}px`;
+  toggleBtn.style.width = `${30 / zoom}px`;
+  toggleBtn.style.height = `${60 / zoom}px`;
+  toggleBtn.style.fontSize = `${16 / zoom}px`;
+  toggleBtn.style.borderRadius = `0 ${10 / zoom}px ${10 / zoom}px 0`;
+
+  if (panelVisible) {
+    elementsPanel.style.left = `${openLeft}px`;
+    toggleBtn.style.left = `${toggleLeftOpen}px`;
+  } else {
+    elementsPanel.style.left = `${closedLeft}px`;
+    toggleBtn.style.left = '0px';
+  }
+}
+
 function openElementsPanel() {
   const panel = document.getElementById('elementsPanel');
 
   panel.style.display = "block";
-  elementsPanel.style.left = `${ELEMENTS_PANEL_LEFT_OPEN}px`; // wysuwa panel
-  toggleBtn.style.display = "flex";
-  toggleBtn.style.left = `${ELEMENTS_TOGGLE_LEFT_OPEN}px`;
-  toggleBtn.innerHTML = "⟨";
-
   panelVisible = true;
+  applyElementsPanelLayout();
+  toggleBtn.style.display = "flex";
+  toggleBtn.innerHTML = "⟨";
 }
 // === 🔥 Funkcja otwierająca panel elementów z czyszczeniem zawartości ===
 function showElementsPanel() {
@@ -822,21 +1017,18 @@ function showElementsPanel() {
     container.innerHTML = "";
 
     panel.style.display = "block";
-    elementsPanel.style.left = `${ELEMENTS_PANEL_LEFT_OPEN}px`;
-
-    toggleBtn.style.display = "flex";
-    toggleBtn.style.left = `${ELEMENTS_TOGGLE_LEFT_OPEN}px`;
-    toggleBtn.innerHTML = "⟨";
-
     panelVisible = true;
+    applyElementsPanelLayout();
+    toggleBtn.style.display = "flex";
+    toggleBtn.innerHTML = "⟨";
 }
 
 
 
 let panelVisible = false;
-elementsPanel.style.left = `${ELEMENTS_PANEL_LEFT_CLOSED}px`;
-toggleBtn.style.left = '0px';
 toggleBtn.innerHTML = '⟩';
+applyElementsPanelLayout();
+window.addEventListener('resize', applyElementsPanelLayout);
 
 toggleBtn.addEventListener('click', () => {
   // 🔹 Przełącz widoczność panelu
@@ -844,13 +1036,11 @@ toggleBtn.addEventListener('click', () => {
 
   if (panelVisible) {
     // === POKAŻ PANEL ===
-    elementsPanel.style.left = `${ELEMENTS_PANEL_LEFT_OPEN}px`;
-    toggleBtn.style.left = `${ELEMENTS_TOGGLE_LEFT_OPEN}px`;
+    applyElementsPanelLayout();
     toggleBtn.innerHTML = '⟨';
   } else {
     // === SCHOWAJ PANEL ===
-    elementsPanel.style.left = `${ELEMENTS_PANEL_LEFT_CLOSED}px`;
-    toggleBtn.style.left = '0px';
+    applyElementsPanelLayout();
     toggleBtn.innerHTML = '⟩';
     
     // 🔥 Po krótkiej animacji (0.3s) ukryj przycisk całkowicie
@@ -860,8 +1050,43 @@ toggleBtn.addEventListener('click', () => {
   }
 });
 
-const { getStorage, ref, listAll, getDownloadURL } = window.firebaseStorageExports || await import("https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js");
-const storage = getStorage(undefined, "gs://pdf-creator-f7a8b.firebasestorage.app");
+let firebaseStorageApi = null;
+let storage = null;
+let firebaseStorageApiPromise = null;
+
+async function ensureFirebaseStorageReady() {
+  if (firebaseStorageApi && storage) return firebaseStorageApi;
+  if (!firebaseStorageApiPromise) {
+    firebaseStorageApiPromise = (async () => {
+      const api = window.firebaseStorageExports || await import("https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js");
+      const getStorageFn = api?.getStorage;
+      const refFn = api?.ref;
+      const listAllFn = api?.listAll;
+      const getDownloadURLFn = api?.getDownloadURL;
+      if (
+        typeof getStorageFn !== "function" ||
+        typeof refFn !== "function" ||
+        typeof listAllFn !== "function" ||
+        typeof getDownloadURLFn !== "function"
+      ) {
+        throw new Error("Brak API Firebase Storage.");
+      }
+      storage = getStorageFn(undefined, "gs://pdf-creator-f7a8b.firebasestorage.app");
+      firebaseStorageApi = {
+        ref: refFn,
+        listAll: listAllFn,
+        getDownloadURL: getDownloadURLFn
+      };
+      return firebaseStorageApi;
+    })();
+  }
+  try {
+    return await firebaseStorageApiPromise;
+  } catch (err) {
+    firebaseStorageApiPromise = null;
+    throw err;
+  }
+}
 
 
 
@@ -877,77 +1102,125 @@ addElementBtn.addEventListener('click', async () => {
     // Pokaż przycisk schowania gdy panel się pojawia
     toggleBtn.style.display = 'flex';
     panelVisible = true;
-    elementsPanel.style.left = `${ELEMENTS_PANEL_LEFT_OPEN}px`;
-    toggleBtn.style.left = `${ELEMENTS_TOGGLE_LEFT_OPEN}px`;
+    applyElementsPanelLayout();
     toggleBtn.innerHTML = '⟨';
     await loadFirebaseFolder(currentFolder);
   } else {
     // Schowaj panel i przycisk
+    panelVisible = false;
     toggleBtn.style.display = 'none';
-    elementsPanel.style.left = `${ELEMENTS_PANEL_LEFT_CLOSED}px`;
+    applyElementsPanelLayout();
   }
 });
 
 
 async function loadFirebaseFolder(folderPath) {
   const container = document.getElementById('elementsContainer');
+  const searchInput = document.getElementById('searchElements');
+  if (!container) return;
+  let storageApi = null;
+  try {
+    storageApi = await ensureFirebaseStorageReady();
+  } catch (err) {
+    container.innerHTML = '<p style="color:#c62828;font-size:13px;">Nie udało się połączyć z Firebase Storage.</p>';
+    console.error("Firebase Storage init error:", err);
+    return;
+  }
 
-  // ⭐ NOWA SESJA ŁADOWANIA
   const mySession = ++loadSessionId;
+  const renderSkeletons = (count = 12) => {
+    container.innerHTML = "";
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < count; i += 1) {
+      const tile = document.createElement("div");
+      tile.className = "elementTile";
+      const skeleton = document.createElement("div");
+      skeleton.className = "elementSkeleton";
+      tile.appendChild(skeleton);
+      fragment.appendChild(tile);
+    }
+    container.appendChild(fragment);
+  };
 
-  container.innerHTML = "";
-  container.innerHTML = '<p style="color:#777;font-size:14px;">Wczytywanie...</p>';
+  renderSkeletons(12);
 
   let items = ELEMENTS_FOLDER_ITEMS_CACHE.get(folderPath) || null;
   if (!items) {
-    const folderRef = ref(storage, folderPath);
-    const result = await listAll(folderRef);
+    const folderRef = storageApi.ref(storage, folderPath);
+    const result = await storageApi.listAll(folderRef);
     items = Array.isArray(result?.items) ? result.items : [];
     ELEMENTS_FOLDER_ITEMS_CACHE.set(folderPath, items);
   }
 
-// Jeśli w międzyczasie kliknięto inny folder → ANULUJ
-if (mySession !== loadSessionId) return;
+  if (mySession !== loadSessionId) return;
 
-container.innerHTML = "";
+  const query = String(searchInput?.value || "").trim().toLowerCase();
+  elementsAllItems = Array.isArray(items) ? items.slice() : [];
+  elementsFilteredItems = query
+    ? elementsAllItems.filter((item) => String(item?.name || "").toLowerCase().includes(query))
+    : elementsAllItems.slice();
 
-const lazyObserver = new IntersectionObserver(entries => {
-  entries.forEach(entry => {
-    const img = entry.target;
+  elementsRenderIndex = 0;
+  elementsLoading = false;
+  elementsPendingRows = [];
+  elementsUrlWorkersActive = 0;
 
-    // Sesja przerwana? Nie ładuj dalej.
-    if (mySession !== loadSessionId) {
-      lazyObserver.unobserve(img);
-      return;
-    }
-
-    if (entry.isIntersecting) {
+  if (elementsLazyObserver) {
+    try { elementsLazyObserver.disconnect(); } catch (_e) {}
+  }
+  elementsLazyObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      const img = entry.target;
+      if (!img) return;
+      if (mySession !== loadSessionId) {
+        elementsLazyObserver.unobserve(img);
+        return;
+      }
+      if (!entry.isIntersecting) return;
       const src = img.dataset.src || "";
       if (!src) return;
       if (img.dataset.loaded === "1") {
-        lazyObserver.unobserve(img);
+        elementsLazyObserver.unobserve(img);
         return;
       }
       img.dataset.loaded = "1";
       img.src = src;
-      lazyObserver.unobserve(img);
-    }
-  });
-}, { root: elementsPanel, rootMargin: "120px 0px", threshold: 0.01 });
+      elementsLazyObserver.unobserve(img);
+    });
+  }, { root: elementsPanel, rootMargin: "120px 0px", threshold: 0.01 });
+
+  container.innerHTML = "";
 
   const createTile = (item, url) => {
     const tile = document.createElement('div');
     tile.className = 'elementTile';
     tile.title = item?.name || "";
     tile.draggable = true;
+
     const skeleton = document.createElement('div');
     skeleton.className = 'elementSkeleton';
     tile.appendChild(skeleton);
 
     const img = document.createElement('img');
-    if (url) img.dataset.src = url;
-    img.dataset.loaded = "0";
     img.alt = "";
+    img.draggable = false;
+    img.decoding = "async";
+    img.loading = "lazy";
+    if (url) {
+      const fullSrc = String(url || "").trim();
+      img.dataset.fullsrc = fullSrc;
+      let previewSrc = fullSrc;
+      if (typeof window.getImageVariantsFromCache === "function") {
+        const cached = window.getImageVariantsFromCache(fullSrc);
+        const cachedThumb = variantSrcLocal(cached, "thumb");
+        if (cachedThumb) {
+          previewSrc = cachedThumb;
+          img.dataset.thumbready = "1";
+        }
+      }
+      img.dataset.src = previewSrc;
+    }
+    img.dataset.loaded = "0";
     img.style.cssText = `
       display:block;
       opacity:0;
@@ -962,6 +1235,24 @@ const lazyObserver = new IntersectionObserver(entries => {
     img.addEventListener('load', () => {
       skeleton.style.display = 'none';
       img.style.opacity = '1';
+      const fullSrc = String(img.dataset.fullsrc || img.dataset.src || "").trim();
+      if (
+        fullSrc &&
+        img.dataset.thumbready !== "1" &&
+        typeof window.createImageVariantsFromSource === "function"
+      ) {
+        window.createImageVariantsFromSource(fullSrc, {
+          cacheKey: `elements-thumb:${fullSrc}`
+        }).then((variants) => {
+          const thumbSrc = variantSrcLocal(variants, "thumb");
+          if (!thumbSrc || thumbSrc === fullSrc) return;
+          img.dataset.thumbready = "1";
+          img.dataset.src = thumbSrc;
+          if (img.isConnected) {
+            img.src = thumbSrc;
+          }
+        }).catch(() => {});
+      }
     });
     img.addEventListener('error', () => {
       img.dataset.loaded = "0";
@@ -969,10 +1260,9 @@ const lazyObserver = new IntersectionObserver(entries => {
       img.style.opacity = '0';
     });
 
-    img.draggable = false;
     tile.addEventListener('dragstart', e => {
       if (mySession !== loadSessionId) return;
-      const dragUrl = img.dataset.src || "";
+      const dragUrl = img.dataset.fullsrc || img.dataset.src || "";
       if (!dragUrl) {
         e.preventDefault();
         return;
@@ -985,7 +1275,7 @@ const lazyObserver = new IntersectionObserver(entries => {
     });
     tile.addEventListener('click', () => {
       if (mySession !== loadSessionId) return;
-      const selectedUrl = img.dataset.src || "";
+      const selectedUrl = img.dataset.fullsrc || img.dataset.src || "";
       if (!selectedUrl) return;
       document.querySelectorAll('#elementsContainer .elementTile')
         .forEach(i => i.classList.remove('is-selected'));
@@ -995,44 +1285,87 @@ const lazyObserver = new IntersectionObserver(entries => {
     });
 
     tile.appendChild(img);
-    container.appendChild(tile);
-    if (url) lazyObserver.observe(img);
-    return img;
+    if (url) elementsLazyObserver.observe(img);
+    return { tile, img, item, cacheKey: item.fullPath || item.name };
   };
 
-  const tileRows = items.map(item => {
-    const cacheKey = item.fullPath || item.name;
-    const cachedUrl = ELEMENTS_URL_CACHE.get(cacheKey) || "";
-    const img = createTile(item, cachedUrl);
-    return { item, cacheKey, img };
-  });
-
-  if (mySession !== loadSessionId) return;
-
-  const queue = tileRows.filter(row => !row.img.dataset.src);
-  let queueIndex = 0;
-  const workersCount = Math.min(ELEMENTS_URL_CONCURRENCY, queue.length);
-  const workers = Array.from({ length: workersCount }, async () => {
-    while (true) {
-      const idx = queueIndex++;
-      if (idx >= queue.length) return;
-      const row = queue[idx];
-      if (mySession !== loadSessionId) return;
-      try {
-        const url = await getDownloadURL(row.item);
-        if (mySession !== loadSessionId) return;
-        if (!url) continue;
-        ELEMENTS_URL_CACHE.set(row.cacheKey, url);
-        row.img.dataset.src = url;
-        lazyObserver.observe(row.img);
-      } catch (err) {
-        console.warn("⚠️ Nie udało się pobrać miniatury:", row.item?.fullPath || row.item?.name, err);
-      }
+  const pumpUrlWorkers = () => {
+    while (
+      mySession === loadSessionId &&
+      elementsUrlWorkersActive < ELEMENTS_URL_CONCURRENCY &&
+      elementsPendingRows.length
+    ) {
+      elementsUrlWorkersActive += 1;
+      (async () => {
+        while (mySession === loadSessionId && elementsPendingRows.length) {
+          const row = elementsPendingRows.shift();
+          if (!row) continue;
+          if (row.img.dataset.src) {
+            elementsLazyObserver.observe(row.img);
+            continue;
+          }
+          try {
+            const url = await storageApi.getDownloadURL(row.item);
+            if (mySession !== loadSessionId) return;
+            if (!url) continue;
+            ELEMENTS_URL_CACHE.set(row.cacheKey, url);
+            row.img.dataset.fullsrc = url;
+            let previewSrc = url;
+            if (typeof window.getImageVariantsFromCache === "function") {
+              const cached = window.getImageVariantsFromCache(url);
+              const thumbSrc = variantSrcLocal(cached, "thumb");
+              if (thumbSrc) {
+                previewSrc = thumbSrc;
+                row.img.dataset.thumbready = "1";
+              }
+            }
+            row.img.dataset.src = previewSrc;
+            elementsLazyObserver.observe(row.img);
+          } catch (err) {
+            console.warn("⚠️ Nie udało się pobrać miniatury:", row.item?.fullPath || row.item?.name, err);
+          }
+        }
+      })().finally(() => {
+        elementsUrlWorkersActive = Math.max(0, elementsUrlWorkersActive - 1);
+        if (mySession === loadSessionId && elementsPendingRows.length) {
+          pumpUrlWorkers();
+        }
+      });
     }
-  });
-  await Promise.all(workers);
-  if (mySession === loadSessionId && !tileRows.length) {
-    container.innerHTML = '<p style="color:#777;font-size:14px;">Brak elementów w tym folderze.</p>';
+  };
+
+  const renderNextBatch = () => {
+    if (mySession !== loadSessionId || elementsLoading) return;
+    if (elementsRenderIndex >= elementsFilteredItems.length) return;
+    elementsLoading = true;
+    const batch = elementsFilteredItems.slice(elementsRenderIndex, elementsRenderIndex + ELEMENTS_BATCH_SIZE);
+    elementsRenderIndex += batch.length;
+
+    const fragment = document.createDocumentFragment();
+    const rowsMissingUrl = [];
+    batch.forEach((item) => {
+      const cacheKey = item.fullPath || item.name;
+      const cachedUrl = ELEMENTS_URL_CACHE.get(cacheKey) || "";
+      const row = createTile(item, cachedUrl);
+      fragment.appendChild(row.tile);
+      if (!cachedUrl) rowsMissingUrl.push(row);
+    });
+    container.appendChild(fragment);
+    if (rowsMissingUrl.length) {
+      elementsPendingRows.push(...rowsMissingUrl);
+      pumpUrlWorkers();
+    }
+    elementsLoading = false;
+  };
+
+  window.renderNextElementsBatch = renderNextBatch;
+  renderNextBatch();
+  renderNextBatch();
+
+  if (!elementsFilteredItems.length) {
+    container.innerHTML = query
+      ? '<p style="color:#777;font-size:14px;">Brak wyników wyszukiwania.</p>'
+      : '<p style="color:#777;font-size:14px;">Brak elementów w tym folderze.</p>';
   }
   return;
 
@@ -1045,48 +1378,72 @@ function enablePageClickForImage(url) {
   pages.forEach(page => {
     const c = page.stage.container();
 
-    const handler = e => {
+    const handler = async (e) => {
       const pos = page.stage.getPointerPosition();
       if (!pos) return;
+      const variants = await getImageVariantsFromSourceLocal(url, "sidebar-firebase");
+      const editorSrc = variantSrcLocal(variants, "editor");
+      const originalSrc = variantSrcLocal(variants, "original") || editorSrc;
+      const thumbSrc = variantSrcLocal(variants, "thumb") || editorSrc;
+      if (!editorSrc) return;
 
-      Konva.Image.fromURL(url, kImg => {
-        kImg.setAttr("originalSrc", url);
+      Konva.Image.fromURL(editorSrc, kImg => {
+        if (!kImg) return;
+        if (typeof window.applyImageVariantsToKonvaNode === "function") {
+          window.applyImageVariantsToKonvaNode(kImg, {
+            original: originalSrc,
+            editor: editorSrc,
+            thumb: thumbSrc
+          });
+        } else {
+          kImg.setAttr("originalSrc", originalSrc);
+          kImg.setAttr("editorSrc", editorSrc);
+          kImg.setAttr("thumbSrc", thumbSrc);
+        }
 
-  // 🔥 USTAWIAMY ROZMIAR TYLKO DLA OBRAZÓW Z FIREBASE
-const maxSize = 250; // możesz zmienić np. 200–300 px
+        // 🔥 USTAWIAMY ROZMIAR TYLKO DLA OBRAZÓW Z FIREBASE
+        const maxSize = 250; // możesz zmienić np. 200–300 px
 
-const scale = Math.min(
-  maxSize / kImg.width(),
-  maxSize / kImg.height(),
-  1
-);
-
-
-  kImg.setAttrs({
-    x: pos.x - (kImg.width() * scale) / 2,
-    y: pos.y - (kImg.height() * scale) / 2,
-    scaleX: scale,
-    scaleY: scale,
-  });
-
-  kImg.setAttrs({
-    isDesignElement: true,
-    isEditable: true,
-    isSelectable: true,
-    isDraggable: true,
-    isPageBg: false,   // 🔥 KLUCZOWE
-    name: "design-image"
-});
-
-markAsEditable(kImg);
-kImg.hitStrokeWidth(20);
+        const scale = Math.min(
+          maxSize / kImg.width(),
+          maxSize / kImg.height(),
+          1
+        );
 
 
-  page.layer.add(kImg);
-  kImg.zIndex(10);
+        kImg.setAttrs({
+          x: pos.x - (kImg.width() * scale) / 2,
+          y: pos.y - (kImg.height() * scale) / 2,
+          scaleX: scale,
+          scaleY: scale,
+        });
 
-  page.layer.batchDraw();
-});
+        kImg.setAttrs({
+          isSidebarImage: true,
+          isUserImage: true,
+          isProductImage: false,
+          isDesignElement: true,
+          isEditable: true,
+          isSelectable: true,
+          isDraggable: true,
+          slotIndex: null,
+          preservedSlotIndex: null,
+          isPageBg: false,   // 🔥 KLUCZOWE
+          name: "design-image"
+        });
+
+        markAsEditable(kImg);
+        kImg.hitStrokeWidth(20);
+
+
+        page.layer.add(kImg);
+        kImg.zIndex(10);
+
+        page.layer.batchDraw();
+        if (typeof window.activateNewImageCropSelection === "function") {
+          try { window.activateNewImageCropSelection(page, kImg, { autoCrop: false }); } catch (_e) {}
+        }
+      });
 
 
 
@@ -1109,68 +1466,99 @@ kImg.hitStrokeWidth(20);
 // przeciąganie musi być dozwolone globalnie
 document.addEventListener("dragover", e => e.preventDefault());
 
-document.addEventListener("drop", e => {
+document.addEventListener("drop", async (e) => {
     e.preventDefault();
 
     const url = e.dataTransfer.getData("image-url");
     if (!url) return;
 
     // Sprawdź, na którą stronę upuszczono
-    pages.forEach(page => {
+    for (const page of pages) {
         const container = page.stage.container();
         const rect = container.getBoundingClientRect();
 
         if (
-            e.clientX >= rect.left &&
-            e.clientX <= rect.right &&
-            e.clientY >= rect.top &&
-            e.clientY <= rect.bottom
+            e.clientX < rect.left ||
+            e.clientX > rect.right ||
+            e.clientY < rect.top ||
+            e.clientY > rect.bottom
         ) {
-            // Upuszczono NA TĘ STRONĘ
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-
-            Konva.Image.fromURL(url, kImg => {
-              kImg.setAttr("originalSrc", url);
-
-                const maxWidth = 300;
-                const scale = Math.min(maxWidth / kImg.width(), 1);
-
-                kImg.setAttrs({
-    x: x - (kImg.width() * scale) / 2,
-    y: y - (kImg.height() * scale) / 2,
-    scaleX: scale,
-    scaleY: scale,
-});
-
-kImg.setAttrs({
-    isDesignElement: true,
-    isEditable: true,
-    isSelectable: true,
-    isDraggable: true,
-    name: "design-image"
-});
-markAsEditable(kImg);
-kImg.hitStrokeWidth(20);
-
-
-
-                page.layer.add(kImg);
-                page.layer.batchDraw();
-            });
+            continue;
         }
-    });
+
+        // Upuszczono NA TĘ STRONĘ
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        const variants = await getImageVariantsFromSourceLocal(url, "sidebar-firebase-drop");
+        const editorSrc = variantSrcLocal(variants, "editor");
+        const originalSrc = variantSrcLocal(variants, "original") || editorSrc;
+        const thumbSrc = variantSrcLocal(variants, "thumb") || editorSrc;
+        if (!editorSrc) return;
+
+        Konva.Image.fromURL(editorSrc, kImg => {
+            if (!kImg) return;
+            if (typeof window.applyImageVariantsToKonvaNode === "function") {
+              window.applyImageVariantsToKonvaNode(kImg, {
+                original: originalSrc,
+                editor: editorSrc,
+                thumb: thumbSrc
+              });
+            } else {
+              kImg.setAttr("originalSrc", originalSrc);
+              kImg.setAttr("editorSrc", editorSrc);
+              kImg.setAttr("thumbSrc", thumbSrc);
+            }
+
+            const maxWidth = 300;
+            const scale = Math.min(maxWidth / kImg.width(), 1);
+
+            kImg.setAttrs({
+              x: x - (kImg.width() * scale) / 2,
+              y: y - (kImg.height() * scale) / 2,
+              scaleX: scale,
+              scaleY: scale,
+            });
+
+            kImg.setAttrs({
+              isSidebarImage: true,
+              isUserImage: true,
+              isProductImage: false,
+              isDesignElement: true,
+              isEditable: true,
+              isSelectable: true,
+              isDraggable: true,
+              slotIndex: null,
+              preservedSlotIndex: null,
+              name: "design-image"
+            });
+            markAsEditable(kImg);
+            kImg.hitStrokeWidth(20);
+
+            page.layer.add(kImg);
+            page.layer.batchDraw();
+            if (typeof window.activateNewImageCropSelection === "function") {
+              try { window.activateNewImageCropSelection(page, kImg, { autoCrop: false }); } catch (_e) {}
+            }
+        });
+
+        break;
+    }
 });
 elementsPanel.addEventListener('scroll', () => {
-  const nearBottom =
-    elementsPanel.scrollTop + elementsPanel.clientHeight >=
-    elementsPanel.scrollHeight - 120;
+  if (elementsScrollRaf) return;
+  elementsScrollRaf = requestAnimationFrame(() => {
+    elementsScrollRaf = 0;
+    const nearBottom =
+      elementsPanel.scrollTop + elementsPanel.clientHeight >=
+      elementsPanel.scrollHeight - 120;
 
-  if (nearBottom && typeof window.renderNextElementsBatch === "function") {
-    window.renderNextElementsBatch();
-  } else if (nearBottom && typeof renderNextElementsBatch === "function") {
-    renderNextElementsBatch();
-  }
-});
+    if (nearBottom && typeof window.renderNextElementsBatch === "function") {
+      window.renderNextElementsBatch();
+    } else if (nearBottom && typeof renderNextElementsBatch === "function") {
+      renderNextElementsBatch();
+    }
+  });
+}, { passive: true });
 
 console.log("importdanych-1.js – GOTOWY! Ikony jak w Canva, zero błędów, pięknie!");

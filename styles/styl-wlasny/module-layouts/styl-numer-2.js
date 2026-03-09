@@ -6,7 +6,7 @@
     label: "Styl numer 2",
     config: {
       singleDirect: {
-        imgArea: { x: 1.8, y: 16.0, w: 62.5, h: 50.0 },
+        imgArea: { x: 10.0, y: 16.0, w: 62.5, h: 50.0 },
         nameArea: { x: 66.5, y: 22.0, w: 30.0, h: 22.0 },
         indexPos: { x: 66.5, y: 36.2 },
         packagePos: { x: 66.5, y: 39.8 },

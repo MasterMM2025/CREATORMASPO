@@ -44,19 +44,20 @@
       box.style.cssText = `
         width: 680px;
         max-width: 90vw;
-        background: #fff;
+        background: linear-gradient(180deg, #0d1320 0%, #09101a 100%);
+        border: 1px solid rgba(150, 167, 191, 0.16);
         border-radius: 20px;
         padding: 30px;
-        box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+        box-shadow: 0 24px 70px rgba(0,0,0,0.55);
         text-align: center;
       `;
 
       box.innerHTML = `
-        <h2 style="margin:0 0 10px 0;font-size:28px;">
+        <h2 style="margin:0 0 10px 0;font-size:28px;color:#eef4ff;">
           Wybierz układ katalogu
         </h2>
 
-        <p style="color:#555;margin-bottom:30px;">
+        <p style="color:#94a0b8;margin-bottom:30px;">
           Możesz zmienić układ później w edytorze strony
         </p>
 
@@ -85,33 +86,38 @@
           width: 260px;
           padding: 24px;
           border-radius: 16px;
-          border: 2px solid #ddd;
+          border: 1px solid rgba(150, 167, 191, 0.16);
+          background: rgba(255,255,255,0.03);
           cursor: pointer;
           transition: all .2s ease;
         }
         .layout-card:hover {
           transform: translateY(-4px);
-          box-shadow: 0 10px 25px rgba(0,0,0,.2);
-          border-color: #007cba;
+          box-shadow: 0 14px 28px rgba(0,0,0,.28);
+          border-color: rgba(112, 255, 223, 0.45);
+          background: rgba(112,255,223,0.06);
         }
         .layout-preview {
           height: 120px;
           border-radius: 12px;
-          background: linear-gradient(135deg,#f0f0f0,#dcdcdc);
+          background: linear-gradient(135deg, #1b2434, #111827);
+          border: 1px solid rgba(150, 167, 191, 0.14);
           display:flex;
           align-items:center;
           justify-content:center;
           font-size:48px;
           font-weight:700;
+          color: #eef4ff;
           margin-bottom:16px;
         }
         .layout-card h3 {
           margin: 8px 0;
           font-size: 20px;
+          color: #eef4ff;
         }
         .layout-card p {
           margin: 0;
-          color: #666;
+          color: #94a0b8;
           font-size: 14px;
         }
       `;

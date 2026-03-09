@@ -357,12 +357,59 @@
       scaleX: (typeof node.scaleX === "function") ? Number(node.scaleX()) : NaN,
       scaleY: (typeof node.scaleY === "function") ? Number(node.scaleY()) : NaN
     };
+    const prevCrop = {
+      x: (typeof node.cropX === "function") ? Number(node.cropX()) : NaN,
+      y: (typeof node.cropY === "function") ? Number(node.cropY()) : NaN,
+      width: (typeof node.cropWidth === "function") ? Number(node.cropWidth()) : NaN,
+      height: (typeof node.cropHeight === "function") ? Number(node.cropHeight()) : NaN
+    };
+    const hadCrop = Number.isFinite(prevCrop.width) && Number.isFinite(prevCrop.height) && prevCrop.width > 0 && prevCrop.height > 0;
+    const prevImage = (typeof node.image === "function") ? node.image() : null;
+    const prevNatural = {
+      width: Number(prevImage && (prevImage.naturalWidth || prevImage.width)) || 0,
+      height: Number(prevImage && (prevImage.naturalHeight || prevImage.height)) || 0
+    };
+    const nextNatural = {
+      width: Number(loaded && (loaded.naturalWidth || loaded.width)) || 0,
+      height: Number(loaded && (loaded.naturalHeight || loaded.height)) || 0
+    };
 
     if (typeof node.clearCache === "function") node.clearCache();
 
     // Uwaga: nie wolno robić setAttrs({...oldAttrs}), bo oldAttrs zawiera `image`
     // i przywraca poprzednią bitmapę (efekt "brak reakcji").
     node.image(loaded);
+    if (hadCrop && typeof node.crop === "function") {
+      const canScaleCrop = prevNatural.width > 0 && prevNatural.height > 0 && nextNatural.width > 0 && nextNatural.height > 0;
+      if (canScaleCrop) {
+        const ratioX = nextNatural.width / prevNatural.width;
+        const ratioY = nextNatural.height / prevNatural.height;
+        const minW = 1;
+        const minH = 1;
+        const maxW = Math.max(minW, nextNatural.width);
+        const maxH = Math.max(minH, nextNatural.height);
+        let x = Number(prevCrop.x) * ratioX;
+        let y = Number(prevCrop.y) * ratioY;
+        let w = Number(prevCrop.width) * ratioX;
+        let h = Number(prevCrop.height) * ratioY;
+        if (!Number.isFinite(x)) x = 0;
+        if (!Number.isFinite(y)) y = 0;
+        if (!Number.isFinite(w) || w <= 0) w = maxW;
+        if (!Number.isFinite(h) || h <= 0) h = maxH;
+        w = Math.max(minW, Math.min(maxW, w));
+        h = Math.max(minH, Math.min(maxH, h));
+        x = Math.max(0, Math.min(Math.max(0, maxW - w), x));
+        y = Math.max(0, Math.min(Math.max(0, maxH - h), y));
+        node.crop({ x, y, width: w, height: h });
+      } else {
+        node.crop({
+          x: Number.isFinite(prevCrop.x) ? prevCrop.x : 0,
+          y: Number.isFinite(prevCrop.y) ? prevCrop.y : 0,
+          width: Number.isFinite(prevCrop.width) ? prevCrop.width : 1,
+          height: Number.isFinite(prevCrop.height) ? prevCrop.height : 1
+        });
+      }
+    }
     if (Number.isFinite(prevGeom.width) && prevGeom.width > 0 && typeof node.width === "function") {
       node.width(prevGeom.width);
     }

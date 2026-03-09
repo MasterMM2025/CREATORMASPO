@@ -15,6 +15,11 @@ const storage = window.firebaseStorage;
 const PROJECTS_FOLDER = "projects";
 const THUMBS_FOLDER = "projects/thumbs";
 const LOCAL_BACKUP_KEY = "wf_last_project_backup_v1";
+const PROJECT_LIST_METADATA_CONCURRENCY = 6;
+const PROJECT_THUMB_DOWNLOAD_CONCURRENCY = 4;
+const PROJECT_INITIAL_PAGE_HYDRATION_CONCURRENCY = 2;
+const PAGE_IMAGE_RESTORE_CONCURRENCY = 4;
+const PROJECT_COMPRESSION_MIN_BYTES = 1024 * 1024;
 
 function showAppToast(message, type = "success") {
     let toast = document.getElementById("appToast");
@@ -70,6 +75,113 @@ function dataUrlToBlob(dataUrl) {
     return new Blob([arr], { type: mime });
 }
 
+function cloneProjectSerializable(value, fallback = null) {
+    try {
+        return JSON.parse(JSON.stringify(value));
+    } catch (_e) {
+        return fallback;
+    }
+}
+
+function cloneSavedPageProducts(products) {
+    if (!Array.isArray(products)) return [];
+    const cloned = cloneProjectSerializable(products, []);
+    return Array.isArray(cloned) ? cloned : [];
+}
+
+function supportsProjectCompression() {
+    return typeof CompressionStream === "function" && typeof DecompressionStream === "function";
+}
+
+async function buildProjectUploadPayload(jsonString) {
+    const rawText = String(jsonString || "");
+    const rawBlob = new Blob([rawText], { type: "application/json" });
+    const rawBytes = rawBlob.size;
+    const rawResult = {
+        blob: rawBlob,
+        rawBytes,
+        storedBytes: rawBytes,
+        encoding: "identity",
+        contentType: "application/json",
+        compressed: false
+    };
+
+    if (!supportsProjectCompression()) return rawResult;
+    if (rawBytes < PROJECT_COMPRESSION_MIN_BYTES) return rawResult;
+
+    try {
+        const gzStream = rawBlob.stream().pipeThrough(new CompressionStream("gzip"));
+        const gzBlob = await new Response(gzStream).blob();
+        const gzBytes = gzBlob.size;
+        if (!gzBytes || gzBytes >= (rawBytes - 2048)) {
+            return rawResult;
+        }
+        return {
+            blob: gzBlob,
+            rawBytes,
+            storedBytes: gzBytes,
+            encoding: "gzip",
+            contentType: "application/gzip",
+            compressed: true
+        };
+    } catch (_e) {
+        return rawResult;
+    }
+}
+
+async function parseProjectDownloadResponse(response, encodingHint = "") {
+    const encoding = String(encodingHint || "").trim().toLowerCase();
+    if (encoding === "gzip") {
+        if (typeof DecompressionStream !== "function") {
+            throw new Error("Ta przegladarka nie obsluguje skompresowanych projektow.");
+        }
+        const blob = await response.blob();
+        const text = await new Response(
+            blob.stream().pipeThrough(new DecompressionStream("gzip"))
+        ).text();
+        return JSON.parse(text);
+    }
+    return await response.json();
+}
+
+async function loadProjectDataFromStorageRef(fileRef) {
+    const [url, meta] = await Promise.all([
+        getDownloadURL(fileRef),
+        getMetadata(fileRef).catch(() => null)
+    ]);
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`Nie udalo sie pobrac projektu (${response.status}).`);
+    }
+    const contentType = String(meta?.contentType || "").trim().toLowerCase();
+    const encodingHint = String(meta?.customMetadata?.projectEncoding || "").trim().toLowerCase()
+        || (contentType === "application/gzip" ? "gzip" : "identity");
+    const data = await parseProjectDownloadResponse(response, encodingHint);
+    return { data, meta };
+}
+
+async function mapWithConcurrencyLimit(items, concurrency, mapper) {
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) return [];
+    const limit = Math.max(1, Number(concurrency) || 1);
+    const results = new Array(list.length);
+    let cursor = 0;
+
+    async function worker() {
+        while (true) {
+            const index = cursor++;
+            if (index >= list.length) return;
+            results[index] = await mapper(list[index], index);
+        }
+    }
+
+    const workers = [];
+    const workerCount = Math.min(limit, list.length);
+    for (let i = 0; i < workerCount; i++) workers.push(worker());
+    await Promise.all(workers);
+    return results;
+}
+
 function saveLocalProjectBackup(data, meta = {}) {
     try {
         if (!data || !Array.isArray(data.pages)) return false;
@@ -120,22 +232,29 @@ function renderFirstPageThumb() {
         if (!window.pages || !window.pages.length) return null;
         const stage = window.pages[0]?.stage;
         if (!stage) return null;
-        try {
+        const renderThumb = () => {
+            if (typeof window.exportStageToDataURLWithBackground === "function") {
+                return window.exportStageToDataURLWithBackground(stage, {
+                    mimeType: "image/jpeg",
+                    quality: 0.7,
+                    pixelRatio: 0.35,
+                    backgroundColor: "#ffffff"
+                });
+            }
             return stage.toDataURL({
                 mimeType: "image/jpeg",
                 quality: 0.7,
                 pixelRatio: 0.35
             });
+        };
+        try {
+            return renderThumb();
         } catch (e) {
             // fallback: ukryj obrazy (żeby nie taintować canvas)
             const images = stage.find("Image");
             const prev = images.map(n => n.visible());
             images.forEach(n => n.visible(false));
-            const thumb = stage.toDataURL({
-                mimeType: "image/jpeg",
-                quality: 0.7,
-                pixelRatio: 0.35
-            });
+            const thumb = renderThumb();
             images.forEach((n, i) => n.visible(prev[i]));
             return thumb;
         }
@@ -220,6 +339,15 @@ function setProjectTitle(name) {
 }
 window.setProjectTitle = setProjectTitle;
 
+function refreshPdfButtonState() {
+    const pdfButton = document.getElementById("pdfButton");
+    if (!pdfButton) return false;
+    const hasPages = Array.isArray(window.pages) && window.pages.length > 0;
+    pdfButton.disabled = !hasPages;
+    return hasPages;
+}
+window.refreshPdfButtonState = refreshPdfButtonState;
+
 // Modal potwierdzenia wyjścia bez zapisu
 function showLeaveConfirmModal(projectName) {
     return new Promise((resolve) => {
@@ -231,22 +359,24 @@ function showLeaveConfirmModal(projectName) {
         modal.style.cssText = `
             position: fixed;
             inset: 0;
-            background: rgba(0,0,0,0.45);
+            background: rgba(4,10,22,0.62);
             display: flex;
             align-items: center;
             justify-content: center;
             z-index: 1000000;
+            backdrop-filter: blur(6px);
+            padding: 20px;
         `;
         modal.innerHTML = `
-            <div style="width:560px; background:#fff; border-radius:16px; padding:22px; box-shadow:0 12px 48px rgba(0,0,0,0.28); font-family:Inter,Arial;">
-                <h3 style="margin:0 0 12px 0; font-size:20px;">Wyjście z projektu</h3>
-                <p style="margin:0 0 20px 0; color:#444; font-size:15px; line-height:1.45;">
+            <div style="width:min(560px, calc(100vw - 32px)); background:radial-gradient(380px 180px at 100% 0%, rgba(216,255,31,0.08), transparent 52%), linear-gradient(180deg,#121a2a 0%,#0a101b 100%); border:1px solid rgba(255,255,255,0.08); border-radius:20px; padding:22px; box-shadow:0 24px 64px rgba(0,0,0,0.42); font-family:Inter,Arial; color:#f5f7fb;">
+                <h3 style="margin:0 0 12px 0; font-size:24px; font-weight:800; color:#f5f7fb;">Wyjście z projektu</h3>
+                <p style="margin:0 0 20px 0; color:#b7c2d8; font-size:16px; line-height:1.5;">
                     Masz otwarty projekt <strong>${projectName || "bez nazwy"}</strong>. Czy na pewno chcesz wyjść bez zapisywania?
                 </p>
                 <div style="display:flex; gap:12px; justify-content:flex-end;">
-                    <button id="leaveCancelBtn" style="padding:10px 16px; background:#eee; border:none; border-radius:10px; cursor:pointer;">Zostań</button>
-                    <button id="leaveSaveBtn" style="padding:10px 16px; background:#0066ff; color:#fff; border:none; border-radius:10px; cursor:pointer;">Zapisz</button>
-                    <button id="leaveConfirmBtn" style="padding:10px 16px; background:#ff4444; color:#fff; border:none; border-radius:10px; cursor:pointer;">Wyjdź</button>
+                    <button id="leaveCancelBtn" style="padding:10px 16px; background:linear-gradient(180deg,#202838 0%,#151d2b 100%); color:#f5f7fb; border:1px solid rgba(255,255,255,0.08); border-radius:12px; cursor:pointer; font-weight:700;">Zostań</button>
+                    <button id="leaveSaveBtn" style="padding:10px 16px; background:linear-gradient(135deg,#2563eb 0%,#1d4ed8 100%); color:#fff; border:none; border-radius:12px; cursor:pointer; font-weight:800; box-shadow:0 12px 28px rgba(37,99,235,0.22);">Zapisz</button>
+                    <button id="leaveConfirmBtn" style="padding:10px 16px; background:linear-gradient(135deg,#ff5a5f 0%,#ef4444 100%); color:#fff; border:none; border-radius:12px; cursor:pointer; font-weight:800; box-shadow:0 12px 28px rgba(239,68,68,0.22);">Wyjdź</button>
                 </div>
             </div>
         `;
@@ -301,15 +431,15 @@ function showNewProjectNameModal() {
             z-index: 1000001;
         `;
         modal.innerHTML = `
-            <div style="width:460px;background:#fff;border-radius:14px;padding:18px;box-shadow:0 12px 42px rgba(0,0,0,0.28);font-family:Inter,Arial;">
-                <h3 style="margin:0 0 10px 0;font-size:20px;">Nowy projekt</h3>
-                <p style="margin:0 0 12px 0;color:#444;">Wpisz nazwę nowego projektu albo wybierz opcję bez nazwy.</p>
-                <input id="newProjectNameInput" type="text" placeholder="Np. Promocje marzec" style="width:100%;padding:10px 12px;border:1px solid #d0d5dd;border-radius:10px;font-size:14px;outline:none;">
-                <div id="newProjectNameError" style="display:none;margin-top:8px;color:#dc2626;font-size:13px;font-weight:600;">Wpisz nazwę projektu lub wybierz „Projekt bez nazwy”.</div>
-                <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px;">
-                    <button id="newProjectCancelBtn" style="padding:9px 14px;background:#eee;border:none;border-radius:9px;cursor:pointer;">Anuluj</button>
-                    <button id="newProjectUnnamedBtn" style="padding:9px 14px;background:#64748b;color:#fff;border:none;border-radius:9px;cursor:pointer;">Projekt bez nazwy</button>
-                    <button id="newProjectCreateBtn" style="padding:9px 14px;background:#0066ff;color:#fff;border:none;border-radius:9px;cursor:pointer;">Utwórz</button>
+            <div style="width:460px;background:linear-gradient(180deg,#0d1320 0%,#09101a 100%);border-radius:20px;padding:20px;box-shadow:0 28px 64px rgba(0,0,0,0.42);border:1px solid rgba(255,255,255,0.08);font-family:Inter,Arial;">
+                <h3 style="margin:0 0 12px 0;font-size:30px;font-weight:800;color:#f5f7fb;">Nowy projekt</h3>
+                <p style="margin:0 0 14px 0;color:#a6b0c4;font-size:15px;line-height:1.5;">Wpisz nazwę nowego projektu albo wybierz opcję bez nazwy.</p>
+                <input id="newProjectNameInput" type="text" placeholder="Np. Promocje marzec" style="width:100%;padding:14px 16px;border:1px solid rgba(255,255,255,0.10);border-radius:14px;font-size:15px;outline:none;background:rgba(255,255,255,0.05);color:#f5f7fb;box-shadow:inset 0 1px 0 rgba(255,255,255,0.04);">
+                <div id="newProjectNameError" style="display:none;margin-top:8px;color:#ff7c9a;font-size:13px;font-weight:700;">Wpisz nazwę projektu lub wybierz „Projekt bez nazwy”.</div>
+                <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px;flex-wrap:wrap;">
+                    <button id="newProjectCancelBtn" style="padding:12px 18px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);color:#f5f7fb;border-radius:14px;cursor:pointer;font-weight:700;">Anuluj</button>
+                    <button id="newProjectUnnamedBtn" style="padding:12px 18px;background:linear-gradient(180deg,#202838 0%,#151d2b 100%);color:#f5f7fb;border:1px solid rgba(255,255,255,0.08);border-radius:14px;cursor:pointer;font-weight:700;">Projekt bez nazwy</button>
+                    <button id="newProjectCreateBtn" style="padding:12px 18px;background:linear-gradient(135deg,#18c8bb 0%,#31c6c8 100%);color:#071015;border:none;border-radius:14px;cursor:pointer;font-weight:800;box-shadow:0 12px 28px rgba(24,200,187,0.22);">Utwórz</button>
                 </div>
             </div>
         `;
@@ -319,13 +449,13 @@ function showNewProjectNameModal() {
         const showValidation = () => {
             if (errorEl) errorEl.style.display = "block";
             if (input) {
-                input.style.borderColor = "#dc2626";
+                input.style.borderColor = "#ff7c9a";
                 input.focus();
             }
         };
         const clearValidation = () => {
             if (errorEl) errorEl.style.display = "none";
-            if (input) input.style.borderColor = "#d0d5dd";
+            if (input) input.style.borderColor = "rgba(255,255,255,0.10)";
         };
         if (input) {
             input.focus();
@@ -372,20 +502,22 @@ function showSaveChoiceModal(projectName) {
         modal.style.cssText = `
             position: fixed;
             inset: 0;
-            background: rgba(0,0,0,0.45);
+            background: rgba(4,10,22,0.62);
             display: flex;
             align-items: center;
             justify-content: center;
             z-index: 1000000;
+            backdrop-filter: blur(6px);
+            padding: 20px;
         `;
         modal.innerHTML = `
-            <div style="width:420px; background:#fff; border-radius:14px; padding:18px; box-shadow:0 10px 40px rgba(0,0,0,0.25); font-family:Inter,Arial;">
-                <h3 style="margin:0 0 10px 0;">Zapis projektu</h3>
-                <p style="margin:0 0 16px 0; color:#444;">Projekt <strong>${projectName}</strong> już istnieje. Co chcesz zrobić?</p>
+            <div style="width:min(420px, calc(100vw - 32px)); background:radial-gradient(340px 180px at 100% 0%, rgba(58,168,255,0.08), transparent 52%), linear-gradient(180deg,#121a2a 0%,#0a101b 100%); border:1px solid rgba(255,255,255,0.08); border-radius:18px; padding:18px; box-shadow:0 22px 56px rgba(0,0,0,0.42); font-family:Inter,Arial; color:#f5f7fb;">
+                <h3 style="margin:0 0 10px 0; font-size:22px; font-weight:800; color:#f5f7fb;">Zapis projektu</h3>
+                <p style="margin:0 0 16px 0; color:#b7c2d8; line-height:1.5;">Projekt <strong>${projectName}</strong> już istnieje. Co chcesz zrobić?</p>
                 <div style="display:flex; gap:10px; justify-content:flex-end;">
-                    <button id="saveChoiceCancel" style="padding:8px 12px; background:#eee; border:none; border-radius:8px; cursor:pointer;">Anuluj</button>
-                    <button id="saveChoiceNew" style="padding:8px 12px; background:#0066ff; color:#fff; border:none; border-radius:8px; cursor:pointer;">Zapisz jako nowy</button>
-                    <button id="saveChoiceOverwrite" style="padding:8px 12px; background:#2ecc71; color:#fff; border:none; border-radius:8px; cursor:pointer;">Nadpisz</button>
+                    <button id="saveChoiceCancel" style="padding:10px 14px; background:linear-gradient(180deg,#202838 0%,#151d2b 100%); color:#f5f7fb; border:1px solid rgba(255,255,255,0.08); border-radius:10px; cursor:pointer; font-weight:700;">Anuluj</button>
+                    <button id="saveChoiceNew" style="padding:10px 14px; background:linear-gradient(135deg,#2563eb 0%,#1d4ed8 100%); color:#fff; border:none; border-radius:10px; cursor:pointer; font-weight:800; box-shadow:0 12px 28px rgba(37,99,235,0.22);">Zapisz jako nowy</button>
+                    <button id="saveChoiceOverwrite" style="padding:10px 14px; background:linear-gradient(135deg,#18c8bb 0%,#31c6c8 100%); color:#071015; border:none; border-radius:10px; cursor:pointer; font-weight:800; box-shadow:0 12px 28px rgba(24,200,187,0.22);">Nadpisz</button>
                 </div>
             </div>
         `;
@@ -406,13 +538,156 @@ function showSaveChoiceModal(projectName) {
     });
 }
 
+function showActionConfirmModal(options = {}) {
+    return new Promise((resolve) => {
+        let modal = document.getElementById("actionConfirmModal");
+        if (modal) modal.remove();
+
+        const title = String(options.title || "Potwierdź działanie").trim();
+        const message = String(options.message || "Czy chcesz kontynuować?").trim();
+        const confirmText = String(options.confirmText || "Potwierdź").trim();
+        const cancelText = String(options.cancelText || "Anuluj").trim();
+        const tone = String(options.tone || "danger").trim().toLowerCase();
+        const confirmBg = tone === "danger" ? "#ef4444" : "#2563eb";
+        const confirmShadow = tone === "danger"
+            ? "0 12px 28px rgba(239,68,68,0.22)"
+            : "0 12px 28px rgba(37,99,235,0.22)";
+
+        modal = document.createElement("div");
+        modal.id = "actionConfirmModal";
+        modal.style.cssText = `
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.42);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000002;
+            backdrop-filter: blur(4px);
+            padding: 20px;
+        `;
+        modal.innerHTML = `
+            <div style="width:min(460px, calc(100vw - 32px)); background:radial-gradient(360px 180px at 100% 0%, ${tone === "danger" ? "rgba(239,68,68,0.08)" : "rgba(58,168,255,0.08)"} , transparent 52%), linear-gradient(180deg,#121a2a 0%,#0a101b 100%); border:1px solid rgba(255,255,255,0.08); border-radius:20px; padding:22px; box-shadow:0 24px 60px rgba(0,0,0,0.42); font-family:Inter,Arial,sans-serif;">
+                <div style="display:flex; align-items:flex-start; gap:14px;">
+                    <div style="width:42px; height:42px; flex:0 0 42px; border-radius:14px; background:${tone === "danger" ? "rgba(239,68,68,0.14)" : "rgba(37,99,235,0.14)"}; color:${tone === "danger" ? "#ff8a8f" : "#7db7ff"}; display:flex; align-items:center; justify-content:center; font-size:18px; border:1px solid rgba(255,255,255,0.06);">
+                        <i class="fas ${tone === "danger" ? "fa-trash-alt" : "fa-circle-info"}"></i>
+                    </div>
+                    <div style="min-width:0;">
+                        <h3 style="margin:0; font-size:22px; line-height:1.2; color:#f5f7fb; font-weight:800;">${title}</h3>
+                        <p style="margin:10px 0 0 0; color:#b7c2d8; font-size:14px; line-height:1.55;">${message}</p>
+                    </div>
+                </div>
+                <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:22px;">
+                    <button id="actionConfirmCancelBtn" type="button" style="padding:10px 16px; border:1px solid rgba(255,255,255,0.08); background:linear-gradient(180deg,#202838 0%,#151d2b 100%); color:#f5f7fb; border-radius:12px; cursor:pointer; font-weight:700; font-size:14px;">${cancelText}</button>
+                    <button id="actionConfirmOkBtn" type="button" style="padding:10px 16px; border:none; background:${confirmBg}; color:#fff; border-radius:12px; cursor:pointer; font-weight:800; font-size:14px; box-shadow:${confirmShadow};">${confirmText}</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        const onKey = (ev) => {
+            if (!document.getElementById("actionConfirmModal")) {
+                document.removeEventListener("keydown", onKey, true);
+                return;
+            }
+            if (ev.key === "Escape") {
+                ev.preventDefault();
+                cleanup(false);
+            }
+            if (ev.key === "Enter") {
+                ev.preventDefault();
+                cleanup(true);
+            }
+        };
+
+        const cleanup = (result) => {
+            document.removeEventListener("keydown", onKey, true);
+            modal.remove();
+            resolve(result);
+        };
+
+        modal.querySelector("#actionConfirmCancelBtn").onclick = () => cleanup(false);
+        modal.querySelector("#actionConfirmOkBtn").onclick = () => cleanup(true);
+        modal.onclick = (e) => {
+            if (e.target === modal) cleanup(false);
+        };
+        document.addEventListener("keydown", onKey, true);
+    });
+}
+window.showActionConfirmModal = showActionConfirmModal;
+
 // ====================================================================
 // 1. OTWARCIE OKNA ZAPISU
 // ====================================================================
-document.getElementById("saveProjectBtn").onclick = () => {
+function getTodayIsoDate() {
+    return new Date().toISOString().split("T")[0];
+}
+
+function getPreferredProjectName(options = {}) {
+    const preferMeta = options.preferMeta === true;
+    const inputValue = String(document.getElementById("projectNameInput")?.value || "").trim();
+    const metaName = String(window.currentProjectMeta?.name || "").trim();
+    const currentName = String(window.currentProjectName || "").trim();
+
+    if (preferMeta && metaName) return metaName;
+    if (inputValue) return inputValue;
+    if (metaName) return metaName;
+    if (currentName && currentName !== DEFAULT_PROJECT_TITLE) return currentName;
+    return "";
+}
+
+function syncSaveFormWithCurrentProject(options = {}) {
+    const nameInput = document.getElementById("projectNameInput");
+    const dateInput = document.getElementById("projectDateInput");
+    const nextName = String(
+        options.forceName !== undefined
+            ? options.forceName
+            : getPreferredProjectName({ preferMeta: options.preferMeta === true })
+    ).trim();
+    const nextDate = String(
+        options.forceDate !== undefined
+            ? options.forceDate
+            : (dateInput?.value || getTodayIsoDate())
+    ).trim();
+
+    if (nameInput && (options.overwriteName === true || !String(nameInput.value || "").trim())) {
+        nameInput.value = nextName;
+    }
+    if (dateInput && (options.overwriteDate === true || !String(dateInput.value || "").trim())) {
+        dateInput.value = nextDate;
+    }
+}
+
+function openSaveProjectModal() {
     const modal = document.getElementById("saveProjectModal");
+    syncSaveFormWithCurrentProject();
     modal.style.display = "flex";
-    document.getElementById("projectDateInput").value = new Date().toISOString().split("T")[0];
+}
+
+async function triggerProjectSaveFlow(options = {}) {
+    const forceModal = options.forceModal === true;
+    const hasSavedTarget = !!String(window.currentProjectMeta?.path || "").trim();
+
+    if (hasSavedTarget && !forceModal) {
+        syncSaveFormWithCurrentProject({
+            preferMeta: true,
+            overwriteName: true,
+            overwriteDate: false
+        });
+        return await saveProjectNow({
+            closeModal: false,
+            allowUntitled: true,
+            skipConflictPrompt: true
+        });
+    }
+
+    openSaveProjectModal();
+    return null;
+}
+window.triggerProjectSaveFlow = triggerProjectSaveFlow;
+
+document.getElementById("saveProjectBtn").onclick = () => {
+    void triggerProjectSaveFlow();
 };
 
 // Live podgląd nazwy projektu w nagłówku
@@ -492,6 +767,11 @@ function pruneTransientDirectAttrsForSave(attrs, kind = "") {
     if (kind === "image") {
         // `src` zapisujemy osobno w payload.src – tu tylko duplikaty i ciężkie pola out.
         delete out.originalSrc;
+        delete out.editorSrc;
+        delete out.thumbSrc;
+        delete out.originalSrcBankKey;
+        delete out.editorSrcBankKey;
+        delete out.thumbSrcBankKey;
         delete out.barcodeOriginalSrc;
         delete out.originalSrcBeforeRmbg;
         delete out.image;
@@ -563,6 +843,1293 @@ function normalizeSavedCrop(crop, imgWidth, imgHeight) {
     return { x, y, width, height };
 }
 
+function normalizeSavedImageRole(input = {}) {
+    const rawSlot = Number(input && input.slotIndex);
+    const hasRawSlot = Number.isFinite(rawSlot);
+
+    const isOverlayElement = !!(input && input.isOverlayElement);
+    const isTNZBadge = !!(input && input.isTNZBadge);
+    const isCountryBadge = !!(input && input.isCountryBadge);
+    const isSlotScopedOverlay = isOverlayElement || isTNZBadge || isCountryBadge;
+
+    const isProductImage = !!(input && input.isProductImage);
+    const explicitUser = !!(input && (input.isUserImage || input.isSidebarImage));
+    const looksLikeFreeDesign = !!(
+        input &&
+        input.isDesignElement &&
+        !isSlotScopedOverlay &&
+        !input.isBarcode &&
+        !input.isQRCode &&
+        !input.isEAN
+    );
+    const freeUserImage = explicitUser || (looksLikeFreeDesign && !isProductImage);
+
+    const normalizedProduct = !!(isProductImage && hasRawSlot && !freeUserImage);
+    const normalizedSlot = (normalizedProduct || isSlotScopedOverlay) && hasRawSlot
+        ? rawSlot
+        : null;
+    const normalizedUser = !!(freeUserImage || (!normalizedProduct && !isSlotScopedOverlay));
+    const normalizedSidebar = !!(input && input.isSidebarImage) || (normalizedUser && !normalizedProduct && !isSlotScopedOverlay);
+    const normalizedDesignElement = !!(
+        (input && input.isDesignElement) ||
+        (normalizedUser && !normalizedProduct && !isSlotScopedOverlay)
+    );
+
+    return {
+        slotIndex: Number.isFinite(normalizedSlot) ? normalizedSlot : null,
+        hasSlot: Number.isFinite(normalizedSlot),
+        isProductImage: normalizedProduct,
+        isUserImage: normalizedUser,
+        isSidebarImage: normalizedSidebar,
+        isDesignElement: normalizedDesignElement
+    };
+}
+
+const PROJECT_LAZY_HYDRATE_INITIAL_PAGES = 3;
+const PROJECT_POST_REPAIR_STYLE_DELAYS = [0, 80, 220];
+const PROJECT_POST_REPAIR_PRICE_DELAYS = [0, 80, 220, 520, 980];
+
+function collectTargetPages(targetPages) {
+    if (Array.isArray(targetPages)) {
+        return targetPages.filter((p) => !!(p && p.layer && p.transformerLayer));
+    }
+    if (targetPages && targetPages.layer && targetPages.transformerLayer) {
+        return [targetPages];
+    }
+    return (Array.isArray(window.pages) ? window.pages : []).filter((p) => !!(p && p.layer && p.transformerLayer));
+}
+
+function getInitialHydratedPagesLimit(opts = {}, totalPages = 0) {
+    const total = Math.max(0, Number(totalPages) || 0);
+    if (total <= 0) return 0;
+
+    if (opts && (opts.lazyHydration === false || opts.disableLazyHydration === true)) {
+        return total;
+    }
+
+    const source = String((opts && opts.source) || "").trim().toLowerCase();
+    if (source === "history" || source === "undo" || source === "redo") {
+        return total;
+    }
+
+    let requested = Number(opts && opts.initialHydratedPages);
+    if (!Number.isFinite(requested)) {
+        requested = Number(window.__projectLazyHydrateInitialPages);
+    }
+    if (!Number.isFinite(requested)) {
+        requested = PROJECT_LAZY_HYDRATE_INITIAL_PAGES;
+    }
+
+    const normalized = Math.max(1, Math.round(requested));
+    return Math.min(total, normalized);
+}
+
+function markPageDeferredHydration(page, payload) {
+    if (!page) return;
+    page.__deferredHydrationPayload = payload || null;
+    page.__deferredHydrationDone = !payload;
+    page.__deferredHydrationPromise = null;
+    page.__deferredHydrationError = null;
+}
+
+function pageHasDeferredHydration(page) {
+    return !!(page && page.__deferredHydrationPayload);
+}
+
+function isPageHydrationContextActive(page) {
+    if (!page || !page.layer || !page.stage) return false;
+    if (page.__projectLoadStamp && window.__projectLoadStamp && page.__projectLoadStamp !== window.__projectLoadStamp) {
+        return false;
+    }
+    if (typeof page.stage.isDestroyed === "function" && page.stage.isDestroyed()) {
+        return false;
+    }
+    return true;
+}
+
+function restoreDirectTextStylesForPages(targetPages) {
+    try {
+        const pagesList = collectTargetPages(targetPages);
+        pagesList.forEach((page) => {
+            const layer = page && page.layer;
+            if (!layer || !layer.find || !window.Konva) return;
+            const directTexts = layer.find((n) =>
+                n instanceof Konva.Text &&
+                n.getAttr &&
+                !!n.getAttr("directModuleId") &&
+                !!n.getAttr("_directSavedFill")
+            );
+            directTexts.forEach((t) => {
+                try {
+                    const fill = t.getAttr("_directSavedFill");
+                    const ff = t.getAttr("_directSavedFontFamily");
+                    const fs = t.getAttr("_directSavedFontStyle");
+                    const td = t.getAttr("_directSavedTextDecoration");
+                    if (fill && typeof t.fill === "function") t.fill(fill);
+                    if (ff && typeof t.fontFamily === "function") t.fontFamily(ff);
+                    if (fs && typeof t.fontStyle === "function") t.fontStyle(fs);
+                    if (typeof t.textDecoration === "function") t.textDecoration(td || "");
+                } catch (_e) {}
+            });
+            layer.batchDraw?.();
+            page.transformerLayer?.batchDraw?.();
+        });
+    } catch (_e) {}
+}
+
+function stabilizePriceGroupsForPages(targetPages) {
+    try {
+        const pagesList = collectTargetPages(targetPages);
+        const directHooks = window.CustomStyleDirectHooks || {};
+        const bindDirectPriceGroupEditor = typeof directHooks.bindDirectPriceGroupEditor === "function"
+            ? directHooks.bindDirectPriceGroupEditor
+            : null;
+
+        const realignLegacyPriceGroup = (priceGroup) => {
+            if (!priceGroup || !priceGroup.getChildren || !window.Konva) return;
+            const texts = (priceGroup.getChildren() || []).filter((n) => n instanceof Konva.Text);
+            if (texts.length < 2) return;
+
+            const pickByText = (pattern) => texts.find((t) => pattern.test(String(t.text?.() || "")));
+            const unitNode = pickByText(/\/\s*(SZT|KG|L|ML|G|OPAK)/i) || pickByText(/^\s*[£€$]\s*\/\s*/i);
+            const mainNode = texts.slice().sort((a, b) => Number(b.fontSize?.() || 0) - Number(a.fontSize?.() || 0))[0] || null;
+            const decNode = texts.find((t) => t !== mainNode && t !== unitNode) || texts.find((t) => t !== mainNode) || null;
+            if (!mainNode || !decNode || !unitNode) return;
+
+            const syncTextMetrics = (node, opts = {}) => {
+                if (!node || typeof node.measureSize !== "function") return;
+                const measured = node.measureSize(String(node.text?.() || ""));
+                const measuredW = Number(measured?.width);
+                const measuredH = Number(measured?.height);
+                const extraPad = Math.max(0, Number(opts.extraPad) || 0);
+                const minWidth = Math.max(0, Number(opts.minWidth) || 0);
+                const minHeight = Math.max(0, Number(opts.minHeight) || 0);
+                if (Number.isFinite(measuredW) && measuredW > 0 && typeof node.width === "function") {
+                    node.width(Math.max(minWidth, Math.ceil(measuredW + extraPad)));
+                }
+                if (Number.isFinite(measuredH) && measuredH > 0 && typeof node.height === "function") {
+                    node.height(Math.max(minHeight, Math.ceil(measuredH + Math.min(2, extraPad))));
+                }
+            };
+
+            syncTextMetrics(mainNode, { extraPad: 4, minWidth: 8, minHeight: 8 });
+            syncTextMetrics(decNode, { extraPad: 4, minWidth: 8, minHeight: 8 });
+            syncTextMetrics(unitNode, { extraPad: 8, minWidth: 24, minHeight: 8 });
+
+            const gap = 4;
+            const baseX = Number(mainNode.x?.() || 0);
+            const baseY = Number(mainNode.y?.() || 0);
+            const mainW = Number(mainNode.width?.() || 0);
+            const mainH = Number(mainNode.height?.() || 0);
+            const decH = Number(decNode.height?.() || 0);
+
+            decNode.x(baseX + mainW + gap);
+            decNode.y(baseY + (mainH * 0.10));
+            unitNode.x(baseX + mainW + gap);
+            unitNode.y(baseY + (decH * 1.5));
+
+            if (typeof unitNode.measureSize === "function" && typeof unitNode.width === "function") {
+                const measured = unitNode.measureSize(unitNode.text?.() || "");
+                const minW = Math.max(36, Math.ceil((Number(measured?.width) || 0) + 8));
+                if (Number(unitNode.width?.() || 0) < minW) unitNode.width(minW);
+            }
+        };
+
+        pagesList.forEach((page) => {
+            const layer = page && page.layer;
+            if (!layer || typeof layer.find !== "function" || !window.Konva) return;
+
+            const priceGroups = layer.find((n) =>
+                n instanceof Konva.Group &&
+                n.getAttr &&
+                n.getAttr("isPriceGroup")
+            );
+
+            priceGroups.forEach((group) => {
+                try {
+                    if (bindDirectPriceGroupEditor && group.getAttr("directModuleId")) {
+                        bindDirectPriceGroupEditor(group, page);
+                    } else {
+                        realignLegacyPriceGroup(group);
+                    }
+                } catch (_err) {}
+            });
+
+            layer.batchDraw?.();
+            page.transformerLayer?.batchDraw?.();
+        });
+    } catch (_e) {}
+}
+
+function restoreDirectModuleSelectabilityForPages(targetPages) {
+    try {
+        const fixSelectability = window.CustomStyleDirectHooks && window.CustomStyleDirectHooks.restoreDirectModuleNodeSelectabilityOnPage;
+        if (typeof fixSelectability !== "function") return;
+        collectTargetPages(targetPages).forEach((p) => {
+            try { fixSelectability(p); } catch (_e) {}
+        });
+    } catch (_e) {}
+}
+
+function normalizeLoadedProductGroupsForPages(targetPages) {
+    try {
+        const pagesList = collectTargetPages(targetPages);
+        pagesList.forEach((page) => {
+            const layer = page && page.layer;
+            if (!page || !layer || typeof layer.find !== "function" || !window.Konva) return;
+
+            const isProductModuleNode = (node) => isProductGroupingNode(node);
+
+            const getTopUserGroupAncestor = (node) => {
+                let current = node;
+                let found = null;
+                while (current && current.getParent) {
+                    const parent = current.getParent();
+                    if (!(parent instanceof Konva.Group)) break;
+                    if (parent.getAttr && parent.getAttr("isUserGroup")) found = parent;
+                    current = parent;
+                }
+                return found;
+            };
+
+            const addNodeMeta = (node, slotSet, directSet) => {
+                if (!node || !node.getAttr) return;
+                const direct = String(node.getAttr("directModuleId") || "").trim();
+                const slot = Number(node.getAttr("slotIndex"));
+                const preserved = Number(node.getAttr("preservedSlotIndex"));
+                if (direct) directSet.add(direct);
+                if (Number.isFinite(slot)) slotSet.add(slot);
+                if (Number.isFinite(preserved)) slotSet.add(preserved);
+            };
+
+            const moveNodeToGroupPreserveAbsolute = (node, group) => {
+                if (!node || !group || typeof node.moveTo !== "function") return;
+                const abs = typeof node.getAbsolutePosition === "function"
+                    ? node.getAbsolutePosition()
+                    : { x: Number(node.x?.() || 0), y: Number(node.y?.() || 0) };
+                if (node.setAttr && node.getAttr("_wasDraggableBeforeUserGroup") == null && typeof node.draggable === "function") {
+                    node.setAttr("_wasDraggableBeforeUserGroup", !!node.draggable());
+                }
+                if (typeof node.draggable === "function") node.draggable(false);
+                node.moveTo(group);
+                if (typeof node.absolutePosition === "function") node.absolutePosition(abs);
+                else if (typeof node.setAbsolutePosition === "function") node.setAbsolutePosition(abs);
+            };
+
+            const ensureRecord = (map, key) => {
+                if (!map.has(key)) {
+                    map.set(key, {
+                        key,
+                        slot: null,
+                        directId: "",
+                        groups: [],
+                        looseNodes: []
+                    });
+                }
+                return map.get(key);
+            };
+
+            const moduleMap = new Map();
+            const topLevelGroups = typeof layer.getChildren === "function"
+                ? ((typeof layer.getChildren().toArray === "function" ? layer.getChildren().toArray() : Array.from(layer.getChildren())).filter((n) => n instanceof Konva.Group))
+                : [];
+
+            topLevelGroups.forEach((group) => {
+                if (!group || !group.find) return;
+                const descendants = group.find((n) => isProductModuleNode(n));
+                if (!descendants || !descendants.length) return;
+
+                const slotSet = new Set();
+                const directSet = new Set();
+                addNodeMeta(group, slotSet, directSet);
+                descendants.forEach((node) => addNodeMeta(node, slotSet, directSet));
+
+                const directId = directSet.size === 1 ? Array.from(directSet)[0] : "";
+                const slot = slotSet.size === 1 ? Array.from(slotSet)[0] : null;
+                if (!directId && !Number.isFinite(slot)) return;
+
+                const key = directId ? `direct:${directId}` : `slot:${slot}`;
+                const record = ensureRecord(moduleMap, key);
+                if (directId) record.directId = directId;
+                if (Number.isFinite(slot)) record.slot = slot;
+                record.groups.push(group);
+            });
+
+            layer.find((node) => {
+                if (!isProductModuleNode(node)) return false;
+                return !getTopUserGroupAncestor(node);
+            }).forEach((node) => {
+                const slotSet = new Set();
+                const directSet = new Set();
+                addNodeMeta(node, slotSet, directSet);
+                const directId = directSet.size === 1 ? Array.from(directSet)[0] : "";
+                const slot = slotSet.size === 1 ? Array.from(slotSet)[0] : null;
+                if (!directId && !Number.isFinite(slot)) return;
+
+                const key = directId ? `direct:${directId}` : `slot:${slot}`;
+                const record = ensureRecord(moduleMap, key);
+                if (directId) record.directId = directId;
+                if (Number.isFinite(slot)) record.slot = slot;
+                record.looseNodes.push(node);
+            });
+
+            moduleMap.forEach((record) => {
+                const groups = Array.isArray(record.groups) ? record.groups.filter(Boolean) : [];
+                let primaryGroup = groups[0] || null;
+
+                if (!primaryGroup && Array.isArray(record.looseNodes) && record.looseNodes.length >= 2) {
+                    primaryGroup = new Konva.Group({
+                        x: 0,
+                        y: 0,
+                        draggable: true,
+                        listening: true,
+                        name: "userGroup"
+                    });
+                    layer.add(primaryGroup);
+                }
+                if (!primaryGroup) return;
+
+                if (typeof primaryGroup.name === "function") primaryGroup.name("userGroup");
+                if (typeof primaryGroup.draggable === "function") primaryGroup.draggable(true);
+                if (typeof primaryGroup.listening === "function") primaryGroup.listening(true);
+                if (primaryGroup.setAttr) {
+                    primaryGroup.setAttr("isUserGroup", true);
+                    primaryGroup.setAttr("selectable", true);
+                    primaryGroup.setAttr("_dragNeedsArming", false);
+                    primaryGroup.setAttr("_dragPendingEnable", false);
+                    if (Number.isFinite(record.slot)) {
+                        primaryGroup.setAttr("isAutoSlotGroup", true);
+                        primaryGroup.setAttr("preservedSlotIndex", record.slot);
+                        primaryGroup.setAttr("slotIndex", null);
+                    }
+                    if (record.directId) {
+                        primaryGroup.setAttr("directModuleId", record.directId);
+                    }
+                }
+
+                const extraGroups = groups.slice(1);
+                extraGroups.forEach((extraGroup) => {
+                    if (!extraGroup || extraGroup === primaryGroup || !extraGroup.getChildren) return;
+                    const children = typeof extraGroup.getChildren().toArray === "function"
+                        ? extraGroup.getChildren().toArray()
+                        : Array.from(extraGroup.getChildren());
+                    children.forEach((child) => moveNodeToGroupPreserveAbsolute(child, primaryGroup));
+                    if (typeof extraGroup.destroy === "function") extraGroup.destroy();
+                });
+
+                const looseNodes = Array.isArray(record.looseNodes) ? record.looseNodes : [];
+                looseNodes.forEach((node) => {
+                    if (!node || (node.getParent && node.getParent() === primaryGroup)) return;
+                    moveNodeToGroupPreserveAbsolute(node, primaryGroup);
+                });
+
+                const descendants = primaryGroup.find ? primaryGroup.find((n) => isProductModuleNode(n)) : [];
+                descendants.forEach((child) => {
+                    if (!child || !child.getAttr) return;
+                    if (typeof child.draggable === "function") child.draggable(false);
+                    if (child.setAttr && Number.isFinite(record.slot) && !Number.isFinite(Number(child.getAttr("slotIndex")))) {
+                        child.setAttr("slotIndex", record.slot);
+                    }
+                    if (child.setAttr && record.directId && !String(child.getAttr("directModuleId") || "").trim()) {
+                        child.setAttr("directModuleId", record.directId);
+                    }
+                });
+            });
+
+            topLevelGroups.forEach((group) => {
+                if (!(group instanceof Konva.Group)) return;
+                if (group.getAttr && group.getAttr("isPriceGroup")) return;
+                const children = typeof group.getChildren === "function" ? group.getChildren() : [];
+                if (children && children.length === 0 && typeof group.destroy === "function") {
+                    group.destroy();
+                }
+            });
+
+            const slotImages = [];
+            const slotBarcodes = [];
+            const allSlotIndexes = new Set();
+            layer.find((node) => {
+                if (!node || !node.getAttr) return false;
+                const slot = Number(node.getAttr("slotIndex"));
+                const preserved = Number(node.getAttr("preservedSlotIndex"));
+                return Number.isFinite(slot) || Number.isFinite(preserved);
+            }).forEach((node) => {
+                const slot = Number(node.getAttr("slotIndex"));
+                const preserved = Number(node.getAttr("preservedSlotIndex"));
+                const finalSlot = Number.isFinite(slot) ? slot : preserved;
+                if (!Number.isFinite(finalSlot)) return;
+                allSlotIndexes.add(finalSlot);
+                if (node.getAttr("isProductImage") && !slotImages[finalSlot]) slotImages[finalSlot] = node;
+                if (node.getAttr("isBarcode") && !slotBarcodes[finalSlot]) slotBarcodes[finalSlot] = node;
+            });
+
+            if (!Array.isArray(page.slotObjects)) page.slotObjects = [];
+            if (!Array.isArray(page.barcodeObjects)) page.barcodeObjects = [];
+            const maxSlot = allSlotIndexes.size ? Math.max(...Array.from(allSlotIndexes)) : -1;
+            if (maxSlot >= 0) {
+                page.slotObjects.length = Math.max(page.slotObjects.length, maxSlot + 1);
+                page.barcodeObjects.length = Math.max(page.barcodeObjects.length, maxSlot + 1);
+                for (let i = 0; i <= maxSlot; i++) {
+                    if (slotImages[i]) page.slotObjects[i] = slotImages[i];
+                    if (slotBarcodes[i]) page.barcodeObjects[i] = slotBarcodes[i];
+                }
+            }
+
+            page.selectedNodes = [];
+            page._priorityClickTarget = null;
+            page.transformer?.nodes?.([]);
+            try { page.layer.find(".selectionOutline").forEach((n) => n.destroy()); } catch (_e) {}
+            try { page.hideFloatingButtons?.(); } catch (_e) {}
+            try { page.hidePageFloatingMenu?.(); } catch (_e) {}
+            layer.batchDraw?.();
+            page.transformerLayer?.batchDraw?.();
+        });
+
+        try { document.getElementById("floatingMenu")?.remove(); } catch (_e) {}
+        try { document.getElementById("floatingSubmenu")?.remove(); } catch (_e) {}
+        try { document.getElementById("groupQuickMenu")?.remove(); } catch (_e) {}
+    } catch (_e) {}
+}
+
+function reconstructAutoSlotGroupsForPages(targetPages) {
+    try {
+        const pagesList = collectTargetPages(targetPages);
+        pagesList.forEach((page) => {
+            const layer = page && page.layer;
+            if (!page || !layer || typeof layer.find !== "function" || !window.Konva) return;
+
+            const existingManagedSlots = new Set();
+            layer.find((n) =>
+                n instanceof Konva.Group &&
+                n.getAttr &&
+                n.getAttr("isUserGroup") &&
+                n.getAttr("isAutoSlotGroup")
+            ).forEach((group) => {
+                const direct = Number(group.getAttr("slotIndex"));
+                const preserved = Number(group.getAttr("preservedSlotIndex"));
+                const slot = Number.isFinite(direct) ? direct : preserved;
+                if (Number.isFinite(slot)) existingManagedSlots.add(slot);
+            });
+
+            const slotMap = new Map();
+            layer.find((node) => {
+                if (!node || !node.getAttr) return false;
+                if (node instanceof Konva.Group && node.getAttr("isUserGroup")) return false;
+                const slot = Number(node.getAttr("slotIndex"));
+                if (!Number.isFinite(slot)) return false;
+                return isProductGroupingNode(node);
+            }).forEach((node) => {
+                const slot = Number(node.getAttr("slotIndex"));
+                if (!Number.isFinite(slot) || existingManagedSlots.has(slot)) return;
+                if (!slotMap.has(slot)) slotMap.set(slot, []);
+                slotMap.get(slot).push(node);
+            });
+
+            slotMap.forEach((nodes, slot) => {
+                if (!Array.isArray(nodes) || nodes.length < 2) return;
+                const sortedNodes = nodes.slice().sort((a, b) => {
+                    const az = typeof a.getZIndex === "function" ? Number(a.getZIndex()) || 0 : 0;
+                    const bz = typeof b.getZIndex === "function" ? Number(b.getZIndex()) || 0 : 0;
+                    return az - bz;
+                });
+                const firstRect = sortedNodes[0]?.getClientRect?.({ relativeTo: layer });
+                const anchorX = Number(firstRect?.x || sortedNodes[0]?.x?.() || 0);
+                const anchorY = Number(firstRect?.y || sortedNodes[0]?.y?.() || 0);
+                const group = new Konva.Group({
+                    x: 0,
+                    y: 0,
+                    draggable: true,
+                    listening: true,
+                    name: "userGroup"
+                });
+                group.setAttrs({
+                    isUserGroup: true,
+                    isAutoSlotGroup: true,
+                    preservedSlotIndex: slot,
+                    slotIndex: null,
+                    selectable: true
+                });
+                layer.add(group);
+                sortedNodes.forEach((node) => {
+                    const abs = typeof node.getAbsolutePosition === "function" ? node.getAbsolutePosition() : { x: node.x?.() || 0, y: node.y?.() || 0 };
+                    if (node.setAttr && node.getAttr("_wasDraggableBeforeUserGroup") == null && typeof node.draggable === "function") {
+                        node.setAttr("_wasDraggableBeforeUserGroup", !!node.draggable());
+                    }
+                    if (typeof node.draggable === "function") node.draggable(false);
+                    node.moveTo(group);
+                    if (typeof node.absolutePosition === "function") node.absolutePosition(abs);
+                    else if (typeof node.setAbsolutePosition === "function") node.setAbsolutePosition(abs);
+                });
+                if (typeof group.x === "function") group.x(anchorX);
+                if (typeof group.y === "function") group.y(anchorY);
+                group.getChildren?.().forEach((child) => {
+                    if (typeof child.x === "function") child.x((Number(child.x()) || 0) - anchorX);
+                    if (typeof child.y === "function") child.y((Number(child.y()) || 0) - anchorY);
+                });
+            });
+
+            page.selectedNodes = [];
+            page.transformer?.nodes?.([]);
+            layer.batchDraw?.();
+            page.transformerLayer?.batchDraw?.();
+        });
+    } catch (_e) {}
+}
+
+function restoreSavedUserProductGroupsForPages(targetPages) {
+    try {
+        const pagesList = collectTargetPages(targetPages);
+        pagesList.forEach((page) => {
+            const layer = page && page.layer;
+            const savedGroups = normalizeSavedUserProductGroups(
+                page?.__savedUserProductGroups ||
+                page?.__deferredHydrationPayload?.userProductGroups ||
+                page?.__deferredHydrationPayload?.groupedProductKeys
+            );
+            if (!page || !layer || !savedGroups.length || !window.Konva) return;
+
+            const layerChildren = typeof layer.getChildren === "function"
+                ? (typeof layer.getChildren().toArray === "function" ? layer.getChildren().toArray() : Array.from(layer.getChildren() || []))
+                : [];
+
+            const getTopUserGroupAncestor = (node) => {
+                let current = node;
+                while (current && current.getParent) {
+                    const parent = current.getParent();
+                    if (!(parent instanceof Konva.Group)) break;
+                    if (parent.getAttr && parent.getAttr("isUserGroup")) return parent;
+                    current = parent;
+                }
+                return null;
+            };
+
+            const getGroupKeys = (group) => {
+                if (!(group instanceof Konva.Group) || !group.find) return [];
+                const descendants = group.find((node) => isSavedProductModuleNode(node));
+                return Array.from(new Set(descendants.map((node) => getSavedProductGroupKeyFromNode(node)).filter(Boolean))).sort();
+            };
+
+            const sameKeys = (left, right) => {
+                if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+                return left.every((item, index) => item === right[index]);
+            };
+
+            const moveNodeToGroupPreserveAbsolute = (node, group) => {
+                if (!node || !group || typeof node.moveTo !== "function") return;
+                const abs = typeof node.getAbsolutePosition === "function"
+                    ? node.getAbsolutePosition()
+                    : { x: Number(node.x?.() || 0), y: Number(node.y?.() || 0) };
+                if (node.setAttr && node.getAttr("_wasDraggableBeforeUserGroup") == null && typeof node.draggable === "function") {
+                    node.setAttr("_wasDraggableBeforeUserGroup", !!node.draggable());
+                }
+                if (typeof node.draggable === "function") node.draggable(false);
+                node.moveTo(group);
+                if (typeof node.absolutePosition === "function") node.absolutePosition(abs);
+                else if (typeof node.setAbsolutePosition === "function") node.setAbsolutePosition(abs);
+            };
+
+            const applyGroupMeta = (group, blueprint) => {
+                if (!(group instanceof Konva.Group)) return;
+                if (typeof group.name === "function") group.name("userGroup");
+                if (typeof group.draggable === "function") group.draggable(true);
+                if (typeof group.listening === "function") group.listening(true);
+                if (!group.setAttr) return;
+                group.setAttr("isUserGroup", true);
+                group.setAttr("selectable", true);
+                group.setAttr("_dragNeedsArming", false);
+                group.setAttr("_dragPendingEnable", false);
+                if (blueprint.keys.length === 1 && (blueprint.isAutoSlotGroup || Number.isFinite(blueprint.slotIndex))) {
+                    group.setAttr("isAutoSlotGroup", true);
+                    group.setAttr("preservedSlotIndex", blueprint.slotIndex);
+                    group.setAttr("slotIndex", null);
+                } else {
+                    group.setAttr("isAutoSlotGroup", false);
+                    group.setAttr("preservedSlotIndex", null);
+                }
+                if (blueprint.directModuleId) {
+                    group.setAttr("directModuleId", blueprint.directModuleId);
+                } else {
+                    group.setAttr("directModuleId", null);
+                }
+            };
+
+            const topGroups = layerChildren.filter((node) => node instanceof Konva.Group && node.getAttr && node.getAttr("isUserGroup"));
+            const existingGroups = topGroups.map((group) => ({ group, keys: getGroupKeys(group) }));
+            const looseNodes = layer.find((node) => isSavedProductModuleNode(node) && !getTopUserGroupAncestor(node));
+            const handledKeys = new Set();
+
+            savedGroups
+                .slice()
+                .sort((a, b) => b.keys.length - a.keys.length)
+                .forEach((blueprint) => {
+                    const desiredKeys = Array.from(new Set((blueprint.keys || []).filter((key) => !handledKeys.has(key)))).sort();
+                    if (!desiredKeys.length) return;
+
+                    const exact = existingGroups.find((entry) => sameKeys(entry.keys, desiredKeys));
+                    if (exact) {
+                        applyGroupMeta(exact.group, { ...blueprint, keys: desiredKeys });
+                        desiredKeys.forEach((key) => handledKeys.add(key));
+                        return;
+                    }
+
+                    const subsetGroups = existingGroups.filter((entry) =>
+                        entry.keys.length &&
+                        entry.keys.every((key) => desiredKeys.includes(key)) &&
+                        entry.keys.some((key) => desiredKeys.includes(key))
+                    );
+
+                    let primaryGroup = subsetGroups[0]?.group || null;
+                    if (!primaryGroup) {
+                        primaryGroup = new Konva.Group({
+                            x: 0,
+                            y: 0,
+                            draggable: true,
+                            listening: true,
+                            name: "userGroup"
+                        });
+                        layer.add(primaryGroup);
+                    }
+
+                    applyGroupMeta(primaryGroup, { ...blueprint, keys: desiredKeys });
+
+                    subsetGroups.slice(primaryGroup === subsetGroups[0]?.group ? 1 : 0).forEach((entry) => {
+                        const sourceGroup = entry.group;
+                        if (!sourceGroup || sourceGroup === primaryGroup || !sourceGroup.getChildren) return;
+                        const children = typeof sourceGroup.getChildren().toArray === "function"
+                            ? sourceGroup.getChildren().toArray()
+                            : Array.from(sourceGroup.getChildren() || []);
+                        children.forEach((child) => moveNodeToGroupPreserveAbsolute(child, primaryGroup));
+                        if (typeof sourceGroup.destroy === "function") sourceGroup.destroy();
+                    });
+
+                    looseNodes
+                        .filter((node) => desiredKeys.includes(getSavedProductGroupKeyFromNode(node)))
+                        .forEach((node) => {
+                            if (!node || (node.getParent && node.getParent() === primaryGroup)) return;
+                            moveNodeToGroupPreserveAbsolute(node, primaryGroup);
+                        });
+
+                    desiredKeys.forEach((key) => handledKeys.add(key));
+                });
+
+            layer.batchDraw?.();
+            page.transformerLayer?.batchDraw?.();
+        });
+    } catch (_e) {}
+}
+
+function runPostLoadRepairsForPages(targetPages, opts = {}) {
+    const pagesList = collectTargetPages(targetPages);
+    if (!pagesList.length) return;
+
+    normalizeLoadedProductGroupsForPages(pagesList);
+    reconstructAutoSlotGroupsForPages(pagesList);
+    restoreSavedUserProductGroupsForPages(pagesList);
+    normalizeLoadedProductGroupsForPages(pagesList);
+    restoreDirectTextStylesForPages(pagesList);
+    stabilizePriceGroupsForPages(pagesList);
+    restoreDirectModuleSelectabilityForPages(pagesList);
+
+    if (opts.schedule === false) return;
+
+    PROJECT_POST_REPAIR_STYLE_DELAYS.forEach((ms) => {
+        setTimeout(() => normalizeLoadedProductGroupsForPages(pagesList), ms);
+        setTimeout(() => restoreSavedUserProductGroupsForPages(pagesList), ms);
+        setTimeout(() => restoreDirectTextStylesForPages(pagesList), ms);
+    });
+    PROJECT_POST_REPAIR_PRICE_DELAYS.forEach((ms) => {
+        setTimeout(() => normalizeLoadedProductGroupsForPages(pagesList), ms);
+        setTimeout(() => reconstructAutoSlotGroupsForPages(pagesList), ms);
+        setTimeout(() => restoreSavedUserProductGroupsForPages(pagesList), ms);
+        setTimeout(() => stabilizePriceGroupsForPages(pagesList), ms);
+    });
+
+    try {
+        if (document?.fonts?.ready && typeof document.fonts.ready.then === "function") {
+            document.fonts.ready.then(() => {
+                stabilizePriceGroupsForPages(pagesList);
+                setTimeout(() => stabilizePriceGroupsForPages(pagesList), 120);
+            }).catch(() => {});
+        }
+    } catch (_e) {}
+    try {
+        if (window.APP_FONT_LOADER_PROMISE && typeof window.APP_FONT_LOADER_PROMISE.then === "function") {
+            window.APP_FONT_LOADER_PROMISE.then(() => {
+                stabilizePriceGroupsForPages(pagesList);
+                restoreDirectTextStylesForPages(pagesList);
+                setTimeout(() => stabilizePriceGroupsForPages(pagesList), 120);
+            }).catch(() => {});
+        }
+    } catch (_e) {}
+}
+
+async function restoreDirectNodeRecursiveFromPayload(payload, page, layer) {
+    if (!payload || !window.Konva) return null;
+    if (!isPageHydrationContextActive(page)) return null;
+
+    if (payload.type === "textNode") {
+        const t = new Konva.Text({
+            x: payload.x ?? 0,
+            y: payload.y ?? 0,
+            width: payload.width,
+            height: payload.height,
+            scaleX: payload.scaleX || 1,
+            scaleY: payload.scaleY || 1,
+            rotation: payload.rotation || 0,
+            text: payload.text || "",
+            fontSize: payload.fontSize || 12,
+            fontFamily: payload.fontFamily || "Arial",
+            fill: payload.fill || "#000",
+            fontStyle: payload.fontStyle || "normal",
+            align: payload.align || "left",
+            lineHeight: payload.lineHeight || 1.2,
+            draggable: payload.draggable !== false,
+            listening: payload.listening !== false
+        });
+        if (typeof t.textDecoration === "function" && payload.textDecoration) {
+            t.textDecoration(payload.textDecoration);
+        }
+        if (payload.attrs) t.setAttrs(payload.attrs);
+        if (payload.attrs && payload.attrs.directModuleId) {
+            t.setAttr("_directSavedFill", payload.fill || t.fill() || "#000000");
+            t.setAttr("_directSavedFontFamily", payload.fontFamily || t.fontFamily() || "Arial");
+            t.setAttr("_directSavedFontStyle", payload.fontStyle || t.fontStyle() || "normal");
+            t.setAttr("_directSavedTextDecoration", payload.textDecoration || (t.textDecoration ? t.textDecoration() : ""));
+        }
+        const editFn = window.enableEditableText || window.enableTextEditing;
+        if (typeof editFn === "function" && (t.getAttr("isName") || t.getAttr("isIndex") || t.getAttr("isProductText") || t.getAttr("isCustomPackageInfo"))) {
+            try { editFn(t, page); } catch (_e) {}
+        }
+        return t;
+    }
+
+    if (payload.type === "rectNode") {
+        const r = new Konva.Rect({
+            x: payload.x ?? 0,
+            y: payload.y ?? 0,
+            width: payload.width || 0,
+            height: payload.height || 0,
+            scaleX: payload.scaleX || 1,
+            scaleY: payload.scaleY || 1,
+            rotation: payload.rotation || 0,
+            fill: payload.fill,
+            opacity: payload.opacity ?? 1,
+            stroke: payload.stroke,
+            strokeWidth: payload.strokeWidth,
+            draggable: payload.draggable === true,
+            listening: payload.listening !== false
+        });
+        if (payload.attrs) r.setAttrs(payload.attrs);
+        return r;
+    }
+
+    if (payload.type === "imageNode" && (payload.src || (payload.attrs && payload.attrs.editorSrc) || (payload.attrs && payload.attrs.thumbSrc))) {
+        return await new Promise((resolve) => {
+            if (!isPageHydrationContextActive(page)) {
+                resolve(null);
+                return;
+            }
+            const renderSrc =
+                String(payload?.attrs?.editorSrc || "").trim() ||
+                String(payload.src || payload?.attrs?.thumbSrc || "").trim();
+            const thumbSrc =
+                String(payload?.attrs?.thumbSrc || "").trim() ||
+                renderSrc;
+            const img = new Image();
+            img.onload = () => {
+                if (!isPageHydrationContextActive(page)) {
+                    resolve(null);
+                    return;
+                }
+                const safeCrop = normalizeSavedCrop(payload.crop, img.naturalWidth, img.naturalHeight);
+                const k = new Konva.Image({
+                    x: payload.x ?? 0,
+                    y: payload.y ?? 0,
+                    image: img,
+                    width: payload.width || img.naturalWidth,
+                    height: payload.height || img.naturalHeight,
+                    scaleX: payload.scaleX || 1,
+                    scaleY: payload.scaleY || 1,
+                    rotation: payload.rotation || 0,
+                    draggable: payload.draggable !== false,
+                    listening: payload.listening !== false,
+                    opacity: payload.opacity ?? 1
+                });
+                if (safeCrop && typeof k.crop === "function") {
+                    k.crop(safeCrop);
+                }
+                if (payload.attrs) k.setAttrs(payload.attrs);
+                const role = normalizeSavedImageRole({
+                    slotIndex: payload && payload.attrs ? payload.attrs.slotIndex : null,
+                    isProductImage: payload && payload.attrs ? payload.attrs.isProductImage : false,
+                    isUserImage: payload && payload.attrs ? payload.attrs.isUserImage : false,
+                    isSidebarImage: payload && payload.attrs ? payload.attrs.isSidebarImage : false,
+                    isDesignElement: payload && payload.attrs ? payload.attrs.isDesignElement : false,
+                    isOverlayElement: payload && payload.attrs ? payload.attrs.isOverlayElement : false,
+                    isTNZBadge: payload && payload.attrs ? payload.attrs.isTNZBadge : false,
+                    isCountryBadge: payload && payload.attrs ? payload.attrs.isCountryBadge : false,
+                    isBarcode: payload && payload.attrs ? payload.attrs.isBarcode : false,
+                    isQRCode: payload && payload.attrs ? payload.attrs.isQRCode : false,
+                    isEAN: payload && payload.attrs ? payload.attrs.isEAN : false
+                });
+                if (k.setAttr) {
+                    k.setAttr("slotIndex", role.slotIndex);
+                    k.setAttr("isProductImage", role.isProductImage);
+                    k.setAttr("isUserImage", role.isUserImage);
+                    k.setAttr("isSidebarImage", role.isSidebarImage);
+                    k.setAttr("isDesignElement", role.isDesignElement);
+                    if (role.isUserImage && safeCrop) {
+                        const meaningfulCrop = (
+                            Number(safeCrop.x || 0) > 0.5 ||
+                            Number(safeCrop.y || 0) > 0.5 ||
+                            Number(safeCrop.width || 0) < (Number(img.naturalWidth || 0) - 0.5) ||
+                            Number(safeCrop.height || 0) < (Number(img.naturalHeight || 0) - 0.5)
+                        );
+                        if (meaningfulCrop) k.setAttr("_userCropTouched", true);
+                    }
+                }
+                if (typeof k.imageSmoothingEnabled === "function") k.imageSmoothingEnabled(true);
+                if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                    window.applyImageVariantsToKonvaNode(k, {
+                        original: payload.src,
+                        editor: renderSrc || payload.src,
+                        thumb: thumbSrc || renderSrc || payload.src
+                    });
+                } else {
+                    if (k.setAttr) k.setAttr("originalSrc", payload.src);
+                    if (k.setAttr) k.setAttr("editorSrc", renderSrc || payload.src);
+                    if (k.setAttr) k.setAttr("thumbSrc", thumbSrc || renderSrc || payload.src);
+                }
+                if (typeof window.setupProductImageDrag === "function" && (k.getAttr("isProductImage") || k.getAttr("directModuleId"))) {
+                    try { window.setupProductImageDrag(k, layer); } catch (_e) {}
+                }
+                resolve(k);
+            };
+            img.onerror = () => resolve(null);
+            img.crossOrigin = "Anonymous";
+            img.src = renderSrc || payload.src;
+        });
+    }
+
+    if (payload.type === "groupNode") {
+        const g = new Konva.Group({
+            x: payload.x ?? 0,
+            y: payload.y ?? 0,
+            scaleX: payload.scaleX || 1,
+            scaleY: payload.scaleY || 1,
+            rotation: payload.rotation || 0,
+            draggable: payload.draggable !== false,
+            listening: payload.listening !== false,
+            name: payload.name || ""
+        });
+        if (payload.attrs) g.setAttrs(payload.attrs);
+        const children = Array.isArray(payload.children) ? payload.children : [];
+        for (const childPayload of children) {
+            const childNode = await restoreDirectNodeRecursiveFromPayload(childPayload, page, layer);
+            if (childNode) g.add(childNode);
+        }
+        if (g.getAttr && g.getAttr("isPriceGroup")) {
+            const bindFn = window.CustomStyleDirectHooks && window.CustomStyleDirectHooks.bindDirectPriceGroupEditor;
+            if (typeof bindFn === "function") {
+                try { bindFn(g, page); } catch (_e) {}
+            }
+        }
+        return g;
+    }
+
+    return null;
+}
+
+function createSavedImageNodeFromObject(obj, page) {
+    return new Promise((resolve) => {
+        if (!isPageHydrationContextActive(page)) {
+            resolve(null);
+            return;
+        }
+        const renderSrc = String(obj.editorSrc || obj.src || obj.thumbSrc || "").trim();
+        const thumbSrc = String(obj.thumbSrc || renderSrc || obj.src || "").trim();
+        const img = new Image();
+        img.onload = () => {
+            if (!isPageHydrationContextActive(page)) {
+                resolve(null);
+                return;
+            }
+            const safeCrop = normalizeSavedCrop(obj.crop, img.naturalWidth, img.naturalHeight);
+            const role = normalizeSavedImageRole({
+                slotIndex: obj.slotIndex,
+                isProductImage: obj.isProductImage,
+                isUserImage: obj.isUserImage,
+                isSidebarImage: obj.isSidebarImage,
+                isDesignElement: obj.isDesignElement,
+                isOverlayElement: obj.isOverlayElement,
+                isTNZBadge: obj.isTNZBadge,
+                isCountryBadge: obj.isCountryBadge
+            });
+            const k = new Konva.Image({
+                x: obj.x,
+                y: obj.y,
+                image: img,
+                width: obj.width || img.naturalWidth,
+                height: obj.height || img.naturalHeight,
+                scaleX: obj.scaleX || 1,
+                scaleY: obj.scaleY || 1,
+                rotation: obj.rotation || 0,
+                draggable: obj.draggable !== false,
+                listening: obj.listening !== false,
+                visible: obj.visible !== false,
+                opacity: obj.opacity ?? 1
+            });
+            if (safeCrop && typeof k.crop === "function") {
+                k.crop(safeCrop);
+            }
+            k.setAttr("slotIndex", role.slotIndex);
+            if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                window.applyImageVariantsToKonvaNode(k, {
+                    original: obj.src,
+                    editor: renderSrc || obj.src,
+                    thumb: thumbSrc || renderSrc || obj.src
+                });
+            } else {
+                k.setAttr("originalSrc", obj.src);
+                k.setAttr("editorSrc", renderSrc || obj.src);
+                k.setAttr("thumbSrc", thumbSrc || renderSrc || obj.src);
+            }
+            k.setAttr("isProductImage", role.isProductImage);
+            k.setAttr("isUserImage", role.isUserImage);
+            k.setAttr("isSidebarImage", role.isSidebarImage);
+            k.setAttr("isDesignElement", role.isDesignElement);
+            if (role.isUserImage && safeCrop) {
+                const meaningfulCrop = (
+                    Number(safeCrop.x || 0) > 0.5 ||
+                    Number(safeCrop.y || 0) > 0.5 ||
+                    Number(safeCrop.width || 0) < (Number(img.naturalWidth || 0) - 0.5) ||
+                    Number(safeCrop.height || 0) < (Number(img.naturalHeight || 0) - 0.5)
+                );
+                if (meaningfulCrop) k.setAttr("_userCropTouched", true);
+            }
+            k.setAttr("isOverlayElement", obj.isOverlayElement || false);
+            k.setAttr("isTNZBadge", obj.isTNZBadge || false);
+            k.setAttr("isCountryBadge", obj.isCountryBadge || false);
+            if (typeof k.shadowColor === "function" && obj.shadowColor != null) {
+                k.shadowColor(obj.shadowColor);
+            }
+            if (typeof k.shadowBlur === "function" && Number.isFinite(Number(obj.shadowBlur))) {
+                k.shadowBlur(Number(obj.shadowBlur));
+            }
+            if (typeof k.shadowOffset === "function") {
+                k.shadowOffset({
+                    x: Number(obj.shadowOffsetX || 0),
+                    y: Number(obj.shadowOffsetY || 0)
+                });
+            }
+            if (typeof k.shadowOpacity === "function" && Number.isFinite(Number(obj.shadowOpacity))) {
+                k.shadowOpacity(Number(obj.shadowOpacity));
+            }
+            if (typeof k.stroke === "function" && obj.stroke != null) {
+                k.stroke(obj.stroke);
+            }
+            if (typeof k.strokeWidth === "function" && Number.isFinite(Number(obj.strokeWidth))) {
+                k.strokeWidth(Number(obj.strokeWidth));
+            }
+            if (obj.imageFX && k.setAttr) {
+                try { k.setAttr("imageFX", cloneStyleValue(obj.imageFX)); } catch (_e) {}
+            }
+            if (typeof k.imageSmoothingEnabled === "function") {
+                k.imageSmoothingEnabled(true);
+            }
+            if (obj.imageFX && typeof window.ensureImageFX === "function") {
+                try { window.ensureImageFX(k, page.layer); } catch (_e) {}
+            }
+            if (obj.imageFX && typeof window.applyImageFX === "function") {
+                try { window.applyImageFX(k); } catch (_e) {}
+            }
+            resolve(k);
+        };
+        img.onerror = () => resolve(null);
+        img.crossOrigin = "Anonymous";
+        img.src = renderSrc || obj.src;
+    });
+}
+
+function createSavedBarcodeNodeFromObject(obj, page) {
+    return new Promise((resolve) => {
+        if (!isPageHydrationContextActive(page)) {
+            resolve(null);
+            return;
+        }
+        const img = new Image();
+        img.onload = () => {
+            if (!isPageHydrationContextActive(page)) {
+                resolve(null);
+                return;
+            }
+            const k = new Konva.Image({
+                x: obj.x,
+                y: obj.y,
+                image: img,
+                scaleX: obj.scaleX || 1,
+                scaleY: obj.scaleY || 1,
+                rotation: obj.rotation || 0,
+                draggable: true
+            });
+            k.setAttrs({
+                isBarcode: true,
+                slotIndex: obj.slotIndex,
+                barcodeOriginalSrc: obj.original,
+                barcodeColor: obj.color
+            });
+            resolve(k);
+        };
+        img.onerror = () => resolve(null);
+        img.src = obj.original;
+    });
+}
+
+async function restoreSavedObjectsForPage(page, pagePayload) {
+    if (!page || !page.layer) return;
+    if (!isPageHydrationContextActive(page)) return;
+    const layer = page.layer;
+    const objects = Array.isArray(pagePayload && pagePayload.objects) ? pagePayload.objects : [];
+    const scheduleAsyncNode = createAsyncTaskQueue(PAGE_IMAGE_RESTORE_CONCURRENCY);
+    const preloadNodePromises = new Map();
+
+    for (let index = 0; index < objects.length; index++) {
+        const obj = objects[index];
+        if (!obj || !obj.type) continue;
+        if (obj.type === "image" && (obj.src || obj.editorSrc || obj.thumbSrc)) {
+            preloadNodePromises.set(index, scheduleAsyncNode(() => createSavedImageNodeFromObject(obj, page)));
+            continue;
+        }
+        if (obj.type === "barcode" && obj.original) {
+            preloadNodePromises.set(index, scheduleAsyncNode(() => createSavedBarcodeNodeFromObject(obj, page)));
+        }
+    }
+
+    for (let index = 0; index < objects.length; index++) {
+        const obj = objects[index];
+        if (!isPageHydrationContextActive(page)) return;
+        if (!obj || !obj.type) continue;
+
+        if (obj.type === "directGroup" && obj.data) {
+            const directGroup = await restoreDirectNodeRecursiveFromPayload(obj.data, page, layer);
+            if (directGroup) layer.add(directGroup);
+            continue;
+        }
+
+        if (obj.type === "directNode" && obj.data) {
+            const directNode = await restoreDirectNodeRecursiveFromPayload(obj.data, page, layer);
+            if (directNode) layer.add(directNode);
+            continue;
+        }
+
+        if (obj.type === "genericGroup" && obj.data) {
+            const genericGroup = await restoreDirectNodeRecursiveFromPayload(obj.data, page, layer);
+            if (genericGroup) layer.add(genericGroup);
+            continue;
+        }
+
+        if (obj.type === "background") {
+            const bg = layer.findOne((n) => n.getAttr("isPageBg"));
+            if (bg) {
+                bg.fill(obj.fill);
+                bg.opacity(obj.opacity ?? 1);
+                bg.setAttr("backgroundFill", obj.fill || "#ffffff");
+                if (obj.imageSrc && typeof window.applySavedBackgroundImage === "function") {
+                    try {
+                        await window.applySavedBackgroundImage(page, obj.imageSrc);
+                    } catch (_e) {}
+                } else if (obj.gradient && typeof window.applySavedBackgroundGradient === "function") {
+                    try {
+                        window.applySavedBackgroundGradient(page, obj.gradient);
+                    } catch (_e) {}
+                } else {
+                    bg.setAttr("backgroundGradient", null);
+                    bg.setAttr("backgroundImageSrc", null);
+                    bg.setAttr("backgroundKind", "color");
+                }
+                if (!page.settings) page.settings = {};
+                page.settings.pageBgColor = obj.fill || "#ffffff";
+                page.settings.pageOpacity = obj.opacity ?? 1;
+            }
+            continue;
+        }
+
+        if (obj.type === "text") {
+            const t = new Konva.Text({
+                x: obj.x,
+                y: obj.y,
+                text: obj.text || "",
+                width: obj.width,
+                height: obj.height,
+                fontSize: obj.fontSize,
+                fontFamily: obj.fontFamily,
+                fill: obj.fill,
+                fontStyle: obj.fontStyle || "normal",
+                align: obj.align || "left",
+                lineHeight: obj.lineHeight || 1.2,
+                rotation: obj.rotation,
+                draggable: true
+            });
+            t.setAttrs({
+                isName: obj.isName || false,
+                isPrice: obj.isPrice || false,
+                isIndex: obj.isIndex || false,
+                slotIndex: obj.slotIndex
+            });
+            layer.add(t);
+            const editFn = window.enableEditableText || window.enableTextEditing;
+            if (typeof editFn === "function") editFn(t, page);
+            continue;
+        }
+
+        if (obj.type === "image" && (obj.src || obj.editorSrc || obj.thumbSrc)) {
+            const imageNode = await (
+                preloadNodePromises.get(index) ||
+                createSavedImageNodeFromObject(obj, page)
+            );
+            if (imageNode) {
+                layer.add(imageNode);
+            }
+            continue;
+        }
+
+        if (obj.type === "priceGroup") {
+            const g = new Konva.Group({
+                x: obj.x ?? 0,
+                y: obj.y ?? 0,
+                scaleX: obj.scaleX || 1,
+                scaleY: obj.scaleY || 1,
+                rotation: obj.rotation || 0,
+                draggable: obj.draggable !== false,
+                listening: true,
+                name: obj.name || "priceGroup"
+            });
+            g.setAttrs({
+                isProductText: true,
+                isPrice: true,
+                isPriceGroup: true,
+                slotIndex: obj.slotIndex ?? null
+            });
+
+            const parts = Array.isArray(obj.parts) ? obj.parts : [];
+            parts.forEach((part) => {
+                const t = new Konva.Text({
+                    x: part.x ?? 0,
+                    y: part.y ?? 0,
+                    text: part.text || "",
+                    width: part.width,
+                    height: part.height,
+                    fontSize: part.fontSize || 12,
+                    fontFamily: part.fontFamily || "Arial",
+                    fill: part.fill || "#000000",
+                    fontStyle: part.fontStyle || "normal",
+                    align: part.align || "left",
+                    lineHeight: part.lineHeight || 1.2
+                });
+                g.add(t);
+            });
+
+            layer.add(g);
+            continue;
+        }
+
+        if (obj.type === "barcode" && obj.original) {
+            const barcodeNode = await (
+                preloadNodePromises.get(index) ||
+                createSavedBarcodeNodeFromObject(obj, page)
+            );
+            if (barcodeNode) layer.add(barcodeNode);
+            continue;
+        }
+
+        if (obj.type === "box") {
+            const box = new Konva.Rect({
+                x: obj.x,
+                y: obj.y,
+                width: obj.width,
+                height: obj.height,
+                fill: obj.fill !== undefined ? obj.fill : "#ffffff",
+                stroke: obj.stroke || "rgba(0,0,0,0.06)",
+                strokeWidth: obj.strokeWidth ?? 1,
+                cornerRadius: obj.cornerRadius ?? 10,
+                shadowColor: obj.shadowColor || "rgba(0,0,0,0.18)",
+                shadowBlur: obj.shadowBlur ?? 30,
+                shadowOffset: { x: obj.shadowOffsetX ?? 0, y: obj.shadowOffsetY ?? 12 },
+                shadowOpacity: obj.shadowOpacity ?? 0.8,
+                draggable: true,
+                visible: obj.visible !== false,
+                listening: obj.listening !== false
+            });
+
+            box.setAttr("isBox", true);
+            box.setAttr("slotIndex", obj.slotIndex ?? null);
+            box.setAttr("isShape", !!obj.isShape);
+            box.setAttr("isPreset", !!obj.isPreset);
+            if (obj.selectable !== undefined) box.setAttr("selectable", obj.selectable);
+            box.setAttr("isHiddenByCatalogStyle", !!obj.isHiddenByCatalogStyle);
+
+            box.scaleX(obj.scaleX || 1);
+            box.scaleY(obj.scaleY || 1);
+
+            layer.add(box);
+            continue;
+        }
+    }
+
+    layer.batchDraw?.();
+}
+
+async function ensurePageHydrated(page, opts = {}) {
+    if (!page || !page.layer) return false;
+    if (!isPageHydrationContextActive(page)) return false;
+    if (!pageHasDeferredHydration(page)) {
+        page.__deferredHydrationDone = true;
+        return false;
+    }
+    if (page.__deferredHydrationPromise) {
+        return page.__deferredHydrationPromise;
+    }
+
+    const payload = page.__deferredHydrationPayload;
+    const trackedPromise = (async () => {
+        try {
+            await restoreSavedObjectsForPage(page, payload);
+            page.__deferredHydrationPayload = null;
+            page.__deferredHydrationDone = true;
+            page.__deferredHydrationError = null;
+            runPostLoadRepairsForPages([page], { schedule: true });
+            return true;
+        } catch (err) {
+            page.__deferredHydrationError = err;
+            if (opts.throwOnError) throw err;
+            try {
+                console.warn("Deferred page hydration failed", err);
+            } catch (_e) {}
+            return false;
+        } finally {
+            if (page.__deferredHydrationPromise === trackedPromise) {
+                page.__deferredHydrationPromise = null;
+            }
+        }
+    })();
+
+    page.__deferredHydrationPromise = trackedPromise;
+    return trackedPromise;
+}
+
+window.ensurePageHydrated = ensurePageHydrated;
+window.hasDeferredPageHydration = pageHasDeferredHydration;
+window.ensureAllPagesHydrated = async function(targetPages, opts = {}) {
+    const pagesList = collectTargetPages(targetPages);
+    if (!pagesList.length) return;
+    for (const page of pagesList) {
+        await ensurePageHydrated(page, {
+            ...opts,
+            throwOnError: true
+        });
+    }
+};
+
 function serializeDirectNodeRecursive(node) {
     if (!node || !window.Konva) return null;
 
@@ -623,6 +2190,26 @@ function serializeDirectNodeRecursive(node) {
             sanitizeAttrsForSave(node.getAttrs ? node.getAttrs() : {}),
             "image"
         );
+        const role = normalizeSavedImageRole({
+            slotIndex: node.getAttr ? node.getAttr("slotIndex") : null,
+            isProductImage: node.getAttr ? node.getAttr("isProductImage") : false,
+            isUserImage: node.getAttr ? node.getAttr("isUserImage") : false,
+            isSidebarImage: node.getAttr ? node.getAttr("isSidebarImage") : false,
+            isDesignElement: node.getAttr ? node.getAttr("isDesignElement") : false,
+            isOverlayElement: node.getAttr ? node.getAttr("isOverlayElement") : false,
+            isTNZBadge: node.getAttr ? node.getAttr("isTNZBadge") : false,
+            isCountryBadge: node.getAttr ? node.getAttr("isCountryBadge") : false,
+            isBarcode: node.getAttr ? node.getAttr("isBarcode") : false,
+            isQRCode: node.getAttr ? node.getAttr("isQRCode") : false,
+            isEAN: node.getAttr ? node.getAttr("isEAN") : false
+        });
+        attrs.slotIndex = role.slotIndex;
+        attrs.isProductImage = role.isProductImage;
+        attrs.isUserImage = role.isUserImage;
+        attrs.isSidebarImage = role.isSidebarImage;
+        if (!role.hasSlot) {
+            attrs.preservedSlotIndex = null;
+        }
         const crop = getNodeCropForSave(node);
         return {
             type: "imageNode",
@@ -637,7 +2224,11 @@ function serializeDirectNodeRecursive(node) {
             listening: node.listening ? node.listening() : true,
             opacity: node.opacity ? node.opacity() : 1,
             crop,
-            src: (node.getAttr && node.getAttr("originalSrc")) || (node.image && node.image() && node.image().src) || null,
+            src: (
+                (typeof window.getNodeImageSource === "function")
+                    ? window.getNodeImageSource(node, "original")
+                    : ((node.getAttr && node.getAttr("originalSrc")) || (node.image && node.image() && node.image().src))
+            ) || null,
             attrs
         };
     }
@@ -665,6 +2256,93 @@ function serializeDirectNodeRecursive(node) {
     return null;
 }
 
+function isProductGroupingNode(node) {
+    if (!node || !node.getAttr) return false;
+    if (node.getAttr("isPriceHitArea")) return false;
+    return !!(
+        node.getAttr("isBox") ||
+        node.getAttr("isProductText") ||
+        node.getAttr("isName") ||
+        node.getAttr("isIndex") ||
+        node.getAttr("isPrice") ||
+        node.getAttr("isProductImage") ||
+        node.getAttr("isBarcode") ||
+        node.getAttr("isCountryBadge") ||
+        node.getAttr("isTNZBadge") ||
+        node.getAttr("isPriceGroup") ||
+        node.getAttr("isDirectPriceRectBg") ||
+        node.getAttr("isDirectPriceCircleBg") ||
+        node.getAttr("isCustomPackageInfo") ||
+        node.getAttr("isLayoutDivider")
+    );
+}
+
+function isSavedProductModuleNode(node) {
+    return isProductGroupingNode(node);
+}
+
+function getSavedProductGroupKeyFromNode(node) {
+    if (!node || !node.getAttr) return "";
+    const directId = String(node.getAttr("directModuleId") || "").trim();
+    if (directId) return `direct:${directId}`;
+    const slot = Number(node.getAttr("slotIndex"));
+    const preserved = Number(node.getAttr("preservedSlotIndex"));
+    const finalSlot = Number.isFinite(slot) ? slot : preserved;
+    return Number.isFinite(finalSlot) ? `slot:${finalSlot}` : "";
+}
+
+function normalizeSavedUserProductGroups(rawGroups) {
+    if (!Array.isArray(rawGroups)) return [];
+    const groups = [];
+    rawGroups.forEach((entry) => {
+        const keys = Array.isArray(entry?.keys)
+            ? entry.keys
+            : Array.isArray(entry)
+                ? entry
+                : (typeof entry === "string" ? [entry] : []);
+        const normalizedKeys = Array.from(new Set(
+            keys
+                .map((item) => String(item || "").trim())
+                .filter(Boolean)
+        ));
+        if (!normalizedKeys.length) return;
+        const slotIndex = Number(entry?.slotIndex);
+        groups.push({
+            keys: normalizedKeys,
+            isAutoSlotGroup: !!entry?.isAutoSlotGroup,
+            slotIndex: Number.isFinite(slotIndex) ? slotIndex : null,
+            directModuleId: String(entry?.directModuleId || "").trim()
+        });
+    });
+    return groups;
+}
+
+function collectSavedUserProductGroupsForPage(page) {
+    const layer = page && page.layer;
+    if (!layer || typeof layer.getChildren !== "function" || !window.Konva) return [];
+    const children = typeof layer.getChildren().toArray === "function"
+        ? layer.getChildren().toArray()
+        : Array.from(layer.getChildren() || []);
+
+    return normalizeSavedUserProductGroups(children.map((group) => {
+        if (!(group instanceof Konva.Group) || !group.getAttr || !group.getAttr("isUserGroup") || !group.find) {
+            return null;
+        }
+        const descendants = group.find((node) => isSavedProductModuleNode(node));
+        if (!Array.isArray(descendants) || !descendants.length) return null;
+        const keys = Array.from(new Set(descendants.map((node) => getSavedProductGroupKeyFromNode(node)).filter(Boolean)));
+        if (!keys.length) return null;
+        const slot = Number(group.getAttr("slotIndex"));
+        const preserved = Number(group.getAttr("preservedSlotIndex"));
+        return {
+            keys,
+            isAutoSlotGroup: !!group.getAttr("isAutoSlotGroup"),
+            slotIndex: Number.isFinite(slot) ? slot : (Number.isFinite(preserved) ? preserved : null),
+            directModuleId: String(group.getAttr("directModuleId") || "").trim()
+        };
+    }).filter(Boolean));
+}
+
 function collectProjectData() {
 
     const project = {
@@ -672,12 +2350,42 @@ function collectProjectData() {
         date: document.getElementById("projectDateInput").value,
         layout: window.LAYOUT_MODE || "layout6",
         catalogStyle: window.CATALOG_STYLE || "default",
+        pageFormat: window.CATALOG_PAGE_FORMAT || null,
+        pageOrientation: window.CATALOG_PAGE_ORIENTATION || (
+            Number(window.W || 0) > Number(window.H || 0) ? "landscape" : "portrait"
+        ),
         pageWidth: window.W || null,
         pageHeight: window.H || null,
         pages: []
     };
 
     window.pages.forEach(page => {
+        const deferredPayload = page && page.__deferredHydrationPayload;
+        if (deferredPayload && typeof deferredPayload === "object" && Array.isArray(deferredPayload.objects)) {
+            let deferredObjects = deferredPayload.objects;
+            const deferredUserProductGroups = normalizeSavedUserProductGroups(
+                deferredPayload.userProductGroups || deferredPayload.groupedProductKeys
+            );
+            const deferredProducts = cloneSavedPageProducts(deferredPayload.products || page.products);
+            const deferredSettings = cloneProjectSerializable(
+                deferredPayload.settings || page.settings || {},
+                {}
+            );
+            try {
+                deferredObjects = JSON.parse(JSON.stringify(deferredPayload.objects));
+            } catch (_e) {
+                deferredObjects = Array.isArray(deferredPayload.objects) ? deferredPayload.objects.slice() : [];
+            }
+            project.pages.push({
+                number: page.number,
+                objects: deferredObjects,
+                userProductGroups: deferredUserProductGroups,
+                products: deferredProducts,
+                settings: deferredSettings
+            });
+            return;
+        }
+
         const objects = [];
 
         page.layer.getChildren().forEach(node => {
@@ -732,7 +2440,10 @@ function collectProjectData() {
             if (node.getAttr("isPageBg")) {
                 objects.push({
                     type: "background",
-                    fill: node.fill()
+                    fill: node.fill(),
+                    opacity: node.opacity ? node.opacity() : 1,
+                    gradient: node.getAttr("backgroundGradient") || null,
+                    imageSrc: node.getAttr("backgroundImageSrc") || null
                 });
                 return;
             }
@@ -801,10 +2512,19 @@ function collectProjectData() {
             // ZDJĘCIA (nie barcode)
             if (node instanceof Konva.Image && !node.getAttr("isBarcode")) {
                 const crop = getNodeCropForSave(node);
-                const rawSlot = Number(node.getAttr("slotIndex"));
-                const hasSlot = Number.isFinite(rawSlot);
-                const isUserImage = !!node.getAttr("isUserImage");
-                const isProductImage = !!node.getAttr("isProductImage") && hasSlot && !isUserImage;
+                const role = normalizeSavedImageRole({
+                    slotIndex: node.getAttr("slotIndex"),
+                    isProductImage: node.getAttr("isProductImage"),
+                    isUserImage: node.getAttr("isUserImage"),
+                    isSidebarImage: node.getAttr("isSidebarImage"),
+                    isDesignElement: node.getAttr("isDesignElement"),
+                    isOverlayElement: node.getAttr("isOverlayElement"),
+                    isTNZBadge: node.getAttr("isTNZBadge"),
+                    isCountryBadge: node.getAttr("isCountryBadge"),
+                    isBarcode: node.getAttr("isBarcode"),
+                    isQRCode: node.getAttr("isQRCode"),
+                    isEAN: node.getAttr("isEAN")
+                });
                 objects.push({
                     type: "image",
                     x: node.x(),
@@ -814,11 +2534,39 @@ function collectProjectData() {
                     rotation: node.rotation(),
                     width: node.width(),
                     height: node.height(),
+                    draggable: node.draggable ? node.draggable() : true,
+                    listening: node.listening ? node.listening() : true,
+                    visible: typeof node.visible === "function" ? node.visible() : true,
+                    opacity: node.opacity ? node.opacity() : 1,
                     crop,
-                    slotIndex: hasSlot ? rawSlot : null,
-                    src: node.getAttr("originalSrc") || node.image()?.src || null,
-                    isProductImage,
-                    isUserImage,
+                    shadowColor: node.shadowColor ? node.shadowColor() : null,
+                    shadowBlur: node.shadowBlur ? node.shadowBlur() : 0,
+                    shadowOffsetX: node.shadowOffsetX ? node.shadowOffsetX() : 0,
+                    shadowOffsetY: node.shadowOffsetY ? node.shadowOffsetY() : 0,
+                    shadowOpacity: node.shadowOpacity ? node.shadowOpacity() : 0,
+                    stroke: node.stroke ? node.stroke() : null,
+                    strokeWidth: node.strokeWidth ? node.strokeWidth() : 0,
+                    imageFX: (node.getAttr && node.getAttr("imageFX")) ? cloneStyleValue(node.getAttr("imageFX")) : null,
+                    slotIndex: role.slotIndex,
+                    src: (
+                        (typeof window.getNodeImageSource === "function")
+                            ? window.getNodeImageSource(node, "original")
+                            : (node.getAttr("originalSrc") || node.image()?.src)
+                    ) || null,
+                    editorSrc: (
+                        (typeof window.getNodeImageSource === "function")
+                            ? window.getNodeImageSource(node, "editor")
+                            : node.getAttr("editorSrc")
+                    ) || null,
+                    thumbSrc: (
+                        (typeof window.getNodeImageSource === "function")
+                            ? window.getNodeImageSource(node, "thumb")
+                            : node.getAttr("thumbSrc")
+                    ) || null,
+                    isProductImage: role.isProductImage,
+                    isUserImage: role.isUserImage,
+                    isSidebarImage: role.isSidebarImage,
+                    isDesignElement: node.getAttr("isDesignElement") || false,
                     isOverlayElement: node.getAttr("isOverlayElement") || false,
                     isTNZBadge: node.getAttr("isTNZBadge") || false,
                     isCountryBadge: node.getAttr("isCountryBadge") || false
@@ -881,7 +2629,10 @@ function collectProjectData() {
 
         project.pages.push({
             number: page.number,
-            objects
+            objects,
+            userProductGroups: collectSavedUserProductGroupsForPage(page),
+            products: cloneSavedPageProducts(page.products),
+            settings: cloneProjectSerializable(page.settings || {}, {})
         });
     });
 
@@ -914,6 +2665,29 @@ function createThumbQueue(concurrency = 2) {
 }
 
 const queueThumbTask = createThumbQueue(2);
+const queueRemoteProjectThumbTask = createThumbQueue(PROJECT_THUMB_DOWNLOAD_CONCURRENCY);
+
+function createAsyncTaskQueue(concurrency = 2) {
+    let active = 0;
+    const queue = [];
+    const safeConcurrency = Math.max(1, Number(concurrency) || 1);
+    const next = () => {
+        if (active >= safeConcurrency || queue.length === 0) return;
+        const task = queue.shift();
+        active++;
+        Promise.resolve()
+            .then(task.fn)
+            .then(task.resolve, task.reject)
+            .finally(() => {
+                active--;
+                next();
+            });
+    };
+    return (fn) => new Promise((resolve, reject) => {
+        queue.push({ fn, resolve, reject });
+        next();
+    });
+}
 
 function loadImageElement(src) {
     return new Promise((resolve, reject) => {
@@ -978,8 +2752,41 @@ async function renderPreviewFromData(data, opts = {}) {
 
     for (const obj of objects) {
         if (obj.type === "background") {
-            ctx.fillStyle = obj.fill || "#ffffff";
+            const prevAlpha = ctx.globalAlpha;
+            if (obj.imageSrc) {
+                const bgImg = await getImg(obj.imageSrc);
+                if (bgImg) {
+                    const scaleCover = Math.max(canvas.width / (bgImg.naturalWidth || bgImg.width || 1), canvas.height / (bgImg.naturalHeight || bgImg.height || 1));
+                    const drawW = (bgImg.naturalWidth || bgImg.width || 1) * scaleCover;
+                    const drawH = (bgImg.naturalHeight || bgImg.height || 1) * scaleCover;
+                    const drawX = (canvas.width - drawW) / 2;
+                    const drawY = (canvas.height - drawH) / 2;
+                    ctx.globalAlpha = obj.opacity ?? 1;
+                    ctx.drawImage(bgImg, drawX, drawY, drawW, drawH);
+                    ctx.globalAlpha = prevAlpha;
+                    continue;
+                }
+            }
+            if (obj.gradient && Array.isArray(obj.gradient.stops) && obj.gradient.stops.length) {
+                const direction = String(obj.gradient.direction || "horizontal");
+                let grad;
+                if (direction === "vertical") {
+                    grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+                } else if (direction === "diagonal") {
+                    grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+                } else {
+                    grad = ctx.createLinearGradient(0, 0, canvas.width, 0);
+                }
+                const stops = obj.gradient.stops;
+                const lastIndex = Math.max(1, stops.length - 1);
+                stops.forEach((color, index) => grad.addColorStop(index / lastIndex, color));
+                ctx.fillStyle = grad;
+            } else {
+                ctx.fillStyle = obj.fill || "#ffffff";
+            }
+            ctx.globalAlpha = obj.opacity ?? 1;
             ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = prevAlpha;
             continue;
         }
         if (obj.type === "box") {
@@ -1064,10 +2871,9 @@ async function ensureThumbForProject(itemRef, thumbPath) {
         // ignore
     }
     try {
-        const jsonUrl = await getDownloadURL(itemRef);
-        const resp = await fetch(jsonUrl);
-        if (!resp.ok) return "";
-        const data = await resp.json();
+        const loaded = await loadProjectDataFromStorageRef(itemRef);
+        const data = loaded && loaded.data ? loaded.data : null;
+        if (!data) return "";
         const thumb = await renderPreviewFromData(data, { targetWidth: 320 });
         if (!thumb) return "";
         const thumbRef = ref(storage, thumbPath);
@@ -1207,20 +3013,29 @@ async function saveProjectNow(options = {}) {
         }
 
         const jsonString = JSON.stringify(data);
-        const approxMB = (new Blob([jsonString]).size / (1024 * 1024));
+        const uploadPayload = await buildProjectUploadPayload(jsonString);
+        const approxMB = uploadPayload.rawBytes / (1024 * 1024);
+        const uploadMB = uploadPayload.storedBytes / (1024 * 1024);
         if (approxMB > 18) {
-            showBusyOverlay(`Zapisywanie dużego projektu… (${approxMB.toFixed(1)} MB)`);
+            const busyLabel = uploadPayload.compressed
+                ? `Zapisywanie dużego projektu… (${uploadMB.toFixed(1)} MB po kompresji)`
+                : `Zapisywanie dużego projektu… (${approxMB.toFixed(1)} MB)`;
+            showBusyOverlay(busyLabel);
         }
-        const blob = new Blob([jsonString], { type: "application/json" });
+        const blob = uploadPayload.blob;
         const fileRef = ref(storage, filePath);
 
         await uploadBytes(fileRef, blob, {
-            contentType: "application/json",
+            contentType: uploadPayload.contentType,
             customMetadata: {
                 name: data.name || "",
                 date: data.date || "",
+                savedAt: String(Date.now()),
                 layout: data.layout || "layout6",
-                thumbPath
+                thumbPath,
+                projectEncoding: uploadPayload.encoding,
+                projectRawBytes: String(uploadPayload.rawBytes || 0),
+                projectStoredBytes: String(uploadPayload.storedBytes || 0)
             }
         });
 
@@ -1243,6 +3058,12 @@ async function saveProjectNow(options = {}) {
             path: filePath,
             thumbPath
         };
+        syncSaveFormWithCurrentProject({
+            forceName: String(data.name || "").trim(),
+            forceDate: String(data.date || "").trim() || getTodayIsoDate(),
+            overwriteName: true,
+            overwriteDate: true
+        });
         window.projectDirty = false;
         setProjectTitle(data.name || DEFAULT_PROJECT_TITLE);
         let autosaveIdentityAfter = null;
@@ -1316,12 +3137,24 @@ function formatSavedTimestamp(ts) {
             month: "2-digit",
             day: "2-digit",
             hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit"
+            minute: "2-digit"
         });
     } catch (_e) {
         return "";
     }
+}
+
+function parseSavedTimestamp(value) {
+    const numeric = Number(value || 0);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    const parsed = Date.parse(String(value || "").trim());
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function formatSavedProjectMetaLabel(ts, fallbackDate = "") {
+    const exact = formatSavedTimestamp(ts);
+    if (exact) return exact;
+    return String(fallbackDate || "").trim();
 }
 
 function normalizedProjectNameLayoutKey(name, layout) {
@@ -1529,6 +3362,233 @@ async function getAutosaveProjectEntries(options = {}) {
         .sort((a, b) => Number(b.savedAt || 0) - Number(a.savedAt || 0));
 }
 
+const startProjectsSelection = new Set();
+let startProjectsRenderedEntries = new Map();
+let startProjectsBulkActionsBound = false;
+
+function buildStartProjectSelectionKey(type, rawId) {
+    return `${String(type || "saved")}::${String(rawId || "").trim()}`;
+}
+
+function safeProjectDownloadBaseName(name) {
+    const raw = String(name || "").trim() || "projekt";
+    const safe = raw
+        .replace(/[\\/:*?"<>|]+/g, "_")
+        .replace(/\s+/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 80);
+    return safe || "projekt";
+}
+
+function triggerBlobDownload(blob, fileName) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = String(fileName || "projekt.json");
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1200);
+}
+
+function downloadProjectDataAsJsonFile(data, fileNameBase) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: "application/json;charset=utf-8"
+    });
+    triggerBlobDownload(blob, `${safeProjectDownloadBaseName(fileNameBase)}.json`);
+}
+
+function closeStartProjectMenus(root = document) {
+    (root.querySelectorAll ? root.querySelectorAll(".start-card-menu.is-open") : []).forEach((menu) => {
+        menu.classList.remove("is-open");
+    });
+}
+
+function syncStartProjectsBulkBar() {
+    const bar = document.getElementById("startProjectsBulkBar");
+    const countEl = document.getElementById("startProjectsSelectionCount");
+    const deleteBtn = document.getElementById("startProjectsBulkDeleteBtn");
+    if (!bar || !countEl) return;
+
+    const validKeys = new Set(startProjectsRenderedEntries.keys());
+    Array.from(startProjectsSelection).forEach((key) => {
+        if (!validKeys.has(key)) startProjectsSelection.delete(key);
+    });
+
+    const selectedCount = startProjectsSelection.size;
+    bar.style.display = selectedCount ? "flex" : "none";
+    countEl.textContent = selectedCount === 1
+        ? "1 projekt zaznaczony"
+        : `${selectedCount} projektów zaznaczonych`;
+    if (deleteBtn) deleteBtn.disabled = selectedCount === 0;
+}
+
+function syncStartProjectsSelectionUi(root = document) {
+    (root.querySelectorAll ? root.querySelectorAll(".start-card[data-selection-key]") : []).forEach((card) => {
+        const key = String(card.dataset.selectionKey || "");
+        const selected = !!key && startProjectsSelection.has(key);
+        card.classList.toggle("is-selected", selected);
+        const checkbox = card.querySelector(".start-select-checkbox");
+        if (checkbox) checkbox.checked = selected;
+        const selectAction = card.querySelector(".projectMenuSelectBtn");
+        if (selectAction) {
+            selectAction.textContent = selected ? "Odznacz" : "Zaznacz";
+        }
+    });
+    syncStartProjectsBulkBar();
+}
+
+function setStartProjectSelection(key, selected, root = document) {
+    const normalizedKey = String(key || "").trim();
+    if (!normalizedKey) return;
+    if (selected) startProjectsSelection.add(normalizedKey);
+    else startProjectsSelection.delete(normalizedKey);
+    syncStartProjectsSelectionUi(root);
+}
+
+function clearStartProjectsSelection(root = document) {
+    startProjectsSelection.clear();
+    syncStartProjectsSelectionUi(root);
+}
+
+async function deleteSavedProjectFiles(path, thumbPath = "") {
+    if (!storage || !path) return false;
+    await deleteObject(ref(storage, path));
+    if (thumbPath) {
+        try {
+            await deleteObject(ref(storage, thumbPath));
+        } catch (_e) {}
+    }
+    return true;
+}
+
+async function deleteAutosaveEntryById(autosaveId, autosaveSource = "") {
+    const storeApi = window.ProjectHistoryStore;
+    const key = getAutosaveStoreKey();
+    try {
+        if (autosaveId && storeApi && typeof storeApi.deleteAutosaveEntry === "function") {
+            await storeApi.deleteAutosaveEntry(key, autosaveId);
+            await syncLatestAutosavePayloadFromEntries();
+        } else if (typeof window.clearProjectAutosave === "function") {
+            await window.clearProjectAutosave();
+        }
+    } catch (_e) {}
+    try {
+        if (autosaveSource === "autosave-backup") {
+            localStorage.removeItem(LOCAL_BACKUP_KEY);
+        }
+    } catch (_e) {}
+    return true;
+}
+
+async function downloadSavedProjectFromStorage(path, fallbackName = "") {
+    if (!storage || !path) return false;
+    showBusyOverlay("Przygotowywanie pliku projektu…");
+    try {
+        const fileRef = ref(storage, path);
+        const loaded = await loadProjectDataFromStorageRef(fileRef);
+        const data = loaded?.data || null;
+        if (!data) {
+            showAppToast("Nie udało się pobrać projektu.", "error");
+            return false;
+        }
+        const fileNameBase = loaded?.meta?.customMetadata?.name || data?.name || fallbackName || "projekt";
+        downloadProjectDataAsJsonFile(data, fileNameBase);
+        showAppToast("Pobrano plik projektu.", "success");
+        return true;
+    } catch (e) {
+        showAppToast(`Nie udało się pobrać projektu: ${String(e?.message || e || "błąd")}`, "error");
+        return false;
+    } finally {
+        hideBusyOverlay();
+    }
+}
+
+async function downloadAutosaveProjectFile(autosaveEntry) {
+    if (!autosaveEntry?.data) {
+        showAppToast("Brak danych autosave do pobrania.", "error");
+        return false;
+    }
+    const fileNameBase = autosaveEntry?.name || autosaveEntry?.data?.name || "autosave_projekt";
+    downloadProjectDataAsJsonFile(autosaveEntry.data, fileNameBase);
+    showAppToast("Pobrano plik projektu.", "success");
+    return true;
+}
+
+async function deleteStartProjectEntry(entry) {
+    if (!entry) return false;
+    if (entry.type === "autosave") {
+        await deleteAutosaveEntryById(entry.autosaveId, entry.autosaveSource);
+        return true;
+    }
+    await deleteSavedProjectFiles(entry.path, entry.thumbPath);
+    return true;
+}
+
+function bindStartProjectsBulkBar(rootList) {
+    if (startProjectsBulkActionsBound) return;
+    startProjectsBulkActionsBound = true;
+
+    const clearBtn = document.getElementById("startProjectsBulkClearBtn");
+    const deleteBtn = document.getElementById("startProjectsBulkDeleteBtn");
+
+    if (clearBtn) {
+        clearBtn.onclick = () => {
+            clearStartProjectsSelection(rootList || document);
+            closeStartProjectMenus();
+        };
+    }
+
+    if (deleteBtn) {
+        deleteBtn.onclick = async () => {
+            const selectedEntries = Array.from(startProjectsSelection)
+                .map((key) => startProjectsRenderedEntries.get(key))
+                .filter(Boolean);
+            if (!selectedEntries.length) return;
+            const confirmed = await showActionConfirmModal({
+                title: selectedEntries.length === 1 ? "Usunąć projekt?" : "Usunąć zaznaczone projekty?",
+                message: selectedEntries.length === 1
+                    ? "Ta operacja usunie wybrany projekt z listy zapisanych projektów."
+                    : `Ta operacja usunie ${selectedEntries.length} zaznaczone projekty z listy zapisanych projektów.`,
+                confirmText: "Usuń",
+                cancelText: "Anuluj",
+                tone: "danger"
+            });
+            if (!confirmed) return;
+
+            showBusyOverlay(selectedEntries.length === 1 ? "Usuwanie projektu…" : "Usuwanie zaznaczonych projektów…");
+            let successCount = 0;
+            let failedCount = 0;
+            try {
+                for (const entry of selectedEntries) {
+                    try {
+                        await deleteStartProjectEntry(entry);
+                        successCount += 1;
+                    } catch (_e) {
+                        failedCount += 1;
+                    }
+                }
+            } finally {
+                hideBusyOverlay();
+            }
+
+            clearStartProjectsSelection(rootList || document);
+            await loadSavedProjects(document.getElementById("startProjectsList"));
+            if (successCount) {
+                showAppToast(
+                    failedCount
+                        ? `Usunięto ${successCount} projekt(y), ${failedCount} nie udało się usunąć.`
+                        : `Usunięto ${successCount} projekt(y).`,
+                    failedCount ? "info" : "success"
+                );
+            } else if (failedCount) {
+                showAppToast("Nie udało się usunąć zaznaczonych projektów.", "error");
+            }
+        };
+    }
+}
+
 async function loadSavedProjects(listEl) {
     const list = listEl || document.getElementById("savedProjectsList");
     if (!list) return;
@@ -1538,6 +3598,7 @@ async function loadSavedProjects(listEl) {
 
     list.innerHTML = "<p>Ładowanie...</p>";
     const isStartList = list.id === "startProjectsList";
+    const currentStartEntries = new Map();
     list.innerHTML = "";
     let renderedCount = 0;
     const autosaveCardsByNameLayout = new Map();
@@ -1551,15 +3612,26 @@ async function loadSavedProjects(listEl) {
         const previewId = `preview_${Math.random().toString(36).slice(2)}`;
         const autosaveNameRaw = String(autosaveEntry.name || autosaveEntry.data.name || "").trim();
         const autosaveName = autosaveNameRaw ? `Autosave: ${autosaveNameRaw}` : "Autosave (lokalny)";
-        const autosaveDate = formatSavedTimestamp(autosaveEntry.savedAt);
-        const autosaveLayout = autosaveEntry.layout || autosaveEntry.data.layout || "layout6";
+        const autosaveDate = formatSavedProjectMetaLabel(autosaveEntry.savedAt, autosaveEntry.data?.date || "");
         const autosaveThumb = String(autosaveEntry.thumb || "");
+        const autosaveSelectionKey = buildStartProjectSelectionKey("autosave", autosaveEntry.id || autosaveNameLayoutKey || renderedCount);
 
         const card = document.createElement("div");
         card.className = isStartList ? "start-card" : "";
         card.dataset.autosave = "1";
         card.dataset.autosaveId = String(autosaveEntry.id || "");
         card.dataset.autosaveSource = String(autosaveEntry.source || "");
+        if (isStartList) {
+            card.dataset.selectionKey = autosaveSelectionKey;
+            currentStartEntries.set(autosaveSelectionKey, {
+                type: "autosave",
+                selectionKey: autosaveSelectionKey,
+                autosaveId: String(autosaveEntry.id || ""),
+                autosaveSource: String(autosaveEntry.source || ""),
+                name: autosaveName,
+                data: autosaveEntry.data
+            });
+        }
         const autosaveNameLayoutKey = normalizedProjectNameLayoutKey(
             autosaveEntry.name || autosaveEntry.data?.name || "",
             autosaveEntry.layout || autosaveEntry.data?.layout || "layout6"
@@ -1569,15 +3641,31 @@ async function loadSavedProjects(listEl) {
             card.style = `padding:12px; border:1px solid #c7d2fe; border-radius:12px; background:#f5f8ff; display:flex; flex-direction:column; gap:10px;`;
         }
         card.innerHTML = `
+            ${isStartList ? `
+            <div class="start-card-toolbar">
+                <label class="start-select-toggle" title="Zaznacz projekt">
+                    <input type="checkbox" class="start-select-checkbox" data-selection-key="${autosaveSelectionKey}">
+                    <span><i class="fas fa-check"></i></span>
+                </label>
+                <div style="position:relative;">
+                    <button type="button" class="start-menu-toggle" aria-label="Więcej akcji"><i class="fas fa-ellipsis-h"></i></button>
+                    <div class="start-card-menu">
+                        <button type="button" class="projectMenuEditBtn" data-autosave-id="${String(autosaveEntry.id || "")}">Edytuj</button>
+                        <button type="button" class="projectMenuDownloadBtn" data-autosave-id="${String(autosaveEntry.id || "")}">Pobierz</button>
+                        <button type="button" class="projectMenuSelectBtn" data-selection-key="${autosaveSelectionKey}">Zaznacz</button>
+                        <button type="button" class="projectMenuDeleteBtn danger" data-autosave-id="${String(autosaveEntry.id || "")}" data-autosave-source="${String(autosaveEntry.source || "")}">Usuń</button>
+                    </div>
+                </div>
+            </div>` : ``}
             <div id="${previewId}" class="${isStartList ? "start-preview" : ""}" style="${isStartList ? "" : "width:100%;aspect-ratio:3/4;background:#fff;border:1px solid #dbe5ff;border-radius:10px;display:flex;align-items:center;justify-content:center;overflow:hidden;"}">
                 ${autosaveThumb ? `<img src="${autosaveThumb}" alt="Podgląd autosave" ${isStartList ? "" : `style="width:100%;height:100%;object-fit:cover;"`}>` : `<span style="color:#667085;">Autosave lokalny</span>`}
             </div>
             <div class="${isStartList ? "start-meta" : ""}" style="${isStartList ? "" : "display:flex;flex-direction:column;gap:4px;"}">
                 <strong class="${isStartList ? "start-name" : ""}" style="${isStartList ? "" : "font-size:14px;"}">${autosaveName}</strong>
-                <small class="${isStartList ? "start-sub" : ""}" style="${isStartList ? "" : "color:#475467;font-size:12px;"}">${autosaveDate} • ${autosaveLayout}</small>
+                <small class="${isStartList ? "start-sub" : ""}" style="${isStartList ? "" : "color:#475467;font-size:12px;"}">${autosaveDate}</small>
             </div>
             <div class="${isStartList ? "start-actions" : ""}" style="${isStartList ? "" : "display:flex; gap:8px; margin-top:4px;"}">
-                <button class="openAutosaveBtn ${isStartList ? "start-btn start-open" : ""}" data-autosave-id="${String(autosaveEntry.id || "")}" style="${isStartList ? "" : "flex:1;padding:8px 10px; font-size:13px; background:#2563eb; color:white; border:none; border-radius:6px; cursor:pointer;"}">Otwórz</button>
+                <button class="openAutosaveBtn ${isStartList ? "start-btn start-open" : ""}" data-autosave-id="${String(autosaveEntry.id || "")}" style="${isStartList ? "" : "flex:1;padding:8px 10px; font-size:13px; background:#2563eb; color:white; border:none; border-radius:6px; cursor:pointer;"}">${isStartList ? "Edytuj" : "Otwórz"}</button>
                 <button class="deleteAutosaveBtn ${isStartList ? "start-btn start-delete" : ""}" data-autosave-id="${String(autosaveEntry.id || "")}" data-autosave-source="${String(autosaveEntry.source || "")}" style="${isStartList ? "" : "padding:8px 10px; font-size:13px; background:#64748b; color:white; border:none; border-radius:6px; cursor:pointer;"}">Usuń</button>
             </div>
         `;
@@ -1618,40 +3706,73 @@ async function loadSavedProjects(listEl) {
             const folderRef = ref(storage, PROJECTS_FOLDER);
             const result = await listAll(folderRef);
             if (isStale()) return;
+            const sourceItems = Array.isArray(result?.items) ? result.items : [];
+            const firebaseProjects = await mapWithConcurrencyLimit(
+                sourceItems,
+                PROJECT_LIST_METADATA_CONCURRENCY,
+                async (itemRef) => {
+                    if (isStale()) return null;
+                    const fullPath = String(itemRef?.fullPath || "").trim();
+                    if (!fullPath) return null;
+                    let meta = null;
+                    try {
+                        meta = await getMetadata(itemRef);
+                    } catch (_e) {
+                        meta = null;
+                    }
+                    if (isStale()) return null;
+                    const name = meta?.customMetadata?.name || itemRef.name;
+                    const date = meta?.customMetadata?.date || "";
+                    const savedAt = parseSavedTimestamp(
+                        meta?.customMetadata?.savedAt ||
+                        meta?.updated ||
+                        meta?.timeCreated ||
+                        ""
+                    );
+                    const dateLabel = formatSavedProjectMetaLabel(savedAt, date);
+                    const layout = meta?.customMetadata?.layout || "layout6";
+                    const thumbPath = meta?.customMetadata?.thumbPath || `${THUMBS_FOLDER}/${itemRef.name.replace(/\.json$/i, ".jpg")}`;
+                    return {
+                        itemRef,
+                        fullPath,
+                        name,
+                        date,
+                        savedAt,
+                        dateLabel,
+                        layout,
+                        thumbPath
+                    };
+                }
+            );
+            if (isStale()) return;
             const seenProjectPaths = new Set();
 
-            for (const itemRef of result.items) {
+            for (const projectEntry of firebaseProjects) {
                 if (isStale()) return;
-                const fullPath = String(itemRef?.fullPath || "").trim();
+                if (!projectEntry) continue;
+                const {
+                    itemRef,
+                    fullPath,
+                    name,
+                    date,
+                    savedAt,
+                    dateLabel,
+                    layout,
+                    thumbPath
+                } = projectEntry;
                 if (!fullPath || seenProjectPaths.has(fullPath)) continue;
                 seenProjectPaths.add(fullPath);
-                let meta = null;
-                try {
-                    meta = await getMetadata(itemRef);
-                } catch (_e) {
-                    meta = null;
-                }
-                if (isStale()) return;
-
-                const name = meta?.customMetadata?.name || itemRef.name;
-                const date = meta?.customMetadata?.date || "";
-                const layout = meta?.customMetadata?.layout || "layout6";
-                const thumbPath = meta?.customMetadata?.thumbPath || `${THUMBS_FOLDER}/${itemRef.name.replace(/\.json$/i, ".jpg")}`;
-                let thumbUrl = "";
-                if (thumbPath) {
-                    try {
-                        thumbUrl = await getDownloadURL(ref(storage, thumbPath));
-                    } catch (_e) {
-                        thumbUrl = "";
-                    }
-                }
-                if (isStale()) return;
 
                 const savedNameLayoutKey = normalizedProjectNameLayoutKey(name, layout);
                 if (savedNameLayoutKey && autosaveCardsByNameLayout.has(savedNameLayoutKey)) {
                     const dupCards = autosaveCardsByNameLayout.get(savedNameLayoutKey) || [];
                     dupCards.forEach((dupCard) => {
                         if (dupCard && dupCard.parentNode === list) {
+                            const dupKey = String(dupCard.dataset.selectionKey || "");
+                            if (dupKey) {
+                                currentStartEntries.delete(dupKey);
+                                startProjectsSelection.delete(dupKey);
+                            }
                             dupCard.remove();
                             renderedCount = Math.max(0, renderedCount - 1);
                         }
@@ -1663,40 +3784,65 @@ async function loadSavedProjects(listEl) {
                 card.className = isStartList ? "start-card" : "";
                 card.dataset.path = itemRef.fullPath;
                 card.dataset.thumbpath = thumbPath;
+                const savedSelectionKey = buildStartProjectSelectionKey("saved", itemRef.fullPath);
+                if (isStartList) {
+                    card.dataset.selectionKey = savedSelectionKey;
+                    currentStartEntries.set(savedSelectionKey, {
+                        type: "saved",
+                        selectionKey: savedSelectionKey,
+                        path: itemRef.fullPath,
+                        thumbPath,
+                        name
+                    });
+                }
                 if (!isStartList) {
                     card.style = `padding:12px; border:1px solid #e2e2e2; border-radius:12px; background:#fafafa; display:flex; flex-direction:column; gap:10px;`;
                 }
                 const previewId = `preview_${Math.random().toString(36).slice(2)}`;
                 card.innerHTML = `
+                    ${isStartList ? `
+                    <div class="start-card-toolbar">
+                        <label class="start-select-toggle" title="Zaznacz projekt">
+                            <input type="checkbox" class="start-select-checkbox" data-selection-key="${savedSelectionKey}">
+                            <span><i class="fas fa-check"></i></span>
+                        </label>
+                        <div style="position:relative;">
+                            <button type="button" class="start-menu-toggle" aria-label="Więcej akcji"><i class="fas fa-ellipsis-h"></i></button>
+                            <div class="start-card-menu">
+                                <button type="button" class="projectMenuEditBtn" data-path="${itemRef.fullPath}" data-thumbpath="${thumbPath}">Edytuj</button>
+                                <button type="button" class="projectMenuDownloadBtn" data-path="${itemRef.fullPath}" data-name="${String(name || "").replace(/"/g, '&quot;')}">Pobierz</button>
+                                <button type="button" class="projectMenuSelectBtn" data-selection-key="${savedSelectionKey}">Zaznacz</button>
+                                <button type="button" class="projectMenuDeleteBtn danger" data-path="${itemRef.fullPath}" data-thumbpath="${thumbPath}">Usuń</button>
+                            </div>
+                        </div>
+                    </div>` : ``}
                     <div id="${previewId}" class="${isStartList ? "start-preview" : ""}" style="${isStartList ? "" : "width:100%;aspect-ratio:3/4;background:#fff;border:1px solid #eee;border-radius:10px;display:flex;align-items:center;justify-content:center;overflow:hidden;"}">
-                        ${thumbUrl ? `<img src="${thumbUrl}" alt="Podgląd" ${isStartList ? "" : `style="width:100%;height:100%;object-fit:cover;"`}>` : `<span style="color:#999;">Ładowanie podglądu…</span>`}
+                        <span style="color:#999;">Ładowanie podglądu…</span>
                     </div>
                     <div class="${isStartList ? "start-meta" : ""}" style="${isStartList ? "" : "display:flex;flex-direction:column;gap:4px;"}">
                         <strong class="${isStartList ? "start-name" : ""}" style="${isStartList ? "" : "font-size:14px;"}">${name}</strong>
-                        <small class="${isStartList ? "start-sub" : ""}" style="${isStartList ? "" : "color:#666;font-size:12px;"}">${date} • ${layout}</small>
+                        <small class="${isStartList ? "start-sub" : ""}" style="${isStartList ? "" : "color:#666;font-size:12px;"}">${dateLabel || formatSavedProjectMetaLabel(savedAt, date)}</small>
                     </div>
                     <div class="${isStartList ? "start-actions" : ""}" style="${isStartList ? "" : "display:flex; gap:8px; margin-top:4px;"}">
-                        <button data-path="${itemRef.fullPath}" data-thumbpath="${thumbPath}" class="openProjectBtn ${isStartList ? "start-btn start-open" : ""}" style="${isStartList ? "" : "flex:1;padding:8px 10px; font-size:13px; background:#0066ff; color:white; border:none; border-radius:6px; cursor:pointer;"}">Otwórz</button>
-                        <button data-path="${itemRef.fullPath}" class="deleteProjectBtn ${isStartList ? "start-btn start-delete" : ""}" style="${isStartList ? "" : "padding:8px 10px; font-size:13px; background:#ff4444; color:white; border:none; border-radius:6px; cursor:pointer;"}">Usuń</button>
+                        <button data-path="${itemRef.fullPath}" data-thumbpath="${thumbPath}" class="openProjectBtn ${isStartList ? "start-btn start-open" : ""}" style="${isStartList ? "" : "flex:1;padding:8px 10px; font-size:13px; background:#0066ff; color:white; border:none; border-radius:6px; cursor:pointer;"}">${isStartList ? "Edytuj" : "Otwórz"}</button>
+                        <button data-path="${itemRef.fullPath}" data-thumbpath="${thumbPath}" class="deleteProjectBtn ${isStartList ? "start-btn start-delete" : ""}" style="${isStartList ? "" : "padding:8px 10px; font-size:13px; background:#ff4444; color:white; border:none; border-radius:6px; cursor:pointer;"}">Usuń</button>
                     </div>
                 `;
                 list.appendChild(card);
                 renderedCount += 1;
 
-                if (!thumbUrl) {
-                    const previewEl = card.querySelector(`#${previewId}`);
-                    queueThumbTask(async () => {
-                        if (isStale()) return;
-                        const url = await ensureThumbForProject(itemRef, thumbPath);
-                        if (isStale()) return;
-                        if (!previewEl) return;
-                        if (url) {
-                            previewEl.innerHTML = `<img src="${url}" alt="Podgląd" style="width:100%;height:100%;object-fit:cover;">`;
-                        } else {
-                            previewEl.innerHTML = `<span style="color:#999;">Brak podglądu</span>`;
-                        }
-                    });
-                }
+                const previewEl = card.querySelector(`#${previewId}`);
+                queueRemoteProjectThumbTask(async () => {
+                    if (isStale()) return;
+                    const url = await ensureThumbForProject(itemRef, thumbPath);
+                    if (isStale()) return;
+                    if (!previewEl || !previewEl.isConnected) return;
+                    if (url) {
+                        previewEl.innerHTML = `<img src="${url}" alt="Podgląd" style="width:100%;height:100%;object-fit:cover;">`;
+                    } else {
+                        previewEl.innerHTML = `<span style="color:#999;">Brak podglądu</span>`;
+                    }
+                });
             }
         } catch (_e) {
             // Jeśli Firebase chwilowo niedostępny, i tak pokaż lokalny autosave.
@@ -1704,6 +3850,10 @@ async function loadSavedProjects(listEl) {
     }
 
     if (renderedCount === 0) {
+        if (isStartList) {
+            startProjectsRenderedEntries = new Map();
+            clearStartProjectsSelection(list);
+        }
         list.innerHTML = storage
             ? "<p>Brak zapisanych projektów</p>"
             : "<p>Brak połączenia z Firebase Storage</p>";
@@ -1713,10 +3863,16 @@ async function loadSavedProjects(listEl) {
 
     list.querySelectorAll(".deleteProjectBtn").forEach(btn => {
         btn.onclick = async () => {
-            if (confirm("Na pewno usunąć?")) {
-                await deleteObject(ref(storage, btn.dataset.path));
-                loadSavedProjects(list);
-            }
+            const confirmed = await showActionConfirmModal({
+                title: "Usunąć projekt?",
+                message: "Projekt oraz jego miniatura zostaną usunięte z zapisanych projektów.",
+                confirmText: "Usuń",
+                cancelText: "Anuluj",
+                tone: "danger"
+            });
+            if (!confirmed) return;
+            await deleteSavedProjectFiles(btn.dataset.path, btn.dataset.thumbpath || "");
+            loadSavedProjects(list);
         };
     });
 
@@ -1760,37 +3916,161 @@ async function loadSavedProjects(listEl) {
 
     list.querySelectorAll(".deleteAutosaveBtn").forEach(btn => {
         btn.onclick = async () => {
-            if (!confirm("Usunąć lokalny autosave?")) return;
-            const autosaveId = String(btn.dataset.autosaveId || "").trim();
-            const autosaveSource = String(btn.dataset.autosaveSource || "").trim();
-            const storeApi = window.ProjectHistoryStore;
-            const key = getAutosaveStoreKey();
-            try {
-                if (autosaveId && storeApi && typeof storeApi.deleteAutosaveEntry === "function") {
-                    await storeApi.deleteAutosaveEntry(key, autosaveId);
-                    await syncLatestAutosavePayloadFromEntries();
-                } else if (typeof window.clearProjectAutosave === "function") {
-                    await window.clearProjectAutosave();
-                }
-            } catch (_e) {}
-            try {
-                if (autosaveSource === "autosave-backup") {
-                    localStorage.removeItem(LOCAL_BACKUP_KEY);
-                }
-            } catch (_e) {}
+            const confirmed = await showActionConfirmModal({
+                title: "Usunąć autosave?",
+                message: "Lokalny autosave tego projektu zostanie usunięty z urządzenia.",
+                confirmText: "Usuń",
+                cancelText: "Anuluj",
+                tone: "danger"
+            });
+            if (!confirmed) return;
+            await deleteAutosaveEntryById(
+                String(btn.dataset.autosaveId || "").trim(),
+                String(btn.dataset.autosaveSource || "").trim()
+            );
             loadSavedProjects(listEl || list);
+        };
+    });
+
+    list.querySelectorAll(".projectMenuEditBtn").forEach(btn => {
+        btn.onclick = async (e) => {
+            e.stopPropagation();
+            closeStartProjectMenus(list);
+            const autosaveId = String(btn.dataset.autosaveId || "").trim();
+            if (autosaveId) {
+                const allAutosaves = await getAutosaveProjectEntries();
+                const freshAutosave = allAutosaves.find((entry) => String(entry.id || "") === autosaveId);
+                if (!freshAutosave?.data) {
+                    showAppToast("Brak autosave do wczytania.", "info");
+                    return;
+                }
+                showBusyOverlay("Wczytywanie autosave…");
+                await loadProjectFromData(freshAutosave.data);
+                hideBusyOverlay();
+                window.currentProjectMeta = null;
+                if (!listEl) {
+                    savedPanel.style.display = "none";
+                    loadSavedProjects();
+                } else {
+                    showEditorView();
+                }
+                return;
+            }
+            const path = String(btn.dataset.path || "").trim();
+            if (!path) return;
+            showBusyOverlay("Wczytywanie projektu…");
+            await loadProjectFromStorage(path, String(btn.dataset.thumbpath || "").trim());
+            hideBusyOverlay();
+            if (!listEl) {
+                savedPanel.style.display = "none";
+                loadSavedProjects();
+            } else {
+                showEditorView();
+            }
+        };
+    });
+
+    list.querySelectorAll(".projectMenuDownloadBtn").forEach(btn => {
+        btn.onclick = async (e) => {
+            e.stopPropagation();
+            closeStartProjectMenus(list);
+            const autosaveId = String(btn.dataset.autosaveId || "").trim();
+            if (autosaveId) {
+                const allAutosaves = await getAutosaveProjectEntries();
+                const autosaveEntry = allAutosaves.find((entry) => String(entry.id || "") === autosaveId);
+                await downloadAutosaveProjectFile(autosaveEntry);
+                return;
+            }
+            const path = String(btn.dataset.path || "").trim();
+            if (!path) return;
+            await downloadSavedProjectFromStorage(path, String(btn.dataset.name || "").trim());
+        };
+    });
+
+    list.querySelectorAll(".projectMenuDeleteBtn").forEach(btn => {
+        btn.onclick = async (e) => {
+            e.stopPropagation();
+            closeStartProjectMenus(list);
+            const autosaveId = String(btn.dataset.autosaveId || "").trim();
+            if (autosaveId) {
+                const confirmed = await showActionConfirmModal({
+                    title: "Usunąć autosave?",
+                    message: "Lokalny autosave tego projektu zostanie usunięty z urządzenia.",
+                    confirmText: "Usuń",
+                    cancelText: "Anuluj",
+                    tone: "danger"
+                });
+                if (!confirmed) return;
+                await deleteAutosaveEntryById(
+                    autosaveId,
+                    String(btn.dataset.autosaveSource || "").trim()
+                );
+                loadSavedProjects(listEl || list);
+                return;
+            }
+            const path = String(btn.dataset.path || "").trim();
+            if (!path) return;
+            const confirmed = await showActionConfirmModal({
+                title: "Usunąć projekt?",
+                message: "Projekt oraz jego miniatura zostaną usunięte z zapisanych projektów.",
+                confirmText: "Usuń",
+                cancelText: "Anuluj",
+                tone: "danger"
+            });
+            if (!confirmed) return;
+            await deleteSavedProjectFiles(path, String(btn.dataset.thumbpath || "").trim());
+            loadSavedProjects(list);
+        };
+    });
+
+    list.querySelectorAll(".start-menu-toggle").forEach(btn => {
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            const menu = btn.parentElement?.querySelector(".start-card-menu");
+            if (!menu) return;
+            const shouldOpen = !menu.classList.contains("is-open");
+            closeStartProjectMenus(list);
+            if (shouldOpen) menu.classList.add("is-open");
+        };
+    });
+
+    list.querySelectorAll(".start-select-checkbox").forEach(checkbox => {
+        checkbox.onchange = (e) => {
+            e.stopPropagation();
+            setStartProjectSelection(checkbox.dataset.selectionKey, !!checkbox.checked, list);
+        };
+        checkbox.onclick = (e) => e.stopPropagation();
+    });
+
+    list.querySelectorAll(".projectMenuSelectBtn").forEach(btn => {
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            const key = String(btn.dataset.selectionKey || "").trim();
+            if (!key) return;
+            setStartProjectSelection(key, !startProjectsSelection.has(key), list);
+            closeStartProjectMenus(list);
         };
     });
 
     // Kliknięcie w kartę = Otwórz (bez kliknięć na przyciskach)
     if (isStartList) {
+        startProjectsRenderedEntries = currentStartEntries;
+        bindStartProjectsBulkBar(list);
+        syncStartProjectsSelectionUi(list);
         list.querySelectorAll(".start-card").forEach(card => {
             card.onclick = (e) => {
-                if (e.target && e.target.closest("button")) return;
+                if (e.target && e.target.closest("button, input, label, .start-card-menu")) return;
+                const selectionKey = String(card.dataset.selectionKey || "").trim();
+                if (selectionKey && startProjectsSelection.size > 0) {
+                    setStartProjectSelection(selectionKey, !startProjectsSelection.has(selectionKey), list);
+                    return;
+                }
                 const openBtn = card.querySelector(".openProjectBtn, .openAutosaveBtn");
                 if (openBtn) openBtn.click();
             };
         });
+    } else {
+        closeStartProjectMenus(list);
     }
 }
 
@@ -1799,524 +4079,210 @@ async function loadSavedProjects(listEl) {
 // ====================================================================
 async function loadProjectFromData(data, opts = {}) {
     if (!data || !data.pages) return showAppToast("Nieprawidłowy plik projektu!", "error");
+    const loadSource = String((opts && opts.source) || "").trim().toLowerCase();
+    const isHistoryReplayLoad = (
+        loadSource === "history" ||
+        loadSource === "undo" ||
+        loadSource === "redo" ||
+        loadSource === "restore"
+    );
+    if (window.__projectLoadMutex) {
+        try { await window.__projectLoadMutex; } catch (_e) {}
+    }
+    let releaseProjectLoadMutex = null;
+    const loadMutex = new Promise((resolve) => { releaseProjectLoadMutex = resolve; });
+    window.__projectLoadMutex = loadMutex;
+    const perfSleepBeforeLoad = (window.__enablePagePerfSleep !== false);
+    window.__enablePagePerfSleep = false;
     window.__projectLoadInProgress = true;
     try {
-    clearKonvaGlobalDragState();
-    const oldPages = Array.isArray(window.pages) ? window.pages : [];
-    oldPages.forEach((p) => {
-        const oldStage = p && p.stage;
-        if (!oldStage || (typeof oldStage.isDestroyed === "function" && oldStage.isDestroyed())) return;
-        try { if (typeof oldStage.stopDrag === "function") oldStage.stopDrag(); } catch (_e) {}
-        try { oldStage.destroy(); } catch (_e) {}
-    });
-    document.getElementById("pagesContainer").innerHTML = "";
-    window.pages = [];
-    window.CATALOG_STYLE = data.catalogStyle || "default";
-    setProjectTitle(data.name || DEFAULT_PROJECT_TITLE);
+        clearKonvaGlobalDragState();
+        if (typeof window.releaseImageMemoryCaches === "function") {
+            try { window.releaseImageMemoryCaches(); } catch (_e) {}
+        }
+        const oldPages = Array.isArray(window.pages) ? window.pages : [];
+        oldPages.forEach((p) => {
+            const oldStage = p && p.stage;
+            if (!oldStage || (typeof oldStage.isDestroyed === "function" && oldStage.isDestroyed())) return;
+            try { if (typeof oldStage.stopDrag === "function") oldStage.stopDrag(); } catch (_e) {}
+            try { oldStage.destroy(); } catch (_e) {}
+        });
 
-    for (const p of data.pages) {
-        const page = window.createNewPage();
-        const layer = page.layer;
+        const pagesContainer = document.getElementById("pagesContainer");
+        if (pagesContainer) pagesContainer.innerHTML = "";
+        window.pages = [];
+        try { window.hideFloatingButtons?.(); } catch (_e) {}
+        try { window.hidePageEditPanel?.(); } catch (_e) {}
+        try { window.hideTextToolbar?.(); } catch (_e) {}
+        try { window.hideTextPanel?.(); } catch (_e) {}
+        try { document.getElementById("floatingMenu")?.remove(); } catch (_e) {}
+        try { document.getElementById("floatingSubmenu")?.remove(); } catch (_e) {}
+        try { document.getElementById("groupQuickMenu")?.remove(); } catch (_e) {}
+        const loadStamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        window.__projectLoadStamp = loadStamp;
+        window.CATALOG_STYLE = data.catalogStyle || "default";
+        setProjectTitle(data.name || DEFAULT_PROJECT_TITLE);
+        syncSaveFormWithCurrentProject({
+            forceName: String(data.name || "").trim(),
+            forceDate: String(data.date || "").trim() || getTodayIsoDate(),
+            overwriteName: true,
+            overwriteDate: true
+        });
 
-        const restoreDirectNodeRecursive = async (payload) => {
-            if (!payload || !window.Konva) return null;
-
-            if (payload.type === "textNode") {
-                const t = new Konva.Text({
-                    x: payload.x ?? 0,
-                    y: payload.y ?? 0,
-                    width: payload.width,
-                    height: payload.height,
-                    scaleX: payload.scaleX || 1,
-                    scaleY: payload.scaleY || 1,
-                    rotation: payload.rotation || 0,
-                    text: payload.text || "",
-                    fontSize: payload.fontSize || 12,
-                    fontFamily: payload.fontFamily || "Arial",
-                    fill: payload.fill || "#000",
-                    fontStyle: payload.fontStyle || "normal",
-                    align: payload.align || "left",
-                    lineHeight: payload.lineHeight || 1.2,
-                    draggable: payload.draggable !== false,
-                    listening: payload.listening !== false
-                });
-                if (typeof t.textDecoration === "function" && payload.textDecoration) {
-                    t.textDecoration(payload.textDecoration);
-                }
-                if (payload.attrs) t.setAttrs(payload.attrs);
-                if (payload.attrs && payload.attrs.directModuleId) {
-                    t.setAttr("_directSavedFill", payload.fill || t.fill() || "#000000");
-                    t.setAttr("_directSavedFontFamily", payload.fontFamily || t.fontFamily() || "Arial");
-                    t.setAttr("_directSavedFontStyle", payload.fontStyle || t.fontStyle() || "normal");
-                    t.setAttr("_directSavedTextDecoration", payload.textDecoration || (t.textDecoration ? t.textDecoration() : ""));
-                }
-                const editFn = window.enableEditableText || window.enableTextEditing;
-                if (typeof editFn === "function" && (t.getAttr("isName") || t.getAttr("isIndex") || t.getAttr("isProductText") || t.getAttr("isCustomPackageInfo"))) {
-                    try { editFn(t, page); } catch (_e) {}
-                }
-                return t;
-            }
-
-            if (payload.type === "rectNode") {
-                const r = new Konva.Rect({
-                    x: payload.x ?? 0,
-                    y: payload.y ?? 0,
-                    width: payload.width || 0,
-                    height: payload.height || 0,
-                    scaleX: payload.scaleX || 1,
-                    scaleY: payload.scaleY || 1,
-                    rotation: payload.rotation || 0,
-                    fill: payload.fill,
-                    opacity: payload.opacity ?? 1,
-                    stroke: payload.stroke,
-                    strokeWidth: payload.strokeWidth,
-                    draggable: payload.draggable === true,
-                    listening: payload.listening !== false
-                });
-                if (payload.attrs) r.setAttrs(payload.attrs);
-                return r;
-            }
-
-            if (payload.type === "imageNode" && payload.src) {
-                return await new Promise((resolve) => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const safeCrop = normalizeSavedCrop(payload.crop, img.naturalWidth, img.naturalHeight);
-                        const k = new Konva.Image({
-                            x: payload.x ?? 0,
-                            y: payload.y ?? 0,
-                            image: img,
-                            width: payload.width || img.naturalWidth,
-                            height: payload.height || img.naturalHeight,
-                            scaleX: payload.scaleX || 1,
-                            scaleY: payload.scaleY || 1,
-                            rotation: payload.rotation || 0,
-                            draggable: payload.draggable !== false,
-                            listening: payload.listening !== false,
-                            opacity: payload.opacity ?? 1
-                        });
-                        if (safeCrop && typeof k.crop === "function") {
-                            k.crop(safeCrop);
-                        }
-                        if (payload.attrs) k.setAttrs(payload.attrs);
-                        const payloadSlotRaw = Number(
-                            payload && payload.attrs && payload.attrs.slotIndex !== undefined
-                                ? payload.attrs.slotIndex
-                                : null
-                        );
-                        const payloadHasSlot = Number.isFinite(payloadSlotRaw);
-                        const payloadIsUserImage = !!(payload && payload.attrs && payload.attrs.isUserImage);
-                        const payloadIsProductImage = !!(payload && payload.attrs && payload.attrs.isProductImage) && payloadHasSlot && !payloadIsUserImage;
-                        if (k.setAttr) {
-                            k.setAttr("slotIndex", payloadHasSlot ? payloadSlotRaw : null);
-                            k.setAttr("isProductImage", payloadIsProductImage);
-                            k.setAttr("isUserImage", payloadIsUserImage || !payloadHasSlot);
-                        }
-                        if (typeof k.imageSmoothingEnabled === "function") k.imageSmoothingEnabled(true);
-                        // image attrs mogą nadpisać src; wymuś po restore
-                        if (k.setAttr) k.setAttr("originalSrc", payload.src);
-                        if (typeof window.setupProductImageDrag === "function" && (k.getAttr("isProductImage") || k.getAttr("directModuleId"))) {
-                            try { window.setupProductImageDrag(k, layer); } catch (_e) {}
-                        }
-                        resolve(k);
-                    };
-                    img.onerror = () => resolve(null);
-                    img.crossOrigin = "Anonymous";
-                    img.src = payload.src;
-                });
-            }
-
-            if (payload.type === "groupNode") {
-                const g = new Konva.Group({
-                    x: payload.x ?? 0,
-                    y: payload.y ?? 0,
-                    scaleX: payload.scaleX || 1,
-                    scaleY: payload.scaleY || 1,
-                    rotation: payload.rotation || 0,
-                    draggable: payload.draggable !== false,
-                    listening: payload.listening !== false,
-                    name: payload.name || ""
-                });
-                if (payload.attrs) g.setAttrs(payload.attrs);
-                const children = Array.isArray(payload.children) ? payload.children : [];
-                for (const childPayload of children) {
-                    const childNode = await restoreDirectNodeRecursive(childPayload);
-                    if (childNode) g.add(childNode);
-                }
-                if (g.getAttr && g.getAttr("isPriceGroup")) {
-                    const bindFn = window.CustomStyleDirectHooks && window.CustomStyleDirectHooks.bindDirectPriceGroupEditor;
-                    if (typeof bindFn === "function") {
-                        try { bindFn(g, page); } catch (_e) {}
+        const savedPageWidth = Number(data.pageWidth);
+        const savedPageHeight = Number(data.pageHeight);
+        const rawSavedOrientation = String(data.pageOrientation || "").trim().toLowerCase();
+        const normalizedSavedOrientation = (
+            rawSavedOrientation === "landscape" || rawSavedOrientation === "horizontal" || rawSavedOrientation === "l"
+        )
+            ? "landscape"
+            : (rawSavedOrientation === "portrait" || rawSavedOrientation === "vertical" || rawSavedOrientation === "p")
+                ? "portrait"
+                : (Number.isFinite(savedPageWidth) && Number.isFinite(savedPageHeight) && savedPageWidth > 0 && savedPageHeight > 0)
+                    ? (savedPageWidth > savedPageHeight ? "landscape" : "portrait")
+                    : null;
+        const hasSavedPageSettings = (
+            (Number.isFinite(savedPageWidth) && savedPageWidth > 100 && Number.isFinite(savedPageHeight) && savedPageHeight > 100) ||
+            !!String(data.pageFormat || "").trim() ||
+            !!normalizedSavedOrientation
+        );
+        if (hasSavedPageSettings) {
+            if (typeof window.setCatalogPageSettings === "function") {
+                await window.setCatalogPageSettings(
+                    {
+                        format: data.pageFormat || null,
+                        orientation: normalizedSavedOrientation || null,
+                        width: (Number.isFinite(savedPageWidth) && savedPageWidth > 100) ? savedPageWidth : undefined,
+                        height: (Number.isFinite(savedPageHeight) && savedPageHeight > 100) ? savedPageHeight : undefined
+                    },
+                    {
+                        rebuildExistingPages: false,
+                        resizeInPlaceWhenNoRebuild: false,
+                        silent: true
                     }
-                }
-                return g;
-            }
-
-            return null;
-        };
-
-        for (const obj of p.objects) {
-
-            if (obj.type === "directGroup" && obj.data) {
-                const directGroup = await restoreDirectNodeRecursive(obj.data);
-                if (directGroup) {
-                    layer.add(directGroup);
-                }
-                continue;
-            }
-
-            if (obj.type === "directNode" && obj.data) {
-                const directNode = await restoreDirectNodeRecursive(obj.data);
-                if (directNode) {
-                    layer.add(directNode);
-                }
-                continue;
-            }
-
-            if (obj.type === "genericGroup" && obj.data) {
-                const genericGroup = await restoreDirectNodeRecursive(obj.data);
-                if (genericGroup) {
-                    layer.add(genericGroup);
-                }
-                continue;
-            }
-
-            // TŁO
-            if (obj.type === "background") {
-                const bg = layer.findOne(n => n.getAttr("isPageBg"));
-                if (bg) bg.fill(obj.fill);
-                continue;
-            }
-
-            // TEKST
-            if (obj.type === "text") {
-                const t = new Konva.Text({
-                    x: obj.x, y: obj.y,
-                    text: obj.text || "",
-                    width: obj.width,
-                    height: obj.height,
-                    fontSize: obj.fontSize,
-                    fontFamily: obj.fontFamily,
-                    fill: obj.fill,
-                    fontStyle: obj.fontStyle || "normal",
-                    align: obj.align || "left",
-                    lineHeight: obj.lineHeight || 1.2,
-                    rotation: obj.rotation,
-                    draggable: true
-                });
-                t.setAttrs({
-                    isName: obj.isName || false,
-                    isPrice: obj.isPrice || false,
-                    isIndex: obj.isIndex || false,
-                    slotIndex: obj.slotIndex
-                });
-                layer.add(t);
-                const editFn = window.enableEditableText || window.enableTextEditing;
-                if (typeof editFn === "function") editFn(t, page);
-                continue;
-            }
-
-            // ZDJĘCIA
-            if (obj.type === "image" && obj.src) {
-                await new Promise(res => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const safeCrop = normalizeSavedCrop(obj.crop, img.naturalWidth, img.naturalHeight);
-                        const slotIndexRaw = Number(obj.slotIndex);
-                        const hasSlot = Number.isFinite(slotIndexRaw);
-                        const isUserImage = !!obj.isUserImage;
-                        const isProductImage = !!obj.isProductImage && hasSlot && !isUserImage;
-                        const k = new Konva.Image({
-                            x: obj.x, y: obj.y,
-                            image: img,
-                            width: obj.width || img.naturalWidth,
-                            height: obj.height || img.naturalHeight,
-                            scaleX: obj.scaleX || 1,
-                            scaleY: obj.scaleY || 1,
-                            rotation: obj.rotation || 0,
-                            draggable: true
-                        });
-                        if (safeCrop && typeof k.crop === "function") {
-                            k.crop(safeCrop);
-                        }
-                        k.setAttr("slotIndex", hasSlot ? slotIndexRaw : null);
-                        k.setAttr("originalSrc", obj.src);
-                        k.setAttr("isProductImage", isProductImage);
-                        k.setAttr("isUserImage", isUserImage || !hasSlot);
-                        k.setAttr("isOverlayElement", obj.isOverlayElement || false);
-                        k.setAttr("isTNZBadge", obj.isTNZBadge || false);
-                        k.setAttr("isCountryBadge", obj.isCountryBadge || false);
-                        if (typeof k.imageSmoothingEnabled === "function") {
-                            k.imageSmoothingEnabled(true);
-                        }
-                        layer.add(k);
-                        if (typeof window.addImageShadow === "function") {
-                            window.addImageShadow(layer, k);
-                        }
-                        res();
-                    };
-                    img.crossOrigin = "Anonymous";
-                    img.src = obj.src;
-                });
-                continue;
-            }
-
-            // CENA (GROUP)
-            if (obj.type === "priceGroup") {
-                const g = new Konva.Group({
-                    x: obj.x ?? 0,
-                    y: obj.y ?? 0,
-                    scaleX: obj.scaleX || 1,
-                    scaleY: obj.scaleY || 1,
-                    rotation: obj.rotation || 0,
-                    draggable: obj.draggable !== false,
-                    listening: true,
-                    name: obj.name || "priceGroup"
-                });
-                g.setAttrs({
-                    isProductText: true,
-                    isPrice: true,
-                    isPriceGroup: true,
-                    slotIndex: obj.slotIndex ?? null
-                });
-
-                const parts = Array.isArray(obj.parts) ? obj.parts : [];
-                parts.forEach(part => {
-                    const t = new Konva.Text({
-                        x: part.x ?? 0,
-                        y: part.y ?? 0,
-                        text: part.text || "",
-                        width: part.width,
-                        height: part.height,
-                        fontSize: part.fontSize || 12,
-                        fontFamily: part.fontFamily || "Arial",
-                        fill: part.fill || "#000000",
-                        fontStyle: part.fontStyle || "normal",
-                        align: part.align || "left",
-                        lineHeight: part.lineHeight || 1.2
-                    });
-                    g.add(t);
-                });
-
-                layer.add(g);
-                continue;
-            }
-
-            // BARCODE
-            if (obj.type === "barcode" && obj.original) {
-                await new Promise(res => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const k = new Konva.Image({
-                            x: obj.x, y: obj.y,
-                            image: img,
-                            scaleX: obj.scaleX || 1,
-                            scaleY: obj.scaleY || 1,
-                            rotation: obj.rotation || 0,
-                            draggable: true
-                        });
-                        k.setAttrs({
-                            isBarcode: true,
-                            slotIndex: obj.slotIndex,
-                            barcodeOriginalSrc: obj.original,
-                            barcodeColor: obj.color
-                        });
-                        layer.add(k);
-                        res();
-                    };
-                    img.src = obj.original;
-                });
-                continue;
-            }
-
-            // BOXY – poprawne wczytywanie skali
-            if (obj.type === "box") {
-                const box = new Konva.Rect({
-                    x: obj.x,
-                    y: obj.y,
-                    width: obj.width,
-                    height: obj.height,
-                    fill: obj.fill !== undefined ? obj.fill : "#ffffff",
-                    stroke: obj.stroke || "rgba(0,0,0,0.06)",
-                    strokeWidth: obj.strokeWidth ?? 1,
-                    cornerRadius: obj.cornerRadius ?? 10,
-                    shadowColor: obj.shadowColor || "rgba(0,0,0,0.18)",
-                    shadowBlur: obj.shadowBlur ?? 30,
-                    shadowOffset: { x: obj.shadowOffsetX ?? 0, y: obj.shadowOffsetY ?? 12 },
-                    shadowOpacity: obj.shadowOpacity ?? 0.8,
-                    draggable: true,
-                    visible: obj.visible !== false,
-                    listening: obj.listening !== false
-                });
-
-                box.setAttr("isBox", true);
-                box.setAttr("slotIndex", obj.slotIndex ?? null);
-                box.setAttr("isShape", !!obj.isShape);
-                box.setAttr("isPreset", !!obj.isPreset);
-                if (obj.selectable !== undefined) box.setAttr("selectable", obj.selectable);
-                box.setAttr("isHiddenByCatalogStyle", !!obj.isHiddenByCatalogStyle);
-
-                // Skalujemy PO utworzeniu – zero dublowania!
-                box.scaleX(obj.scaleX || 1);
-                box.scaleY(obj.scaleY || 1);
-
-                layer.add(box);
-                continue;
-            }
-        }
-
-        layer.batchDraw();
-        try {
-            window.dispatchEvent(new CustomEvent("canvasModified", { detail: page.stage }));
-        } catch (_e) {}
-    }
-
-    // Po odczycie przywróć wizualny styl katalogu (np. czerwone koła ceny, układ elegancki).
-    if (typeof window.applyCatalogStyleVisual === "function") {
-        window.applyCatalogStyleVisual(window.CATALOG_STYLE || "default");
-    } else if (typeof window.applyCatalogStyle === "function") {
-        window.applyCatalogStyle(window.CATALOG_STYLE || "default");
-    }
-
-    // Przywróć zapisane style tekstów dla modułów direct ze styl-wlasny.js
-    // (style katalogu potrafią nadpisać np. biały kolor ceny na czarny, czasem z opóźnieniem).
-    const restoreDirectTextStyles = () => {
-        try {
-            (Array.isArray(window.pages) ? window.pages : []).forEach((page) => {
-                const layer = page && page.layer;
-                if (!layer || !layer.find) return;
-                const directTexts = layer.find((n) =>
-                    n instanceof Konva.Text &&
-                    n.getAttr &&
-                    !!n.getAttr("directModuleId") &&
-                    !!n.getAttr("_directSavedFill")
                 );
-                directTexts.forEach((t) => {
-                    try {
-                        const fill = t.getAttr("_directSavedFill");
-                        const ff = t.getAttr("_directSavedFontFamily");
-                        const fs = t.getAttr("_directSavedFontStyle");
-                        const td = t.getAttr("_directSavedTextDecoration");
-                        if (fill && typeof t.fill === "function") t.fill(fill);
-                        if (ff && typeof t.fontFamily === "function") t.fontFamily(ff);
-                        if (fs && typeof t.fontStyle === "function") t.fontStyle(fs);
-                        if (typeof t.textDecoration === "function") t.textDecoration(td || "");
-                    } catch (_e) {}
-                });
-                layer.batchDraw?.();
-                page.transformerLayer?.batchDraw?.();
-            });
-        } catch (_e) {}
-    };
-
-    const stabilizePriceGroupsAfterLoad = () => {
-        try {
-            const pagesList = Array.isArray(window.pages) ? window.pages : [];
-            const directHooks = window.CustomStyleDirectHooks || {};
-            const bindDirectPriceGroupEditor = typeof directHooks.bindDirectPriceGroupEditor === "function"
-                ? directHooks.bindDirectPriceGroupEditor
-                : null;
-
-            const realignLegacyPriceGroup = (priceGroup) => {
-                if (!priceGroup || !priceGroup.getChildren) return;
-                const texts = (priceGroup.getChildren() || []).filter((n) => n instanceof Konva.Text);
-                if (texts.length < 2) return;
-
-                const pickByText = (pattern) => texts.find((t) => pattern.test(String(t.text?.() || "")));
-                const unitNode = pickByText(/\/\s*(SZT|KG|L|ML|G|OPAK)/i) || pickByText(/^\s*[£€$]\s*\/\s*/i);
-                const mainNode = texts.slice().sort((a, b) => Number(b.fontSize?.() || 0) - Number(a.fontSize?.() || 0))[0] || null;
-                const decNode = texts.find((t) => t !== mainNode && t !== unitNode) || texts.find((t) => t !== mainNode) || null;
-                if (!mainNode || !decNode || !unitNode) return;
-
-                const gap = 4;
-                const baseX = Number(mainNode.x?.() || 0);
-                const baseY = Number(mainNode.y?.() || 0);
-                const mainW = Number(mainNode.width?.() || 0);
-                const mainH = Number(mainNode.height?.() || 0);
-                const decH = Number(decNode.height?.() || 0);
-
-                decNode.x(baseX + mainW + gap);
-                decNode.y(baseY + (mainH * 0.10));
-                unitNode.x(baseX + mainW + gap);
-                unitNode.y(baseY + (decH * 1.5));
-
-                if (typeof unitNode.measureSize === "function" && typeof unitNode.width === "function") {
-                    const measured = unitNode.measureSize(unitNode.text?.() || "");
-                    const minW = Math.max(36, Math.ceil((Number(measured?.width) || 0) + 8));
-                    if (Number(unitNode.width?.() || 0) < minW) unitNode.width(minW);
+            } else {
+                if (Number.isFinite(savedPageWidth) && savedPageWidth > 100) window.W = savedPageWidth;
+                if (Number.isFinite(savedPageHeight) && savedPageHeight > 100) window.H = savedPageHeight;
+                try {
+                    document.documentElement.style.setProperty("--page-width", `${Number(window.W || 0)}px`);
+                    document.documentElement.style.setProperty("--panel-center-offset", "0px");
+                } catch (_e) {}
+                if (typeof window.recomputeCatalogGridMetrics === "function") {
+                    try { window.recomputeCatalogGridMetrics(window.LAYOUT_MODE || "layout6"); } catch (_e) {}
                 }
-            };
-
-            pagesList.forEach((page) => {
-                const layer = page && page.layer;
-                if (!layer || typeof layer.find !== "function") return;
-
-                const priceGroups = layer.find((n) =>
-                    n instanceof Konva.Group &&
-                    n.getAttr &&
-                    n.getAttr("isPriceGroup")
-                );
-
-                priceGroups.forEach((group) => {
-                    try {
-                        if (bindDirectPriceGroupEditor && group.getAttr("directModuleId")) {
-                            bindDirectPriceGroupEditor(group, page);
-                        } else {
-                            realignLegacyPriceGroup(group);
-                        }
-                    } catch (_err) {}
-                });
-
-                layer.batchDraw?.();
-                page.transformerLayer?.batchDraw?.();
-            });
-        } catch (_e) {}
-    };
-    restoreDirectTextStyles();
-    setTimeout(restoreDirectTextStyles, 0);
-    setTimeout(restoreDirectTextStyles, 80);
-    setTimeout(restoreDirectTextStyles, 220);
-    stabilizePriceGroupsAfterLoad();
-    [0, 80, 220, 520, 980].forEach((ms) => setTimeout(stabilizePriceGroupsAfterLoad, ms));
-    try {
-        if (document?.fonts?.ready && typeof document.fonts.ready.then === "function") {
-            document.fonts.ready.then(() => {
-                stabilizePriceGroupsAfterLoad();
-                setTimeout(stabilizePriceGroupsAfterLoad, 120);
-            }).catch(() => {});
+            }
         }
-    } catch (_e) {}
-    try {
-        const fixSelectability = window.CustomStyleDirectHooks && window.CustomStyleDirectHooks.restoreDirectModuleNodeSelectabilityOnPage;
-        if (typeof fixSelectability === "function") {
-            (Array.isArray(window.pages) ? window.pages : []).forEach((p) => {
-                try { fixSelectability(p); } catch (_e) {}
-            });
+
+        const savedPages = Array.isArray(data.pages) ? data.pages : [];
+        const hydrateNowLimit = getInitialHydratedPagesLimit(opts, savedPages.length);
+        const hydratedPages = [];
+        const immediateHydrationEntries = [];
+
+        for (let i = 0; i < savedPages.length; i++) {
+            const savedPage = (savedPages[i] && typeof savedPages[i] === "object") ? savedPages[i] : {};
+            const page = window.createNewPage();
+            page.__projectLoadStamp = loadStamp;
+            page.__savedUserProductGroups = normalizeSavedUserProductGroups(
+                savedPage.userProductGroups || savedPage.groupedProductKeys
+            );
+            const savedProducts = cloneSavedPageProducts(savedPage.products);
+            if (savedProducts.length) {
+                page.products = savedProducts;
+                page.slotObjects = Array(savedProducts.length).fill(null);
+                page.barcodeObjects = Array(savedProducts.length).fill(null);
+                page.barcodePositions = Array(savedProducts.length).fill(null);
+                page.boxScales = Array(savedProducts.length).fill(null);
+            }
+            if (savedPage.settings && typeof savedPage.settings === "object") {
+                page.settings = {
+                    ...(page.settings && typeof page.settings === "object" ? page.settings : {}),
+                    ...cloneProjectSerializable(savedPage.settings, {})
+                };
+            }
+            if (i < hydrateNowLimit) {
+                markPageDeferredHydration(page, null);
+                hydratedPages.push(page);
+                immediateHydrationEntries.push({ page, savedPage });
+            } else {
+                markPageDeferredHydration(page, savedPage);
+            }
         }
-    } catch (_e) {}
 
-    // Przywróć zoom UI po wczytaniu projektu
-    if (typeof window.createZoomSlider === "function") {
-        window.createZoomSlider();
-    } else if (typeof createZoomSlider === "function") {
-        createZoomSlider();
-    }
+        if (immediateHydrationEntries.length) {
+            const hydrationConcurrency = Math.max(
+                1,
+                Number(opts.hydrationConcurrency || PROJECT_INITIAL_PAGE_HYDRATION_CONCURRENCY) || 1
+            );
+            await mapWithConcurrencyLimit(
+                immediateHydrationEntries,
+                hydrationConcurrency,
+                async ({ page, savedPage }) => {
+                    if (!isPageHydrationContextActive(page)) return;
+                    await restoreSavedObjectsForPage(page, savedPage);
+                }
+            );
+        }
 
-    if (!opts.silent) showAppToast("Projekt wczytany!", "success");
-    if (!window.projectHistory?.isApplying && typeof window.resetProjectHistory === "function") {
-        window.resetProjectHistory(data);
-    }
+        normalizeLoadedProductGroupsForPages(
+            hydratedPages.length ? hydratedPages : (Array.isArray(window.pages) ? window.pages : [])
+        );
+
+        if (typeof window.applyCatalogStyleVisual === "function") {
+            window.applyCatalogStyleVisual(window.CATALOG_STYLE || "default");
+        } else if (typeof window.applyCatalogStyle === "function") {
+            window.applyCatalogStyle(window.CATALOG_STYLE || "default");
+        }
+
+        runPostLoadRepairsForPages(
+            hydratedPages.length ? hydratedPages : (Array.isArray(window.pages) ? window.pages : []),
+            { schedule: true }
+        );
+
+        if (typeof window.createZoomSlider === "function") {
+            window.createZoomSlider();
+        } else if (typeof createZoomSlider === "function") {
+            createZoomSlider();
+        }
+
+        refreshPdfButtonState();
+        try { document.getElementById("floatingMenu")?.remove(); } catch (_e) {}
+        try { document.getElementById("floatingSubmenu")?.remove(); } catch (_e) {}
+        try { document.getElementById("groupQuickMenu")?.remove(); } catch (_e) {}
+
+        if (!opts.silent) showAppToast("Projekt wczytany!", "success");
+        if (!window.projectHistory?.isApplying && typeof window.resetProjectHistory === "function") {
+            window.resetProjectHistory(data);
+        }
     } finally {
+        window.__enablePagePerfSleep = perfSleepBeforeLoad;
+        if (typeof window.refreshPagesPerf === "function") {
+            setTimeout(() => window.refreshPagesPerf(), 0);
+            setTimeout(() => window.refreshPagesPerf(), 120);
+        }
         window.__projectLoadInProgress = false;
+        if (!isHistoryReplayLoad) {
+            try {
+                const firstStage = window.pages && window.pages[0] && window.pages[0].stage;
+                if (firstStage) {
+                    setTimeout(() => {
+                        try {
+                            window.dispatchEvent(new CustomEvent("canvasModified", { detail: firstStage }));
+                        } catch (_e) {}
+                    }, 0);
+                }
+            } catch (_e) {}
+        }
+        if (releaseProjectLoadMutex) releaseProjectLoadMutex();
+        if (window.__projectLoadMutex === loadMutex) window.__projectLoadMutex = null;
     }
 }
 window.loadProjectFromData = loadProjectFromData;
 
 async function loadProjectFromStorage(path, thumbPath) {
     const fileRef = ref(storage, path);
-    const url = await getDownloadURL(fileRef);
-    const res = await fetch(url);
-    const data = await res.json();
+    const loaded = await loadProjectDataFromStorageRef(fileRef);
+    const data = loaded && loaded.data ? loaded.data : null;
     window.currentProjectMeta = {
         name: data?.name || "",
         path,
@@ -2349,7 +4315,7 @@ async function loadProjectFromStorage(path, thumbPath) {
 // ====================================================================
 // 7. OTWARCIE PANELU
 // ====================================================================
-const savedBtn = document.querySelector('[title="Elementy zapisane"]');
+const savedBtn = document.querySelector('.sidebar-item[data-tooltip="Elementy zapisane"]');
 if (savedBtn) {
     savedBtn.onclick = () => {
         savedPanel.style.display = "flex";
@@ -2365,6 +4331,9 @@ function showStartView() {
     const editorView = document.getElementById("editorView");
     if (startView) startView.style.display = "block";
     if (editorView) editorView.style.display = "none";
+    if (typeof window.hidePageEditPanel === "function") {
+        window.hidePageEditPanel();
+    }
     const list = document.getElementById("startProjectsList");
     if (list) loadSavedProjects(list);
 }
@@ -2374,6 +4343,12 @@ function showEditorView() {
     const editorView = document.getElementById("editorView");
     if (startView) startView.style.display = "none";
     if (editorView) editorView.style.display = "block";
+    refreshPdfButtonState();
+    setTimeout(() => {
+        if (typeof window.showPageEditForCurrentPage === "function") {
+            window.showPageEditForCurrentPage();
+        }
+    }, 0);
 }
 window.showEditorView = showEditorView;
 
@@ -2384,11 +4359,15 @@ function ensureInitialBlankPage() {
     window.createNewPage();
     window.projectOpen = true;
     window.projectDirty = true;
-    const pdfButton = document.getElementById("pdfButton");
-    if (pdfButton) pdfButton.disabled = false;
+    refreshPdfButtonState();
     if (typeof window.createZoomSlider === "function") {
         window.createZoomSlider();
     }
+    setTimeout(() => {
+        if (typeof window.showPageEditForCurrentPage === "function") {
+            window.showPageEditForCurrentPage();
+        }
+    }, 0);
     return true;
 }
 
@@ -2398,7 +4377,7 @@ if (homeLogo) {
     homeLogo.addEventListener("click", async (e) => {
         e.preventDefault();
         const targetUrl = homeLogo.getAttribute("data-start-url") || homeLogo.getAttribute("href") || "kreator.html";
-        if (window.projectOpen) {
+        if (window.projectOpen || shouldAskBeforeLeave()) {
             const ok = await showLeaveConfirmModal(window.currentProjectName);
             if (!ok) return;
         }
@@ -2427,6 +4406,21 @@ async function runCreateNewProjectFlow() {
     }
     window.currentProjectMeta = null;
     window.projectDirty = true;
+    if (typeof window.setCatalogPageSettings === "function") {
+        try {
+            await window.setCatalogPageSettings(
+                {
+                    format: "A4",
+                    orientation: "portrait"
+                },
+                {
+                    rebuildExistingPages: false,
+                    resizeInPlaceWhenNoRebuild: false,
+                    silent: true
+                }
+            );
+        } catch (_e) {}
+    }
     showEditorView();
     ensureInitialBlankPage();
     return true;
@@ -2454,6 +4448,11 @@ if (startCreateProjectBtn) {
 
 // Szybki kreator – też pytaj o zapis
 window.openQuickCreator = async function() {
+    if (typeof window.isQuickCreatorEnabled === "function" && !window.isQuickCreatorEnabled()) {
+        const quickModal = document.getElementById('quickCreatorModal');
+        if (quickModal) quickModal.style.display = 'none';
+        return;
+    }
     if (window.projectOpen || shouldAskBeforeLeave()) {
         const ok = await showLeaveConfirmModal(window.currentProjectName);
         if (!ok) return;
@@ -2475,26 +4474,27 @@ function showReloadConfirmModal(projectName) {
         modal.style.cssText = `
             position: fixed;
             inset: 0;
-            background: rgba(8,14,30,0.45);
+            background: rgba(4,10,22,0.62);
             display: flex;
             align-items: center;
             justify-content: center;
             z-index: 1000002;
-            backdrop-filter: blur(2px);
+            backdrop-filter: blur(6px);
+            padding: 20px;
         `;
         modal.innerHTML = `
-            <div style="width:620px;max-width:92vw;background:#fff;border-radius:18px;padding:22px 22px 18px;box-shadow:0 18px 54px rgba(0,0,0,0.28);font-family:Inter,Arial;">
+            <div style="width:620px;max-width:92vw;background:radial-gradient(420px 180px at 100% 0%, rgba(58,168,255,0.08), transparent 52%), linear-gradient(180deg,#121a2a 0%,#0a101b 100%);border:1px solid rgba(255,255,255,0.08);border-radius:20px;padding:22px 22px 18px;box-shadow:0 24px 60px rgba(0,0,0,0.42);font-family:Inter,Arial;color:#f5f7fb;">
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
-                    <div style="width:32px;height:32px;border-radius:10px;background:#dbeafe;color:#1d4ed8;display:flex;align-items:center;justify-content:center;font-weight:900;">!</div>
-                    <h3 style="margin:0;font-size:24px;line-height:1.2;">Odświeżyć stronę?</h3>
+                    <div style="width:32px;height:32px;border-radius:10px;background:rgba(37,99,235,0.14);color:#7db7ff;display:flex;align-items:center;justify-content:center;font-weight:900;border:1px solid rgba(255,255,255,0.06);">!</div>
+                    <h3 style="margin:0;font-size:24px;line-height:1.2;color:#f5f7fb;">Odświeżyć stronę?</h3>
                 </div>
-                <p style="margin:0 0 18px 0;color:#374151;font-size:16px;line-height:1.5;">
+                <p style="margin:0 0 18px 0;color:#b7c2d8;font-size:16px;line-height:1.5;">
                     Projekt <strong>${projectName || "bez nazwy"}</strong> ma niezapisane zmiany. Wybierz, co chcesz zrobić.
                 </p>
                 <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end;">
-                    <button id="reloadCancelBtn" style="padding:10px 16px;background:#e5e7eb;border:none;border-radius:10px;cursor:pointer;font-weight:700;">Anuluj</button>
-                    <button id="reloadSaveBtn" style="padding:10px 16px;background:#2563eb;color:#fff;border:none;border-radius:10px;cursor:pointer;font-weight:700;">Zapisz i odśwież</button>
-                    <button id="reloadOnlyBtn" style="padding:10px 16px;background:#ef4444;color:#fff;border:none;border-radius:10px;cursor:pointer;font-weight:700;">Odśwież bez zapisu</button>
+                    <button id="reloadCancelBtn" style="padding:10px 16px;background:linear-gradient(180deg,#202838 0%,#151d2b 100%);color:#f5f7fb;border:1px solid rgba(255,255,255,0.08);border-radius:12px;cursor:pointer;font-weight:700;">Anuluj</button>
+                    <button id="reloadSaveBtn" style="padding:10px 16px;background:linear-gradient(135deg,#2563eb 0%,#1d4ed8 100%);color:#fff;border:none;border-radius:12px;cursor:pointer;font-weight:800;box-shadow:0 12px 28px rgba(37,99,235,0.22);">Zapisz i odśwież</button>
+                    <button id="reloadOnlyBtn" style="padding:10px 16px;background:linear-gradient(135deg,#ff5a5f 0%,#ef4444 100%);color:#fff;border:none;border-radius:12px;cursor:pointer;font-weight:800;box-shadow:0 12px 28px rgba(239,68,68,0.22);">Odśwież bez zapisu</button>
                 </div>
             </div>
         `;
@@ -2556,6 +4556,37 @@ async function handleReloadShortcut(e) {
 }
 window.addEventListener("keydown", handleReloadShortcut, true);
 
+function isSaveModalVisible() {
+    const modal = document.getElementById("saveProjectModal");
+    if (!modal) return false;
+    return modal.style.display === "flex" || modal.style.display === "block";
+}
+
+async function handleSaveShortcut(e) {
+    const isCmdOrCtrl = e.ctrlKey || e.metaKey;
+    const key = String(e.key || "").toLowerCase();
+    if (!isCmdOrCtrl || key !== "s") return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (e.shiftKey) {
+        openSaveProjectModal();
+        return;
+    }
+
+    if (isSaveModalVisible()) {
+        await saveProjectNow({
+            closeModal: true,
+            allowUntitled: false
+        });
+        return;
+    }
+
+    await triggerProjectSaveFlow();
+}
+window.addEventListener("keydown", handleSaveShortcut, true);
+
 // Ostrzeżenie przy odświeżeniu / zamknięciu karty, gdy są niezapisane zmiany
 window.addEventListener("beforeunload", (e) => {
     try {
@@ -2575,6 +4606,10 @@ window.addEventListener("DOMContentLoaded", () => {
 document.addEventListener("click", (e) => {
     const target = e.target;
     if (!target) return;
+
+    if (!(target.closest && target.closest(".start-card-toolbar"))) {
+        closeStartProjectMenus();
+    }
 
     const closeBtn = target.closest && target.closest("#closeSavedProjects");
     if (closeBtn) {

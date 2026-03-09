@@ -213,6 +213,7 @@
 
     async function snapshotNow(source, force) {
       try {
+        if (window.__projectLoadInProgress) return;
         if (history.isApplying || history.restoreInProgress) return;
         const state = await maybeCall(config.snapshotFn);
         const entry = buildEntry(state, source || 'change');
@@ -234,9 +235,11 @@
     }
 
     function scheduleSnapshot(source) {
+      if (window.__projectLoadInProgress) return;
       if (history.isApplying || history.restoreInProgress) return;
       if (history.debounceTimer) clearTimeout(history.debounceTimer);
       history.debounceTimer = setTimeout(() => {
+        if (window.__projectLoadInProgress) return;
         snapshotNow(source || 'event', false);
       }, config.debounceMs);
     }
@@ -359,7 +362,10 @@
     window.clearProjectAutosave = clearAutosave;
     window.captureProjectSnapshot = () => snapshotNow('manual', true);
 
-    window.addEventListener(config.eventName, () => scheduleSnapshot('canvasModified'));
+    window.addEventListener(config.eventName, () => {
+      if (window.__projectLoadInProgress) return;
+      scheduleSnapshot('canvasModified');
+    });
 
     window.addEventListener('beforeunload', () => {
       const payload = preparePersistPayload(history, config);

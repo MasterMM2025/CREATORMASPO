@@ -4,10 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Kreator PDF – Katalog produktów</title>
-  <link rel="stylesheet" href="kreator.css?v=20260228-rmbg-sidebar03">
+  <link rel="stylesheet" href="kreator.css?v=20260307-ui-scale-v28">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style></style>
+  <script>
+    window.APP_FEATURE_FLAGS = Object.assign({}, window.APP_FEATURE_FLAGS || {}, {
+      quickCreator: false
+    });
+    window.isQuickCreatorEnabled = function () {
+      return window.APP_FEATURE_FLAGS?.quickCreator !== false;
+    };
+  </script>
   
   <!-- DODANO: QUILL.JS -->
   <link href="https://cdn.quilljs.com/1.3.7/quill.snow.css" rel="stylesheet">
@@ -42,60 +50,60 @@
   <!-- SIDEBAR Z IKONAMI -->
   <div class="sidebar">
     <!-- Nowy projekt -->
-    <div class="sidebar-item" id="newProjectBtn" title="Nowy projekt">
+    <div class="sidebar-item" id="newProjectBtn" data-tooltip="Nowy projekt" aria-label="Nowy projekt">
       <i class="fas fa-file"></i>
       <span class="sidebar-label">Nowy projekt</span>
     </div>
 
     <!-- Szybki kreator -->
-    <div class="sidebar-item" id="quickCreatorBtn" title="Szybki kreator">
+    <div class="sidebar-item" id="quickCreatorBtn" data-tooltip="Szybki kreator" aria-label="Szybki kreator">
       <i class="fas fa-bolt"></i>
       <span class="sidebar-label">Szybki kreator</span>
     </div>
 
     <!-- Wybierz styl -->
-    <div class="sidebar-item" id="chooseStyleBtn" title="Wybierz styl">
+    <div class="sidebar-item" id="chooseStyleBtn" data-tooltip="Wybierz styl" aria-label="Wybierz styl">
       <i class="fas fa-palette"></i>
       <span class="sidebar-label">Wybierz styl</span>
     </div>
 
-    <div class="sidebar-item" id="addCatalogProductsBtn" title="Dodaj produkty do katalogu">
+    <div class="sidebar-item" id="addCatalogProductsBtn" data-tooltip="Dodaj produkty do katalogu" aria-label="Dodaj produkty do katalogu">
       <i class="fas fa-box-open"></i>
       <span class="sidebar-label">Dodaj produkty do katalogu</span>
     </div>
 
     <!-- Elementy zapisane -->
-    <div class="sidebar-item" title="Elementy zapisane">
+    <div class="sidebar-item" data-tooltip="Elementy zapisane" aria-label="Elementy zapisane">
       <i class="fas fa-save"></i>
       <span class="sidebar-label">Elementy zapisane</span>
     </div>
 
     <!-- Dodaj tekst -->
-    <div class="sidebar-item" id="sidebarAddText" title="Dodaj tekst">
+    <div class="sidebar-item" id="sidebarAddText" data-tooltip="Dodaj tekst" aria-label="Dodaj tekst">
       <i class="fas fa-font"></i>
       <span class="sidebar-label">Dodaj tekst</span>
     </div>
 
     <!-- Dodaj zdjęcia -->
-    <div class="sidebar-item" id="sidebarAddImage" title="Dodaj zdjęcia">
+    <div class="sidebar-item" id="sidebarAddImage" data-tooltip="Dodaj zdjęcia" aria-label="Dodaj zdjęcia">
       <i class="fas fa-images"></i>
       <span class="sidebar-label">Dodaj zdjęcia</span>
     </div>
     <!-- (usunięte: Import PSD) -->
 
     <!-- Dodaj element -->
-    <div class="sidebar-item" id="addElementBtn" title="Dodaj element">
+    <div class="sidebar-item" id="addElementBtn" data-tooltip="Dodaj element" aria-label="Dodaj element">
       <i class="fas fa-shapes"></i>
       <span class="sidebar-label">Dodaj element</span>
     </div>
 
     <!-- Przesyłanie danych -->
-    <div class="sidebar-item" title="Przesyłanie danych">
+    <div class="sidebar-item" data-tooltip="Przesyłanie danych" aria-label="Przesyłanie danych">
       <i class="fas fa-cloud-upload-alt"></i>
       <span class="sidebar-label">Przesyłanie danych</span>
     </div>
  <!-- Rysowanie -->
-   <div class="sidebar-item" title="Kształty">
+   <div class="sidebar-item" data-tooltip="Kształty" aria-label="Kształty">
   <i class="fas fa-draw-polygon"></i>
   <span class="sidebar-label">Kształty</span>
 </div>
@@ -105,11 +113,11 @@
     <!-- Separator -->
     <div class="sidebar-separator"></div>
 
-    <div class="sidebar-item" title="Kod EAN">
+    <div class="sidebar-item" data-tooltip="Kod EAN" aria-label="Kod EAN">
       <i class="fas fa-barcode"></i>
       <span class="sidebar-label">Kod EAN</span>
     </div>
-    <div class="sidebar-item" title="Kod QR">
+    <div class="sidebar-item" data-tooltip="Kod QR" aria-label="Kod QR">
   <i class="fas fa-qrcode"></i>
   <span class="sidebar-label">Kod QR</span>
 </div>
@@ -131,6 +139,13 @@
         </div>
       </div>
       <h2 class="panel-title start-title"><i class="fas fa-folder-open"></i> Ostatnie projekty</h2>
+      <div id="startProjectsBulkBar" style="display:none;">
+        <div id="startProjectsSelectionCount">0 zaznaczonych</div>
+        <div class="start-bulk-actions">
+          <button id="startProjectsBulkDeleteBtn" type="button">Usuń zaznaczone</button>
+          <button id="startProjectsBulkClearBtn" type="button">Wyczyść zaznaczenie</button>
+        </div>
+      </div>
       <div id="startProjectsList"></div>
     </div>
 
@@ -138,98 +153,153 @@
     <div id="editorView">
     <div class="improved-panel" id="importPanel">
       <div class="panel-header">
-        <h2 class="panel-title"><i class="fas fa-upload"></i> Import i ustawienia</h2>
+        <div class="panel-header-copy">
+          <div class="panel-kicker">Studio katalogu</div>
+          <h2 class="panel-title"><i class="fas fa-upload"></i> Import i ustawienia</h2>
+          <p class="panel-subtitle">Przygotuj zasoby projektu, skonfiguruj strony i eksport bez zmieniania układu edytora.</p>
+        </div>
       </div>
 
       <div class="panel-body">
-      <!-- EXCEL -->
-      <div class="import-row">
-        <div class="file-section">
-          <label for="excelFile" class="file-label-wrapper">
-            <span id="fileLabel">Nie wybrano pliku</span>
-            <input type="file" id="excelFile" accept=".xls,.xlsx,.csv">
-          </label>
-        </div>
-        <button class="btn-primary" id="importExcelBtn"><i class="fas fa-file-excel"></i> Importuj Excel</button>
-      </div>
-
-      <!-- UPLOAD KARTY -->
-      <div class="upload-grid">
-        <!-- BANER -->
-        <div class="upload-card">
-          <div class="upload-zone" id="bannerUpload">
-            <i class="fas fa-image"></i>
-            <p>Przeciągnij baner tutaj lub <span class="file-label" onclick="document.getElementById('bannerFileInput').click()">kliknij, aby wybrać</span></p>
-            <input type="file" id="bannerFileInput" accept="image/*">
+      <section class="editor-section editor-section--workspace">
+        <div class="editor-section-head editor-section-head--workspace">
+          <div>
+            <div class="editor-section-kicker">Menu narzędzi</div>
+            <h3 class="editor-section-title">Import, zasoby i ustawienia projektu</h3>
           </div>
-          <div id="bannerPreview" class="upload-preview"></div>
+          <p class="editor-section-note">Kliknij ikonę w pasku. Poniżej pokaże się tylko aktywne narzędzie.</p>
         </div>
 
-        <!-- TŁO -->
-        <div class="upload-card">
-          <div class="upload-zone" id="backgroundUpload">
-            <i class="fas fa-fill-drip"></i>
-            <p>Przeciągnij tło tutaj lub <span class="file-label" onclick="document.getElementById('backgroundFileInput').click()">kliknij, aby wybrać</span></p>
-            <input type="file" id="backgroundFileInput" accept="image/*">
+        <div class="asset-toolbar asset-toolbar--workspace" aria-label="Narzędzia projektu">
+          <button class="asset-tool" type="button" data-asset-target="excel" aria-label="Import Excel" title="Import Excel"><i class="fas fa-file-excel"></i><span>Import Excel</span></button>
+          <button class="asset-tool" type="button" data-asset-target="banner" aria-label="Baner" title="Baner"><i class="fas fa-image"></i><span>Baner</span></button>
+          <button class="asset-tool" type="button" data-asset-target="background" aria-label="Tło" title="Tło"><i class="fas fa-fill-drip"></i><span>Tło</span></button>
+          <button class="asset-tool" type="button" data-asset-target="cover" aria-label="Okładka" title="Okładka"><i class="fas fa-book"></i><span>Okładka</span></button>
+          <button class="asset-tool" type="button" data-asset-target="images" aria-label="Zdjęcia" title="Zdjęcia"><i class="fas fa-images"></i><span>Zdjęcia</span></button>
+          <button class="asset-tool" type="button" data-asset-target="settings" aria-label="Kreator settings" title="Kreator settings"><i class="fas fa-sliders-h"></i><span>Kreator settings</span></button>
+        </div>
+        <div class="asset-toolbar-status" id="assetToolbarStatus" aria-live="polite">Wybierz narzędzie</div>
+
+        <div class="asset-panels asset-panels--workspace">
+          <div class="upload-card asset-panel" data-asset-panel="excel">
+            <div class="workspace-panel-caption">
+              <div class="workspace-panel-title">Import arkusza</div>
+              <div class="workspace-panel-copy">Wybierz plik Excel i uruchom import produktów.</div>
+            </div>
+            <div class="import-row import-row--workspace">
+              <div class="file-section">
+                <label for="excelFile" class="file-label-wrapper">
+                  <span id="fileLabel">Nie wybrano pliku</span>
+                  <input type="file" id="excelFile" accept=".xls,.xlsx,.csv">
+                </label>
+              </div>
+              <button class="btn-primary" id="importExcelBtn"><i class="fas fa-file-excel"></i> Importuj Excel</button>
+            </div>
           </div>
-          <div id="backgroundPreview" class="upload-preview"></div>
-        </div>
 
-        <!-- OKŁADKA -->
-        <div class="upload-card">
-          <div class="upload-zone" id="coverUpload">
-            <i class="fas fa-book"></i>
-            <p>Przeciągnij okładkę tutaj lub <span class="file-label" onclick="document.getElementById('coverFileInput').click()">kliknij, aby wybrać</span></p>
-            <input type="file" id="coverFileInput" accept="image/*">
+          <div class="upload-card asset-panel" data-asset-panel="banner">
+            <div class="workspace-panel-caption">
+              <div class="workspace-panel-title">Baner</div>
+              <div class="workspace-panel-copy">Wgraj baner katalogu lub strony.</div>
+            </div>
+            <div class="upload-zone" id="bannerUpload">
+              <i class="fas fa-image"></i>
+              <p>Przeciągnij baner tutaj lub <span class="file-label" onclick="document.getElementById('bannerFileInput').click()">kliknij, aby wybrać</span></p>
+              <input type="file" id="bannerFileInput" accept="image/*">
+            </div>
+            <div id="bannerPreview" class="upload-preview"></div>
           </div>
-          <div id="coverPreview" class="upload-preview"></div>
-        </div>
 
-        <!-- ZDJĘCIA -->
-        <div class="upload-card">
-          <div class="upload-zone" id="uploadArea">
-            <i class="fas fa-images"></i>
-            <p>Przeciągnij zdjęcia tutaj lub <span class="file-label" onclick="document.getElementById('imageInput').click()">kliknij, aby wybrać</span></p>
-            <input type="file" id="imageInput" accept="image/*" multiple>
+          <div class="upload-card asset-panel" data-asset-panel="background">
+            <div class="workspace-panel-caption">
+              <div class="workspace-panel-title">Tło</div>
+              <div class="workspace-panel-copy">Wgraj obraz albo wybierz gradient dla aktualnej strony lub całego projektu.</div>
+            </div>
+            <div class="upload-zone" id="backgroundUpload">
+              <i class="fas fa-fill-drip"></i>
+              <p>Przeciągnij tło tutaj lub <span class="file-label" onclick="document.getElementById('backgroundFileInput').click()">kliknij, aby wybrać</span></p>
+              <input type="file" id="backgroundFileInput" accept="image/*">
+            </div>
+            <div id="backgroundPreview" class="upload-preview"></div>
+            <div class="gradient-toolbox" id="gradientToolbox">
+              <div class="gradient-toolbox-head">
+                <div class="workspace-panel-title">Gradienty</div>
+                <div class="workspace-panel-copy">Startowe presety. Później można dodać kolejne.</div>
+              </div>
+              <div class="gradient-preset-grid" id="gradientPresetGrid"></div>
+              <div class="gradient-toolbox-actions">
+                <button class="btn-primary gradient-action-btn" id="applyGradientCurrentBtn" type="button">
+                  <i class="fas fa-file"></i> Zastosuj do strony
+                </button>
+                <button class="btn-primary gradient-action-btn" id="applyGradientAllBtn" type="button">
+                  <i class="fas fa-copy"></i> Zastosuj do wszystkich
+                </button>
+                <button class="btn-primary gradient-action-btn gradient-action-btn--ghost" id="clearGradientBtn" type="button">
+                  <i class="fas fa-eraser"></i> Usuń gradient
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="upload-card asset-panel" data-asset-panel="cover">
+            <div class="workspace-panel-caption">
+              <div class="workspace-panel-title">Okładka</div>
+              <div class="workspace-panel-copy">Wgraj okładkę projektu.</div>
+            </div>
+            <div class="upload-zone" id="coverUpload">
+              <i class="fas fa-book"></i>
+              <p>Przeciągnij okładkę tutaj lub <span class="file-label" onclick="document.getElementById('coverFileInput').click()">kliknij, aby wybrać</span></p>
+              <input type="file" id="coverFileInput" accept="image/*">
+            </div>
+            <div id="coverPreview" class="upload-preview"></div>
+          </div>
+
+          <div class="upload-card asset-panel" data-asset-panel="images">
+            <div class="workspace-panel-caption">
+              <div class="workspace-panel-title">Zdjęcia</div>
+              <div class="workspace-panel-copy">Przeciągnij zdjęcia produktów albo wskaż pliki z dysku.</div>
+            </div>
+            <div class="upload-zone" id="uploadArea">
+              <i class="fas fa-images"></i>
+              <p>Przeciągnij zdjęcia tutaj lub <span class="file-label" onclick="document.getElementById('imageInput').click()">kliknij, aby wybrać</span></p>
+              <input type="file" id="imageInput" accept="image/*" multiple>
+            </div>
+          </div>
+
+          <div class="upload-card asset-panel" data-asset-panel="settings">
+            <div class="workspace-panel-caption">
+              <div class="workspace-panel-title">Kreator settings</div>
+              <div class="workspace-panel-copy">Zarządzaj zapisem, eksportem, rozmiarem projektu i ustawieniami katalogu.</div>
+            </div>
+            <div class="pdf-buttons toolbar-actions">
+              <button id="pdfButton" class="btn-primary" disabled>
+                  <i class="fas fa-file-pdf"></i> Generuj PDF
+              </button>
+              
+              <button id="canvaPdfButton" class="btn-primary">
+                  <i class="fas fa-file-export"></i> Export do Canva
+              </button>
+
+              <button id="catalogSettingsBtn" class="btn-primary">
+                  <i class="fas fa-cog"></i> Ustawienia katalogu
+              </button>
+
+              <button id="projectSizeBtn" class="btn-primary">
+                  <i class="fas fa-ruler-combined"></i> Rozmiar projektu
+              </button>
+
+              <button id="saveProjectBtn" class="btn-primary">
+                  <i class="fas fa-save"></i> Zapisz projekt
+              </button>
+            </div>
+            <div class="settings-utility-row">
+              <button class="btn-primary settings-utility-btn" id="addBlankPageBtn" type="button">
+                <i class="fas fa-plus"></i> Dodaj pustą stronę
+              </button>
+            </div>
           </div>
         </div>
-
-        <!-- DODAJ PUSTĄ STRONĘ -->
-        <div class="upload-card">
-          <div class="upload-zone" id="blankPageTile">
-            <i class="fas fa-file-circle-plus"></i>
-            <p>Dodaj stronę o tych samych wymiarach co strony z katalogu</p>
-            <button class="btn-primary" id="addBlankPageBtn" type="button">
-              <i class="fas fa-plus"></i> Dodaj pustą stronę
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- IMPORT ZDJĘĆ -->
-      <div class="import-row" style="margin-top: 12px; justify-content: center;">
-        <button class="btn-primary" id="importImagesBtn"><i class="fas fa-upload"></i> Importuj zdjęcia</button>
-      </div>
-
-      <!-- PDF BUTTONS – TYLKO Generuj PDF i Ustawienia katalogu -->
-      <div class="pdf-buttons toolbar-actions">
-
-    <button id="pdfButton" class="btn-primary" disabled>
-        <i class="fas fa-file-pdf"></i> Generuj PDF
-    </button>
-    
-    <button id="canvaPdfButton" class="btn-primary">
-        <i class="fas fa-file-export"></i> Export do Canva
-    </button>
-
-    <button id="catalogSettingsBtn" class="btn-primary">
-        <i class="fas fa-cog"></i> Ustawienia katalogu
-    </button>
-
-    <button id="saveProjectBtn" class="btn-primary">
-        <i class="fas fa-save"></i> Zapisz projekt
-    </button>
-</div>
+      </section>
 
       </div>
 
@@ -336,7 +406,7 @@
   </div>
 
   <!-- UNDO/REDO BUTTONS -->
-  <div id="undoRedoControls" style="position:fixed;top:80px;right:20px;z-index:10000;display:flex;gap:8px;">
+  <div id="undoRedoControls" style="position:fixed;top:96px;right:20px;z-index:10000;display:flex;gap:8px;">
     <button id="undoBtn" type="button" title="Cofnij (Ctrl/Cmd+Z)" style="background:#fff;padding:8px 12px;border:1px solid #ddd;border-radius:6px;cursor:pointer;opacity:0.5;" disabled>
       <i class="fas fa-undo"></i>
     </button>
@@ -630,9 +700,11 @@ window.APP_FONT_LOADER_PROMISE = window.loadDynamicFonts();
 <!--    (wszystkie będą miały dostęp do firebaseDB) -->
 <!-- ============================================== -->
 
-<script src="edytor.js"></script>
+<script src="edytor.js?v=20260307-layout-dark-v02"></script>
 <script src="removebg.js?v=20260228-rmbg-local10"></script>
-<script src="importdanych.js?v=20260301-history17"></script>
+  <script src="importdanych.js?v=20260307-projectsize-dark-v33"></script>
+<script src="efekty-zdjec.js?v=20260309-imagefx-dark-v01"></script>
+<script src="magic-layout.js?v=20260308-magic-layout-v01"></script>
 <script src="autosave/project-history-store.js?v=20260301-autosave08"></script>
 <script src="autosave/project-history-ui.js?v=20260301-autosave08"></script>
 <script src="autosave/project-history-bridge.js?v=20260301-autosave08"></script>
@@ -643,26 +715,27 @@ window.APP_FONT_LOADER_PROMISE = window.loadDynamicFonts();
 <script src="styles/styl-wlasny/price-badges/kolko-czerwone-tnz.js?v=20260227-rmbg19"></script>
 <script src="styles/styl-wlasny/price-badges/kolko-granatowe.js?v=20260227-rmbg19"></script>
 <script src="styles/styl-wlasny/price-badges/kolko-granatowe-bez-ramki.js?v=20260227-rmbg19"></script>
-<script src="styles/styl-wlasny/module-layouts/styl-numer-1.js?v=20260228-rmbg30"></script>
-<script src="styles/styl-wlasny/module-layouts/styl-numer-2.js?v=20260228-rmbg34"></script>
-<script src="styles/styl-wlasny/module-layouts/styl-numer-3.js?v=20260228-rmbg03"></script>
-<script src="styl-wlasny.js?v=20260301-excel-import10"></script>
+<script src="styles/styl-wlasny/module-layouts/styl-numer-1.js?v=20260306-style1imgx14"></script>
+<script src="styles/styl-wlasny/module-layouts/styl-numer-2.js?v=20260306-style2imgx13"></script>
+<script src="styles/styl-wlasny/module-layouts/styl-numer-3.js?v=20260307-style3-index-gray-italic-v05"></script>
+<script src="styl-wlasny.js?v=20260307-edit-index-price-v22"></script>
 <script src="baner.js"></script>
+<script src="tlo.js?v=20260307-gradient-bg-v06"></script>
 
 <!-- jeśli plik używa importów – musi być module -->
-<script type="module" src="importdanych-1.js?v=20260301-elements-fast6"></script>
+<script type="module" src="importdanych-1.js?v=20260307-elements-panel-dark-v13"></script>
 
-<script src="edycja.js?v=20260228-rmbg04"></script>
-<script src="edycja-1.js?v=20260228-rmbg08"></script>
+<script src="edycja.js?v=20260307-pageedit-icons-v13"></script>
+<script src="edycja-1.js?v=20260302-text-autobounds02"></script>
 <script src="okladka.js"></script>
-<script src="dodajstrone.js?v=20260228-rmbg22"></script>
-<script src="eangenerator.js"></script>
-<script src="qrcodegenerator.js"></script>
-<script src="rysowanie.js?v=20260301-shapehistory01"></script>
+<script src="dodajstrone.js?v=20260304-cross-page-dnd-v1"></script>
+<script src="eangenerator.js?v=20260307-ean-dark-v02"></script>
+<script src="qrcodegenerator.js?v=20260307-qr-dark-v02"></script>
+<script src="rysowanie.js?v=20260307-shape-panel-dark-v04"></script>
 
 
 <!-- 🔥 3. Save/load system -->
-<script type="module" src="saveall.js?v=20260301-history22"></script>
+<script type="module" src="saveall.js?v=20260307-newproject-dark-v04"></script>
 
   <!-- INICJALIZACJA -->
   <script>
@@ -771,6 +844,47 @@ const canvaPdfButton = document.getElementById('canvaPdfButton');
         };
       }
 
+      const assetTools = Array.from(document.querySelectorAll('.asset-tool'));
+      const assetPanels = Array.from(document.querySelectorAll('.asset-panel'));
+      const assetToolbarStatus = document.getElementById('assetToolbarStatus');
+      const assetPanelsContainer = document.querySelector('.asset-panels--workspace');
+      const clearActiveAssetPanel = () => {
+        assetTools.forEach((btn) => btn.classList.remove('is-active'));
+        assetPanels.forEach((panel) => panel.classList.remove('is-active'));
+        if (assetPanelsContainer) assetPanelsContainer.classList.remove('has-active-panel');
+        if (assetToolbarStatus) assetToolbarStatus.textContent = 'Wybierz narzędzie';
+      };
+      const setActiveAssetPanel = (target) => {
+        const normalized = String(target || '').trim();
+        let activeLabel = '';
+        assetTools.forEach((btn) => {
+          const isActive = btn.dataset.assetTarget === normalized;
+          btn.classList.toggle('is-active', isActive);
+          if (isActive) activeLabel = btn.getAttribute('aria-label') || btn.title || btn.dataset.assetTarget || '';
+        });
+        assetPanels.forEach((panel) => {
+          panel.classList.toggle('is-active', panel.dataset.assetPanel === normalized);
+        });
+        if (assetPanelsContainer) assetPanelsContainer.classList.add('has-active-panel');
+        if (assetToolbarStatus) assetToolbarStatus.textContent = activeLabel || 'Narzędzie';
+      };
+      if (assetTools.length && assetPanels.length) {
+        assetTools.forEach((btn) => {
+          btn.addEventListener('click', () => {
+            if (btn.classList.contains('is-active')) {
+              clearActiveAssetPanel();
+              return;
+            }
+            setActiveAssetPanel(btn.dataset.assetTarget);
+          });
+        });
+        const initialAsset = assetTools.find((btn) => btn.classList.contains('is-active'))?.dataset.assetTarget
+          || assetPanels.find((panel) => panel.classList.contains('is-active'))?.dataset.assetPanel
+          || '';
+        if (initialAsset) setActiveAssetPanel(initialAsset);
+        else clearActiveAssetPanel();
+      }
+
       // Pobierz projekt
       const downloadBtn = document.getElementById('downloadProjectBtn');
       const downloadModal = document.getElementById('downloadProjectModal');
@@ -865,10 +979,21 @@ const canvaPdfButton = document.getElementById('canvaPdfButton');
       const quickApplyBtn = document.getElementById('quickApplyBtn');
       const excelInput = document.getElementById('excelFile');
       const imageInput = document.getElementById('imageInput');
+      const quickCreatorEnabled = typeof window.isQuickCreatorEnabled === 'function'
+        ? window.isQuickCreatorEnabled()
+        : true;
       let quickSettingsDirty = false;
       let quickPriceTouched = false;
       let quickBaseline = null;
       let quickInit = false;
+
+      if (!quickCreatorEnabled) {
+        if (quickOpen) {
+          quickOpen.style.display = 'none';
+          quickOpen.setAttribute('aria-hidden', 'true');
+        }
+        if (quickModal) quickModal.style.display = 'none';
+      }
 
       function setQuickState(btn, ok) {
         if (!btn) return;
@@ -908,6 +1033,7 @@ const canvaPdfButton = document.getElementById('canvaPdfButton');
 
       if (quickOpen) {
         quickOpen.onclick = () => {
+          if (!quickCreatorEnabled) return;
           if (typeof window.openQuickCreator === 'function') {
             window.openQuickCreator();
             return;
@@ -1345,6 +1471,79 @@ if (canvaPdfButton) {
   </div>
 
 </div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const sidebar = document.querySelector('.sidebar');
+    if (!sidebar) return;
+    const items = Array.from(sidebar.querySelectorAll('.sidebar-item'));
+    if (!items.length) return;
+
+    const tooltip = document.createElement('div');
+    tooltip.className = 'sidebar-hover-tooltip';
+    tooltip.setAttribute('role', 'tooltip');
+    document.body.appendChild(tooltip);
+
+    let activeItem = null;
+
+    const getUiZoom = () => {
+      const raw = window.getComputedStyle(document.body).zoom;
+      const zoom = Number.parseFloat(raw);
+      return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+    };
+
+    const getTooltipLabel = (item) => (
+      item?.getAttribute('data-tooltip') ||
+      item?.getAttribute('aria-label') ||
+      item?.querySelector('.sidebar-label')?.textContent?.trim() ||
+      ''
+    );
+
+    const placeTooltip = (item) => {
+      if (!item) return;
+      const rect = item.getBoundingClientRect();
+      const zoom = getUiZoom();
+      tooltip.style.left = `${(rect.right + 14) / zoom}px`;
+      tooltip.style.top = `${(rect.top + rect.height / 2) / zoom}px`;
+    };
+
+    const showTooltip = (item) => {
+      const label = getTooltipLabel(item);
+      if (!label) return;
+      activeItem = item;
+      tooltip.textContent = label;
+      placeTooltip(item);
+      tooltip.classList.add('is-visible');
+    };
+
+    const hideTooltip = () => {
+      activeItem = null;
+      tooltip.classList.remove('is-visible');
+    };
+
+    items.forEach((item) => {
+      item.addEventListener('mouseenter', () => showTooltip(item));
+      item.addEventListener('mousemove', () => {
+        if (activeItem !== item) {
+          showTooltip(item);
+          return;
+        }
+        placeTooltip(item);
+      });
+      item.addEventListener('mouseleave', hideTooltip);
+      item.addEventListener('focus', () => showTooltip(item));
+      item.addEventListener('blur', hideTooltip);
+    });
+
+    sidebar.addEventListener('mouseleave', hideTooltip);
+    window.addEventListener('scroll', () => {
+      if (activeItem) placeTooltip(activeItem);
+    }, { passive: true });
+    window.addEventListener('resize', () => {
+      if (activeItem) placeTooltip(activeItem);
+    });
+  });
+</script>
 
 </body>
 </html>
