@@ -5,6 +5,23 @@
 
 Konva.listenClickTap = true;
 let currentFolder = "PHOTO PNG/BANNERS";
+const ELEMENTS_LIBRARY_TABS = [
+  { folder: "PHOTO PNG/BANNERS", label: "BANER" },
+  { folder: "PHOTO PNG/FOOD", label: "FOOD" },
+  { folder: "PHOTO PNG/COUNTRY", label: "COUNTRY" },
+  { folder: "PHOTO PNG/MASPO", label: "MASPO" }
+];
+const ELEMENTS_FOLDER_ALIASES = new Map([
+  ["BANER", "PHOTO PNG/BANNERS"],
+  ["BANNER", "PHOTO PNG/BANNERS"],
+  ["BANNERS", "PHOTO PNG/BANNERS"],
+  ["FOOD", "PHOTO PNG/FOOD"],
+  ["COUNTRY", "PHOTO PNG/COUNTRY"],
+  ["MASPO", "PHOTO PNG/MASPO"]
+]);
+const ELEMENTS_THUMB_MAX_EDGE = 100;
+const ELEMENTS_EDITOR_MAX_EDGE = 560;
+const ELEMENTS_PREVIEW_VARIANT_TIMEOUT_MS = 420;
 function applyFontPreviewToSelect(selectEl, fallback = "Arial") {
   if (!selectEl) return;
   const setFace = (el, family) => {
@@ -43,6 +60,7 @@ let elementsPendingRows = [];
 let elementsUrlWorkersActive = 0;
 let elementsSearchDebounce = null;
 let elementsScrollRaf = 0;
+const ELEMENTS_URL_CONCURRENCY = 4;
 
 // === AUTO-CROP — usuwa przezroczyste marginesy z PNG ===
 function autoCropKonvaImage(kImg) {
@@ -116,7 +134,6 @@ function markAsEditable(node) {
 let loadSessionId = 0;
 const ELEMENTS_URL_CACHE = new Map(); // storage fullPath -> downloadURL
 const ELEMENTS_FOLDER_ITEMS_CACHE = new Map(); // folderPath -> StorageReference[]
-const ELEMENTS_URL_CONCURRENCY = 8;
 let addTextMode = false;
 let addImageMode = false;
 let addPSDMode = false;
@@ -146,8 +163,8 @@ async function getImageVariantsFromSourceLocal(src, cacheKeyPrefix = "sidebar-sr
     try {
       return await window.createImageVariantsFromSource(safeSrc, {
         cacheKey: `${cacheKeyPrefix}:${safeSrc}`,
-        thumbMaxEdge: 128,
-        editorMaxEdge: 560
+        thumbMaxEdge: ELEMENTS_THUMB_MAX_EDGE,
+        editorMaxEdge: ELEMENTS_EDITOR_MAX_EDGE
       });
     } catch (_e) {}
   }
@@ -159,8 +176,8 @@ async function getImageVariantsFromFileLocal(file, cacheKeyPrefix = "sidebar-fil
     try {
       return await window.createImageVariantsFromFile(file, {
         cacheKey: `${cacheKeyPrefix}:${file?.name || "file"}:${file?.size || 0}:${file?.lastModified || 0}`,
-        thumbMaxEdge: 128,
-        editorMaxEdge: 560
+        thumbMaxEdge: ELEMENTS_THUMB_MAX_EDGE,
+        editorMaxEdge: ELEMENTS_EDITOR_MAX_EDGE
       });
     } catch (_e) {}
   }
@@ -170,6 +187,58 @@ async function getImageVariantsFromFileLocal(file, cacheKeyPrefix = "sidebar-fil
     reader.onerror = () => reject(new Error("image_read_error"));
     reader.readAsDataURL(file);
   });
+}
+
+function resolveElementsFolderFromLabel(rawLabel) {
+  const label = String(rawLabel || "").trim().toUpperCase();
+  return ELEMENTS_FOLDER_ALIASES.get(label) || "";
+}
+
+async function resolveElementTilePreview(fullSrc, cacheKey = "") {
+  const source = String(fullSrc || "").trim();
+  if (!source) {
+    return { fullSrc: "", previewSrc: "", thumbReady: false };
+  }
+
+  if (typeof window.getImageVariantsFromCache === "function") {
+    const cached =
+      window.getImageVariantsFromCache(cacheKey) ||
+      window.getImageVariantsFromCache(source);
+    const cachedThumb = variantSrcLocal(cached, "thumb");
+    if (cachedThumb) {
+      return {
+        fullSrc: source,
+        previewSrc: cachedThumb,
+        thumbReady: cachedThumb !== source
+      };
+    }
+  }
+
+  if (typeof window.createImageVariantsFromSource === "function") {
+    const variantPromise = window.createImageVariantsFromSource(source, {
+      cacheKey: cacheKey ? `elements:${cacheKey}` : `elements:${source}`,
+      thumbMaxEdge: ELEMENTS_THUMB_MAX_EDGE,
+      editorMaxEdge: ELEMENTS_EDITOR_MAX_EDGE
+    }).catch(() => null);
+
+    const variants = await Promise.race([
+      variantPromise,
+      new Promise((resolve) => {
+        setTimeout(() => resolve(null), ELEMENTS_PREVIEW_VARIANT_TIMEOUT_MS);
+      })
+    ]);
+
+    const thumbSrc = variantSrcLocal(variants, "thumb");
+    if (thumbSrc) {
+      return {
+        fullSrc: source,
+        previewSrc: thumbSrc,
+        thumbReady: thumbSrc !== source
+      };
+    }
+  }
+
+  return { fullSrc: source, previewSrc: source, thumbReady: false };
 }
 
 
@@ -191,22 +260,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (title === 'Dodaj tekst') enableAddTextMode();
       if (title === 'Dodaj zdjęcia') enableAddImageMode();
-      // 🔥 🔥 🔥 DODAJ TO:
-      if (title === 'BANNERS') {
-          currentFolder = "PHOTO PNG/BANNERS";
-          openElementsPanel();
-          loadFirebaseFolder(currentFolder);
+      const folderFromLabel = resolveElementsFolderFromLabel(title);
+      if (folderFromLabel) {
+        currentFolder = folderFromLabel;
+        openElementsPanel();
+        loadFirebaseFolder(currentFolder);
       }
-      if (title === 'FOOD') {
-          currentFolder = "PHOTO PNG/FOOD";
-          openElementsPanel();
-          loadFirebaseFolder(currentFolder);
-      }
-      if (title === 'COUNTRY') {
-    currentFolder = "PHOTO PNG/COUNTRY";
-    openElementsPanel();
-    loadFirebaseFolder(currentFolder);
-}
 
 
     });
@@ -227,6 +286,33 @@ function isWithinPageArea(x, y, stage = null) {
   return x >= 0 && x <= width && y >= 0 && y <= height;
 }
 
+function resolveSidebarStagePointer(page, nativeEvt = null) {
+  const stage = page && page.stage ? page.stage : null;
+  if (!stage) return null;
+  if (nativeEvt && typeof stage.setPointersPositions === "function") {
+    try { stage.setPointersPositions(nativeEvt); } catch (_e) {}
+  }
+  let pos = stage.getPointerPosition && stage.getPointerPosition();
+  if ((!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) && nativeEvt) {
+    const container = stage.container && stage.container();
+    const rect = container && typeof container.getBoundingClientRect === "function"
+      ? container.getBoundingClientRect()
+      : null;
+    if (rect) {
+      const stageW = Math.max(1, Number(stage.width && stage.width()) || rect.width || 1);
+      const stageH = Math.max(1, Number(stage.height && stage.height()) || rect.height || 1);
+      const scaleX = rect.width > 0 ? stageW / rect.width : 1;
+      const scaleY = rect.height > 0 ? stageH / rect.height : 1;
+      pos = {
+        x: (Number(nativeEvt.clientX || 0) - rect.left) * scaleX,
+        y: (Number(nativeEvt.clientY || 0) - rect.top) * scaleY
+      };
+    }
+  }
+  if (!pos || !isWithinPageArea(pos.x, pos.y, stage)) return null;
+  return pos;
+}
+
 // ====================== DODAJ TEKST Z SIDEBARU ======================
 function enableAddTextMode() {
   if (addTextMode || addImageMode) return;
@@ -236,17 +322,32 @@ function enableAddTextMode() {
     c.style.outline = '2px solid #00c4b4';
     c.style.outlineOffset = '2px';
     c.style.cursor = 'text';
-    const handler = e => {
-      if (!addTextMode || e.evt.button !== 0) return;
-      const pos = page.stage.getPointerPosition();
-      if (pos && isWithinPageArea(pos.x, pos.y, page.stage)) {
-        addTextAtPosition(page, pos.x, pos.y);
-      }
+    const commitPlacement = (pos) => {
+      if (!addTextMode || !pos) return;
       addTextMode = false;
       disableAddTextMode();
+      addTextAtPosition(page, pos.x, pos.y);
     };
-    page.stage.on('mousedown.textmode', handler);
+    const handler = e => {
+      if (!addTextMode) return;
+      if (e && e.evt && Number.isFinite(e.evt.button) && e.evt.button !== 0) return;
+      const pos = resolveSidebarStagePointer(page, e && e.evt ? e.evt : null);
+      if (e) e.cancelBubble = true;
+      commitPlacement(pos);
+    };
+    const domHandler = (evt) => {
+      if (!addTextMode) return;
+      if (Number.isFinite(evt.button) && evt.button !== 0) return;
+      const pos = resolveSidebarStagePointer(page, evt);
+      if (!pos) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      commitPlacement(pos);
+    };
+    page.stage.on('mousedown.textmode touchstart.textmode contentMousedown.textmode contentTouchstart.textmode', handler);
     page._textHandler = handler;
+    c.addEventListener('pointerdown', domHandler, true);
+    page._textDomCaptureHandler = domHandler;
   });
 }
 
@@ -256,8 +357,12 @@ function disableAddTextMode() {
     c.style.outline = c.style.outlineOffset = '';
     c.style.cursor = 'default';
     if (page._textHandler) {
-      page.stage.off('mousedown.textmode', page._textHandler);
+      page.stage.off('mousedown.textmode touchstart.textmode contentMousedown.textmode contentTouchstart.textmode', page._textHandler);
       page._textHandler = null;
+    }
+    if (page._textDomCaptureHandler) {
+      c.removeEventListener('pointerdown', page._textDomCaptureHandler, true);
+      page._textDomCaptureHandler = null;
     }
   });
 }
@@ -304,10 +409,16 @@ function addTextAtPosition(page, x, y) {
     text: "Kliknij, aby edytować",
     x, y, fontSize: 18,
     fill: "#000000", fontFamily: "Arial", align: "left",
-    verticalAlign: "middle", draggable: true, isSidebarText: true,
+    width: Math.max(180, Math.min(320, (typeof window.W === "number" ? window.W : 1080) * 0.28)),
+    wrap: "word",
+    lineHeight: 1.2,
+    verticalAlign: "top", draggable: true, isUserText: true,
     _originalText: "Kliknij, aby edytować"
   });
-  fitSidebarTextBounds(text);
+  const autoHeight = (typeof window.getTextNodeAutoHeight === "function")
+    ? window.getTextNodeAutoHeight(text, Math.ceil((Number(text.fontSize()) || 18) * 1.2))
+    : Math.max(32, Math.ceil((Number(text.fontSize()) || 18) * 1.2));
+  text.height(autoHeight);
   text.x(x - text.width() / 2);
   text.y(y - text.height() / 2);
   page.layer.add(text);
@@ -328,16 +439,6 @@ function addTextAtPosition(page, x, y) {
 function enableAddImageMode() {
   if (addTextMode || addImageMode) return;
   addImageMode = true;
-  const resolveStagePointer = (stage, nativeEvt = null) => {
-    if (!stage) return null;
-    if (nativeEvt && typeof stage.setPointersPositions === "function") {
-      stage.setPointersPositions(nativeEvt);
-    }
-    const pos = stage.getPointerPosition();
-    if (!pos) return null;
-    if (!isWithinPageArea(pos.x, pos.y, stage)) return null;
-    return pos;
-  };
   const commitImagePlacement = (page, pos) => {
     if (!addImageMode || !page || !pos) return;
     addImageMode = false;
@@ -356,13 +457,24 @@ function enableAddImageMode() {
       const stageHandler = (e) => {
         if (!addImageMode) return;
         if (e && e.evt && Number.isFinite(e.evt.button) && e.evt.button !== 0) return;
-        const pos = resolveStagePointer(page.stage, e && e.evt ? e.evt : null);
+        const pos = resolveSidebarStagePointer(page, e && e.evt ? e.evt : null);
         if (!pos) return;
         if (e) e.cancelBubble = true;
         commitImagePlacement(page, pos);
       };
+      const domHandler = (evt) => {
+        if (!addImageMode) return;
+        if (Number.isFinite(evt.button) && evt.button !== 0) return;
+        const pos = resolveSidebarStagePointer(page, evt);
+        if (!pos) return;
+        evt.preventDefault();
+        evt.stopPropagation();
+        commitImagePlacement(page, pos);
+      };
       page.stage.on('mousedown.imagemode touchstart.imagemode contentMousedown.imagemode contentTouchstart.imagemode', stageHandler);
       page._imageHandler = stageHandler;
+      c.addEventListener('pointerdown', domHandler, true);
+      page._imageDomCaptureHandler = domHandler;
     });
   };
 }
@@ -810,11 +922,10 @@ elementsPanel.innerHTML = `
     style="width:100%;padding:9px 11px;border-radius:12px;border:1px solid rgba(155,171,199,.16);font-size:13px;margin-bottom:10px;background:#121927;color:#f3f6fb;outline:none;">
 
   <!-- 🔥 ZAKŁADKI -->
-  <div id="elementsTabs" style="display:flex; gap:6px; margin-bottom:8px;">
-    <button class="tabBtn active" data-folder="PHOTO PNG/BANNERS">BANNERS-PNG</button>
-<button class="tabBtn" data-folder="PHOTO PNG/FOOD">FOOD-PNG</button>
-<button class="tabBtn" data-folder="PHOTO PNG/COUNTRY">COUNTRY-PNG</button>
-
+  <div id="elementsTabs" style="display:flex; gap:5px; flex-wrap:wrap; margin-bottom:8px;">
+    ${ELEMENTS_LIBRARY_TABS.map((tab, index) => `
+      <button class="tabBtn${index === 0 ? " active" : ""}" data-folder="${tab.folder}">${tab.label}</button>
+    `).join("")}
   </div>
 
   <!-- KONTENER NA ELEMENTY -->
@@ -829,7 +940,7 @@ btnStyle.textContent = `
     background: linear-gradient(180deg, #121927 0%, #0d1320 100%);
     border: 1px solid rgba(155,171,199,.16);
     border-radius: 10px;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
     color: #d7e2f0;
     cursor: pointer;
@@ -838,6 +949,10 @@ btnStyle.textContent = `
     display: flex;
     align-items: center;
     justify-content: center;
+    min-width: 0;
+    white-space: nowrap;
+    letter-spacing: .02em;
+    text-transform: uppercase;
   }
 
   .tabBtn:hover {
@@ -868,6 +983,8 @@ btnStyle.textContent = `
     align-items: center;
     justify-content: center;
     padding: 6px;
+    content-visibility: auto;
+    contain: content;
   }
   .elementTile:active {
     cursor: grabbing;
@@ -1187,7 +1304,7 @@ async function loadFirebaseFolder(folderPath) {
       img.src = src;
       elementsLazyObserver.unobserve(img);
     });
-  }, { root: elementsPanel, rootMargin: "120px 0px", threshold: 0.01 });
+  }, { root: elementsPanel, rootMargin: "220px 0px", threshold: 0.01 });
 
   container.innerHTML = "";
 
@@ -1206,6 +1323,7 @@ async function loadFirebaseFolder(folderPath) {
     img.draggable = false;
     img.decoding = "async";
     img.loading = "lazy";
+    img.fetchPriority = "low";
     if (url) {
       const fullSrc = String(url || "").trim();
       img.dataset.fullsrc = fullSrc;
@@ -1235,24 +1353,6 @@ async function loadFirebaseFolder(folderPath) {
     img.addEventListener('load', () => {
       skeleton.style.display = 'none';
       img.style.opacity = '1';
-      const fullSrc = String(img.dataset.fullsrc || img.dataset.src || "").trim();
-      if (
-        fullSrc &&
-        img.dataset.thumbready !== "1" &&
-        typeof window.createImageVariantsFromSource === "function"
-      ) {
-        window.createImageVariantsFromSource(fullSrc, {
-          cacheKey: `elements-thumb:${fullSrc}`
-        }).then((variants) => {
-          const thumbSrc = variantSrcLocal(variants, "thumb");
-          if (!thumbSrc || thumbSrc === fullSrc) return;
-          img.dataset.thumbready = "1";
-          img.dataset.src = thumbSrc;
-          if (img.isConnected) {
-            img.src = thumbSrc;
-          }
-        }).catch(() => {});
-      }
     });
     img.addEventListener('error', () => {
       img.dataset.loaded = "0";
@@ -1309,17 +1409,15 @@ async function loadFirebaseFolder(folderPath) {
             if (mySession !== loadSessionId) return;
             if (!url) continue;
             ELEMENTS_URL_CACHE.set(row.cacheKey, url);
-            row.img.dataset.fullsrc = url;
-            let previewSrc = url;
-            if (typeof window.getImageVariantsFromCache === "function") {
-              const cached = window.getImageVariantsFromCache(url);
-              const thumbSrc = variantSrcLocal(cached, "thumb");
-              if (thumbSrc) {
-                previewSrc = thumbSrc;
-                row.img.dataset.thumbready = "1";
-              }
+            const preview = await resolveElementTilePreview(url, row.cacheKey);
+            if (mySession !== loadSessionId) return;
+            row.img.dataset.fullsrc = preview.fullSrc || url;
+            row.img.dataset.src = preview.previewSrc || url;
+            if (preview.thumbReady) {
+              row.img.dataset.thumbready = "1";
+            } else {
+              delete row.img.dataset.thumbready;
             }
-            row.img.dataset.src = previewSrc;
             elementsLazyObserver.observe(row.img);
           } catch (err) {
             console.warn("⚠️ Nie udało się pobrać miniatury:", row.item?.fullPath || row.item?.name, err);
@@ -1551,7 +1649,7 @@ elementsPanel.addEventListener('scroll', () => {
     elementsScrollRaf = 0;
     const nearBottom =
       elementsPanel.scrollTop + elementsPanel.clientHeight >=
-      elementsPanel.scrollHeight - 120;
+      elementsPanel.scrollHeight - 240;
 
     if (nearBottom && typeof window.renderNextElementsBatch === "function") {
       window.renderNextElementsBatch();

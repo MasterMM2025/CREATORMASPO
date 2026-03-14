@@ -58,15 +58,18 @@
     return ensureUnsavedProjectId(forceNew !== false);
   };
 
+  function hasMeaningfulProjectContent(data) {
+    if (!data || !Array.isArray(data.pages) || data.pages.length === 0) return false;
+    return data.pages.some((p) =>
+      Array.isArray(p && p.objects) &&
+      p.objects.some((obj) => obj && obj.type && obj.type !== 'background')
+    );
+  }
+
   async function snapshotProject() {
     if (typeof window.collectProjectData !== 'function') return null;
     const data = window.collectProjectData();
     if (!data || !Array.isArray(data.pages) || data.pages.length === 0) return null;
-    const hasRealContent = data.pages.some((p) =>
-      Array.isArray(p && p.objects) &&
-      p.objects.some((obj) => obj && obj.type && obj.type !== 'background')
-    );
-    if (!hasRealContent) return null;
     compactProjectDataForHistoryInPlace(data);
     return data;
   }
@@ -165,6 +168,7 @@
       debounceMs: 900,
       snapshotFn: snapshotProject,
       applyFn: applyProjectState,
+      shouldArchiveStateFn: hasMeaningfulProjectContent,
       previewFn: captureAutosavePreview,
       projectIdentityFn: getProjectIdentity,
       storeKey,

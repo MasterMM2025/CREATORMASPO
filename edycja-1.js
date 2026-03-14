@@ -90,8 +90,12 @@ document.addEventListener("DOMContentLoaded", () => {
         const safeSx = Number.isFinite(sx) && sx > 0 ? sx : 1;
         const safeSy = Number.isFinite(sy) && sy > 0 ? sy : 1;
         if (Math.abs(safeSx - 1) < 0.001 && Math.abs(safeSy - 1) < 0.001) return;
+        const currentFontSize = Number(typeof node.fontSize === "function" ? node.fontSize() : 12);
         if (typeof node.width === "function") node.width(Math.max(1, Number(node.width() || 1) * safeSx));
         if (typeof node.height === "function") node.height(Math.max(1, Number(node.height() || 1) * safeSy));
+        if (Number.isFinite(currentFontSize) && currentFontSize > 0 && typeof node.fontSize === "function") {
+            node.fontSize(Math.max(1, currentFontSize * safeSy));
+        }
         if (typeof node.scaleX === "function") node.scaleX(1);
         if (typeof node.scaleY === "function") node.scaleY(1);
         if (typeof window.compactSidebarTextNode === "function") window.compactSidebarTextNode(node);
@@ -99,6 +103,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const isAutoBoundsTextNode = (node) => {
         if (!node || !(node instanceof Konva.Text) || !node.getAttr) return false;
         if (node.getAttr("isSidebarText")) return true;
+        if (node.getAttr("isUserText")) return true;
         return !!(
             node.getAttr("directModuleId") ||
             node.getAttr("isName") ||
@@ -112,6 +117,9 @@ document.addEventListener("DOMContentLoaded", () => {
             1,
             (Array.isArray(node.textArr) ? node.textArr.length : 0) || String(node.text?.() || "").split("\n").length
         );
+        if (typeof window.measureTextNodeWrappedLineCount === "function") {
+            return window.measureTextNodeWrappedLineCount(node, fallback);
+        }
         try {
             const probe = new Konva.Text({
                 text: String(node.text?.() || ""),

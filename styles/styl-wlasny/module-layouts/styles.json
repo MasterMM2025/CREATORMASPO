@@ -1,0 +1,203 @@
+{
+  "version": 1,
+  "styles": [
+    {
+      "id": "default",
+      "label": "Domyślny (styl elegancki)",
+      "config": {
+        "singleDirect": {
+          "imgArea": { "x": 2.8, "y": 16.5, "w": 82, "h": 37 },
+          "nameArea": { "x": 35, "y": 56, "w": 38, "h": 20 },
+          "indexPos": { "x": 35, "y": 67.8 },
+          "packagePos": { "x": 35, "y": 72.0 },
+          "flagArea": { "x": 35, "y": 78.8, "w": 18, "h": 2.6 },
+          "priceArea": { "x": 3.5, "y": 57, "s": 24, "w": 0, "h": 0, "r": 0 },
+          "barcodeArea": { "x": 53, "y": 79.2, "w": 38, "h": 11 },
+          "divider": { "x": -1, "y": 0, "h": 0, "w": 0.45 }
+        },
+        "familyDirect": {
+          "useSingleLayout": false,
+          "imageLayouts": {
+            "family2": null,
+            "family3": null,
+            "family4": null
+          }
+        },
+        "text": {
+          "metaFontFamily": "FactoTrial Bold",
+          "priceFontFamily": "FactoTrial Bold",
+          "nameColor": "",
+          "indexColor": "#b9b9b9",
+          "packageColor": "",
+          "indexItalic": true,
+          "metaScaleMultiplier": 1,
+          "noPriceCircle": false,
+          "priceColor": "",
+          "forcePriceBold": false,
+          "priceExtraBold": false,
+          "priceScaleMultiplier": 1,
+          "priceShape": "",
+          "priceBgColor": "",
+          "priceBgRadius": 0
+        }
+      }
+    },
+    {
+      "id": "styl-numer-1",
+      "label": "Styl numer 1",
+      "config": {
+        "singleDirect": {
+          "imgArea": { "x": 12.5, "y": 18.8, "w": 62, "h": 44 },
+          "nameArea": { "x": 66.2, "y": 20.8, "w": 31.8, "h": 29.5 },
+          "indexPos": { "x": 66.2, "y": 34.6 },
+          "packagePos": { "x": 66.2, "y": 38.6 },
+          "priceArea": { "x": 66.2, "y": 59.8, "s": 14.8 },
+          "divider": { "x": 63.6, "y": 15.5, "h": 58.5, "w": 0.55 }
+        },
+        "familyDirect": {
+          "useSingleLayout": true,
+          "imageLayouts": {
+            "family2": [
+              { "x": 0.4, "y": 0.0, "w": 0.62, "h": 0.44 },
+              { "x": 0.4, "y": 0.5, "w": 0.62, "h": 0.44 }
+            ],
+            "family3": [
+              { "x": 0.4, "y": 0.0, "w": 0.62, "h": 0.27 },
+              { "x": 0.4, "y": 0.35, "w": 0.62, "h": 0.27 },
+              { "x": 0.4, "y": 0.7, "w": 0.62, "h": 0.27 }
+            ],
+            "family4": [
+              { "x": 0.4, "y": 0.0, "w": 0.62, "h": 0.2 },
+              { "x": 0.4, "y": 0.26, "w": 0.62, "h": 0.2 },
+              { "x": 0.4, "y": 0.52, "w": 0.62, "h": 0.2 },
+              { "x": 0.4, "y": 0.78, "w": 0.62, "h": 0.2 }
+            ]
+          }
+        },
+        "text": {
+          "metaFontFamily": "Google Sans Flex",
+          "priceFontFamily": "Google Sans Flex",
+          "nameWeight": "700",
+          "indexWeight": "700",
+          "packageWeight": "700",
+          "priceMainWeight": "900",
+          "priceDecWeight": "800",
+          "priceUnitWeight": "800",
+          "nameColor": "#111111",
+          "indexColor": "#b9b9b9",
+          "packageColor": "#111111",
+          "indexItalic": false,
+          "metaScaleMultiplier": 1.12,
+          "noPriceCircle": true,
+          "priceColor": "#d71920",
+          "forcePriceBold": true,
+          "priceExtraBold": false,
+          "priceScaleMultiplier": 1.48,
+          "priceShape": "",
+          "priceBgColor": "",
+          "priceBgRadius": 0
+        }
+      }
+    },
+    {
+      "id": "styl-numer-2",
+      "label": "Styl numer 2",
+      "config": {
+        "singleDirect": {
+          "imgArea": { "x": 10.0, "y": 16.0, "w": 62.5, "h": 50.0 },
+          "nameArea": { "x": 66.5, "y": 22.0, "w": 30.0, "h": 22.0 },
+          "indexPos": { "x": 66.5, "y": 36.2 },
+          "packagePos": { "x": 66.5, "y": 39.8 },
+          "priceArea": { "x": 66.5, "y": 50.8, "w": 24.0, "h": 11.5, "r": 2.2 },
+          "divider": { "x": -1, "y": 0, "h": 0, "w": 0 }
+        },
+        "familyDirect": {
+          "useSingleLayout": true,
+          "imageLayouts": {
+            "family2": [
+              { "x": 0.5, "y": 0.0, "w": 0.72, "h": 0.43 },
+              { "x": 0.5, "y": 0.47, "w": 0.72, "h": 0.43 }
+            ],
+            "family3": [
+              { "x": 0.5, "y": 0.0, "w": 0.72, "h": 0.3 },
+              { "x": 0.5, "y": 0.34, "w": 0.72, "h": 0.3 },
+              { "x": 0.5, "y": 0.68, "w": 0.72, "h": 0.3 }
+            ],
+            "family4": [
+              { "x": 0.5, "y": 0.0, "w": 0.72, "h": 0.22 },
+              { "x": 0.5, "y": 0.26, "w": 0.72, "h": 0.22 },
+              { "x": 0.5, "y": 0.52, "w": 0.72, "h": 0.22 },
+              { "x": 0.5, "y": 0.78, "w": 0.72, "h": 0.22 }
+            ]
+          }
+        },
+        "text": {
+          "nameColor": "#151515",
+          "indexColor": "#9ca3af",
+          "packageColor": "#151515",
+          "indexItalic": false,
+          "metaScaleMultiplier": 1,
+          "noPriceCircle": false,
+          "priceShape": "roundedRect",
+          "priceBgColor": "#2eaee8",
+          "priceBgRadius": 2.2,
+          "forcePriceBold": true,
+          "priceColor": "#ffffff",
+          "priceExtraBold": false,
+          "priceScaleMultiplier": 1.08
+        }
+      }
+    },
+    {
+      "id": "styl-numer-3",
+      "label": "Styl numer 3",
+      "config": {
+        "singleDirect": {
+          "imgArea": { "x": 4.0, "y": 5.0, "w": 92.0, "h": 48.0 },
+          "priceArea": { "x": 17.5, "y": 55.0, "s": 17.0 },
+          "nameArea": { "x": 18.0, "y": 76.0, "w": 76.0, "h": 12.8 },
+          "indexPos": { "x": 18.0, "y": 88.8 },
+          "packagePos": { "x": 18.0, "y": 93.0 },
+          "flagArea": { "x": 0, "y": 0, "w": 0, "h": 0 },
+          "barcodeArea": { "x": 0, "y": 0, "w": 0, "h": 0 },
+          "divider": { "x": -1, "y": 0, "h": 0, "w": 0 }
+        },
+        "familyDirect": {
+          "useSingleLayout": true,
+          "imageLayouts": {
+            "family2": [
+              { "x": 0.02, "y": 0.0, "w": 0.46, "h": 1.0 },
+              { "x": 0.52, "y": 0.0, "w": 0.46, "h": 1.0 }
+            ],
+            "family3": [
+              { "x": 0.01, "y": 0.0, "w": 0.31, "h": 1.0 },
+              { "x": 0.345, "y": 0.0, "w": 0.31, "h": 1.0 },
+              { "x": 0.68, "y": 0.0, "w": 0.31, "h": 1.0 }
+            ],
+            "family4": [
+              { "x": 0.06, "y": 0.0, "w": 0.4, "h": 0.48 },
+              { "x": 0.54, "y": 0.0, "w": 0.4, "h": 0.48 },
+              { "x": 0.06, "y": 0.52, "w": 0.4, "h": 0.48 },
+              { "x": 0.54, "y": 0.52, "w": 0.4, "h": 0.48 }
+            ]
+          }
+        },
+        "text": {
+          "nameColor": "#123d85",
+          "indexColor": "#b9b9b9",
+          "packageColor": "#123d85",
+          "indexItalic": true,
+          "metaScaleMultiplier": 1,
+          "noPriceCircle": true,
+          "priceColor": "#0b4aa2",
+          "forcePriceBold": true,
+          "priceExtraBold": true,
+          "priceScaleMultiplier": 1.35,
+          "priceShape": "",
+          "priceBgColor": "",
+          "priceBgRadius": 0
+        }
+      }
+    }
+  ]
+}

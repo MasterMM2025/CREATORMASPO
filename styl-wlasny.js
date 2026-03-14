@@ -7,9 +7,248 @@
   const IMAGE_BUCKET_BASE = "https://firebasestorage.googleapis.com/v0/b/pdf-creator-f7a8b.firebasestorage.app/o/";
   const IMAGE_FOLDER = "zdjecia - World food";
   const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp"];
+  const IMAGE_EXT_CACHE_STORAGE_KEY = "styl_wlasny_image_ext_cache_v1";
   const DIRECT_CUSTOM_MODULE_MODE = true; // testowy tryb: moduł rysowany bez redraw z importdanych.js
   const CUSTOM_MODULE_BASE_WIDTH = 500;
   const CUSTOM_MODULE_BASE_HEIGHT = 362;
+  const CUSTOM_STYLE_THEME_STYLE_ID = "customStyleDarkUiTheme";
+  const CUSTOM_STYLES_STORAGE_KEY = "styl_wlasny_custom_styles_v1";
+  const CUSTOM_STYLES_REMOTE_PATH = "styles/styles.json";
+  const CUSTOM_PRICE_STYLES_STORAGE_KEY = "styl_wlasny_custom_price_styles_v1";
+  const CUSTOM_PRICE_STYLES_REMOTE_PATH = "styles/customprice.json";
+  const LAST_SELECTED_MODULE_STYLE_STORAGE_KEY = "styl_wlasny_last_module_layout_style_v1";
+  const CUSTOM_STYLES_BUCKET = "gs://pdf-creator-f7a8b.firebasestorage.app";
+  const LOCKED_SYSTEM_STYLE_IDS = new Set(["styl-numer-1", "styl-numer-2", "styl-numer-3"]);
+  let customStylesSyncPromise = null;
+  let customPriceStylesSyncPromise = null;
+  let firebaseStorageApiPromise = null;
+
+  function normalizeCustomStyleList(list) {
+    return (Array.isArray(list) ? list : []).filter((item) => {
+      const id = String(item?.id || "").trim();
+      const label = String(item?.label || "").trim();
+      if (LOCKED_SYSTEM_STYLE_IDS.has(id)) return false;
+      return !!id && !!label && item?.config && typeof item.config === "object";
+    });
+  }
+
+  function normalizeCustomPriceStyleList(list) {
+    return (Array.isArray(list) ? list : []).filter((item) => {
+      const id = String(item?.id || "").trim();
+      const label = String(item?.label || "").trim();
+      const snapshot = item?.snapshot && typeof item.snapshot === "object" ? item.snapshot : null;
+      const nodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes : [];
+      return !!id && !!label && nodes.length > 0;
+    });
+  }
+
+  function loadPersistedModuleLayoutStyles() {
+    try {
+      const raw = localStorage.getItem(CUSTOM_STYLES_STORAGE_KEY);
+      return normalizeCustomStyleList(JSON.parse(raw || "[]"));
+    } catch (_err) {
+      return [];
+    }
+  }
+
+  function savePersistedModuleLayoutStyles(list) {
+    try {
+      localStorage.setItem(CUSTOM_STYLES_STORAGE_KEY, JSON.stringify(normalizeCustomStyleList(list)));
+    } catch (_err) {}
+  }
+
+  function loadPersistedCustomPriceStyles() {
+    try {
+      const raw = localStorage.getItem(CUSTOM_PRICE_STYLES_STORAGE_KEY);
+      return normalizeCustomPriceStyleList(JSON.parse(raw || "[]"));
+    } catch (_err) {
+      return [];
+    }
+  }
+
+  function savePersistedCustomPriceStyles(list) {
+    try {
+      localStorage.setItem(CUSTOM_PRICE_STYLES_STORAGE_KEY, JSON.stringify(normalizeCustomPriceStyleList(list)));
+    } catch (_err) {}
+  }
+
+  function loadLastSelectedModuleLayoutStyleId() {
+    try {
+      const raw = String(localStorage.getItem(LAST_SELECTED_MODULE_STYLE_STORAGE_KEY) || "").trim();
+      return raw || "default";
+    } catch (_err) {
+      return "default";
+    }
+  }
+
+  function saveLastSelectedModuleLayoutStyleId(styleId) {
+    try {
+      const safeId = String(styleId || "default").trim() || "default";
+      localStorage.setItem(LAST_SELECTED_MODULE_STYLE_STORAGE_KEY, safeId);
+    } catch (_err) {}
+  }
+
+  function mergeCustomStyleLists(primary, secondary, normalizer = normalizeCustomStyleList) {
+    const normalizeList = typeof normalizer === "function" ? normalizer : normalizeCustomStyleList;
+    const merged = [];
+    const seen = new Map();
+    [...normalizeList(secondary), ...normalizeList(primary)].forEach((item) => {
+      const id = String(item?.id || "").trim();
+      if (!id) return;
+      const copy = JSON.parse(JSON.stringify(item));
+      if (seen.has(id)) {
+        merged[seen.get(id)] = copy;
+        return;
+      }
+      seen.set(id, merged.length);
+      merged.push(copy);
+    });
+    return merged;
+  }
+
+  function registerPersistedModuleLayoutStyles() {
+    if (typeof window.registerStylWlasnyModuleLayoutStyle !== "function") return;
+    const persisted = loadPersistedModuleLayoutStyles();
+    persisted.forEach((styleDef) => {
+      try {
+        window.registerStylWlasnyModuleLayoutStyle(styleDef);
+      } catch (_err) {}
+    });
+  }
+
+  function createStorageNotReadyError(message) {
+    const error = new Error(message || "Firebase Storage nie jest jeszcze gotowy.");
+    error.code = "storage-not-ready";
+    return error;
+  }
+
+  function resolveFirebaseStorageInstance(getStorageFn) {
+    if (window.firebaseStorage) return window.firebaseStorage;
+    if (typeof getStorageFn !== "function") return null;
+    const firebaseApp = window.firebaseApp || null;
+    if (!firebaseApp) return null;
+    try {
+      return getStorageFn(firebaseApp, CUSTOM_STYLES_BUCKET);
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  async function ensureFirebaseStorageApiForStyles() {
+    if (!firebaseStorageApiPromise) {
+      firebaseStorageApiPromise = (async () => {
+        const api = window.firebaseStorageExports || await import("https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js");
+        const refFn = api?.ref;
+        const getDownloadURLFn = api?.getDownloadURL;
+        const getStorageFn = api?.getStorage;
+        if (typeof refFn !== "function" || typeof getDownloadURLFn !== "function") {
+          throw new Error("Brak API Firebase Storage.");
+        }
+        const storage = resolveFirebaseStorageInstance(getStorageFn);
+        if (!storage) {
+          throw createStorageNotReadyError("Firebase Storage nie zostal jeszcze zainicjalizowany.");
+        }
+        return { storage, ref: refFn, getDownloadURL: getDownloadURLFn };
+      })();
+    }
+    try {
+      return await firebaseStorageApiPromise;
+    } catch (err) {
+      firebaseStorageApiPromise = null;
+      throw err;
+    }
+  }
+
+  async function loadPersistedModuleLayoutStylesFromRemote() {
+    const api = await ensureFirebaseStorageApiForStyles();
+    const fileRef = api.ref(api.storage, CUSTOM_STYLES_REMOTE_PATH);
+    const url = await api.getDownloadURL(fileRef);
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const styles = Array.isArray(payload) ? payload : payload?.styles;
+    return normalizeCustomStyleList(styles);
+  }
+
+  async function loadPersistedCustomPriceStylesFromRemote() {
+    const api = await ensureFirebaseStorageApiForStyles();
+    const fileRef = api.ref(api.storage, CUSTOM_PRICE_STYLES_REMOTE_PATH);
+    const url = await api.getDownloadURL(fileRef);
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const styles = Array.isArray(payload) ? payload : payload?.styles;
+    return normalizeCustomPriceStyleList(styles);
+  }
+
+  async function ensureStylWlasnyCustomStylesReady() {
+    if (!customStylesSyncPromise) {
+      customStylesSyncPromise = (async () => {
+        const localStyles = loadPersistedModuleLayoutStyles();
+        if (localStyles.length) {
+          localStyles.forEach((styleDef) => {
+            try { window.registerStylWlasnyModuleLayoutStyle?.(styleDef); } catch (_err) {}
+          });
+        }
+        try {
+          const remoteStyles = await loadPersistedModuleLayoutStylesFromRemote();
+          const merged = mergeCustomStyleLists(remoteStyles, localStyles);
+          savePersistedModuleLayoutStyles(merged);
+          merged.forEach((styleDef) => {
+            try { window.registerStylWlasnyModuleLayoutStyle?.(styleDef); } catch (_err) {}
+          });
+          return merged;
+        } catch (err) {
+          if (err?.code === "storage-not-ready") {
+            customStylesSyncPromise = null;
+            return localStyles;
+          }
+          console.warn("Styl Własny: nie udało się wczytać styles/styles.json:", err);
+          return localStyles;
+        }
+      })();
+    }
+    try {
+      return await customStylesSyncPromise;
+    } catch (err) {
+      customStylesSyncPromise = null;
+      throw err;
+    }
+  }
+
+  async function ensureStylWlasnyCustomPriceStylesReady() {
+    if (!customPriceStylesSyncPromise) {
+      customPriceStylesSyncPromise = (async () => {
+        const localStyles = loadPersistedCustomPriceStyles();
+        try {
+          const remoteStyles = await loadPersistedCustomPriceStylesFromRemote();
+          const merged = mergeCustomStyleLists(remoteStyles, localStyles, normalizeCustomPriceStyleList);
+          savePersistedCustomPriceStyles(merged);
+          return merged;
+        } catch (err) {
+          if (err?.code === "storage-not-ready") {
+            customPriceStylesSyncPromise = null;
+            return localStyles;
+          }
+          console.warn("Styl Własny: nie udało się wczytać styles/customprice.json:", err);
+          return localStyles;
+        }
+      })();
+    }
+    try {
+      return await customPriceStylesSyncPromise;
+    } catch (err) {
+      customPriceStylesSyncPromise = null;
+      throw err;
+    }
+  }
+
+  registerPersistedModuleLayoutStyles();
+  void ensureStylWlasnyCustomStylesReady();
+  void ensureStylWlasnyCustomPriceStylesReady().then(() => {
+    try { window.refreshStylWlasnyCustomPriceStyleOptions?.(); } catch (_err) {}
+  });
+
   function getRegisteredPriceBadgeStyles() {
     const list = Array.isArray(window.STYL_WLASNY_REGISTRY?.priceBadges)
       ? window.STYL_WLASNY_REGISTRY.priceBadges
@@ -47,6 +286,15 @@
       .filter((item) => item.id && item.label);
   }
 
+  function syncRegisteredModuleLayoutStylesIntoOptions() {
+    const registered = getRegisteredModuleLayoutStyles();
+    registered.forEach((styleDef) => {
+      const idx = MODULE_LAYOUT_STYLE_OPTIONS.findIndex((item) => String(item?.id || "") === String(styleDef.id || ""));
+      if (idx >= 0) MODULE_LAYOUT_STYLE_OPTIONS[idx] = styleDef;
+      else MODULE_LAYOUT_STYLE_OPTIONS.push(styleDef);
+    });
+  }
+
   const MODULE_LAYOUT_STYLE_OPTIONS = (() => {
     const out = [{ id: "default", label: "Domyślny (styl elegancki)", config: {} }];
     const seen = new Set(["default"]);
@@ -59,7 +307,7 @@
   })();
   const STYLE_FONT_PRESETS = {
     default: { meta: "FactoTrial Bold", price: "FactoTrial Bold" },
-    "styl-numer-1": { meta: "FactoTrial Bold", price: "FactoTrial Bold" },
+    "styl-numer-1": { meta: "Google Sans Flex", price: "Google Sans Flex" },
     "styl-numer-2": { meta: "FactoTrial Bold", price: "FactoTrial Bold" },
     "styl-numer-3": { meta: "FactoTrial Bold", price: "FactoTrial Bold" }
   };
@@ -67,7 +315,19 @@
   const DEFAULT_INDEX_TEXT_COLOR = "#b9b9b9";
   const getStyleFontPreset = (styleId) => STYLE_FONT_PRESETS[String(styleId || "default")] || DEFAULT_STYLE_FONT_PRESET;
   const CUSTOM_SINGLE_STYLE_IDS = new Set(["styl-numer-1", "styl-numer-2", "styl-numer-3"]);
-  const isCustomSingleStyle = (styleId) => CUSTOM_SINGLE_STYLE_IDS.has(String(styleId || "").trim());
+  const isCustomSingleStyle = (styleId) => {
+    const id = String(styleId || "").trim();
+    if (!id) return false;
+    if (CUSTOM_SINGLE_STYLE_IDS.has(id)) return true;
+    syncRegisteredModuleLayoutStylesIntoOptions();
+    const meta = MODULE_LAYOUT_STYLE_OPTIONS.find((item) => String(item?.id || "") === id);
+    const cfg = meta?.config && typeof meta.config === "object" ? meta.config : null;
+    return !!(cfg && (
+      (cfg.singleDirect && typeof cfg.singleDirect === "object") ||
+      (cfg.text && typeof cfg.text === "object") ||
+      (cfg.familyDirect && typeof cfg.familyDirect === "object")
+    ));
+  };
 
   let currentPreviewProduct = null;
   let currentPreviewImageUrl = null;
@@ -81,7 +341,26 @@
   const customResolvedImageUrlsByIndex = new Map();
   const customImageResolvePromisesByIndex = new Map();
   const customImageMetaCache = new Map();
+  const customImageExtensionCache = (() => {
+    try {
+      const raw = localStorage.getItem(IMAGE_EXT_CACHE_STORAGE_KEY);
+      const parsed = JSON.parse(raw || "{}");
+      if (!parsed || typeof parsed !== "object") return new Map();
+      const out = new Map();
+      Object.keys(parsed).forEach((key) => {
+        const idx = String(key || "").trim();
+        const ext = String(parsed[key] || "").trim().toLowerCase();
+        if (!idx || !IMAGE_EXTENSIONS.includes(ext)) return;
+        out.set(idx, ext);
+      });
+      return out;
+    } catch (_err) {
+      return new Map();
+    }
+  })();
   const customBadgeImageCache = new Map();
+  const customCanvasFontLoadCache = new Map();
+  let customImageExtCachePersistTimer = 0;
   let customDirectModuleSeq = 0;
   let directModuleUngroupProtectionInstalled = false;
   let directModuleStabilityWorkInProgress = false;
@@ -89,7 +368,8 @@
   let isCustomPlacementActive = false;
   let customPriceCircleColor = "#d71920";
   let customPriceBadgeStyleId = "solid";
-  let customModuleLayoutStyleId = "default";
+  let customModuleLayoutStyleId = loadLastSelectedModuleLayoutStyleId();
+  let customPriceLayoutStyleId = "";
   let customPriceTextColor = "#ffffff";
   let customCurrencySymbol = "£";
   let customPriceTextScale = 1;
@@ -120,8 +400,11 @@
   let customPriceTextAlign = "left";
   let customDraftModules = [];
   let customDraftModuleSeq = 0;
+  let customActiveDraftId = "";
   let customFontReadyListenerBound = false;
   let customStyleInteractionsInitialized = false;
+  let customEditorBlankResetMode = false;
+  let customSnapshotPreviewRenderStamp = 0;
   let customGetCurrentEditorSnapshot = null;
   let customRestoreDraftToEditor = null;
   let customEditorProductsById = null;
@@ -130,11 +413,31 @@
   let familyBaseImageUrl = null;
   let currentFamilyProducts = [];
   const CUSTOM_DRAFT_MODULE_LIMIT = 240;
-  const CUSTOM_IMPORT_CONCURRENCY = 8;
+  const CUSTOM_IMPORT_CONCURRENCY = 12;
   const customPreviewVisibility = {
     showFlag: false,
     showBarcode: false
   };
+
+  function getElegantPricePreviewScale(styleId) {
+    return String(styleId || "default") === "default" ? 0.61 : 1;
+  }
+
+  function getElegantPriceCatalogScale(styleId) {
+    return String(styleId || "default") === "default" ? 0.68 : 1;
+  }
+
+  function isElegantDefaultStyle(styleId) {
+    return String(styleId || "default") === "default";
+  }
+
+  function getElegantPriceTextShiftXPct(styleId) {
+    return isElegantDefaultStyle(styleId) ? 0 : 0;
+  }
+
+  function getElegantPriceTextScaleBoost(styleId) {
+    return isElegantDefaultStyle(styleId) ? 1.05 : 1;
+  }
 
 // =====================================================
 // RĘCZNA KONFIGURACJA UKŁADU ZDJĘĆ (EDYTUJ TUTAJ)
@@ -144,7 +447,7 @@
 const CUSTOM_PRODUCT_LAYOUTS = {
   defaults: {
     single: [
-      { x: 0.02, y: 0.02, w: 0.96, h: 0.96 }
+      { x: 0.00, y: 0.00, w: 1.00, h: 1.00 }
     ],
     family2: [
       { x: 0.00, y: 0.00,  w: 1.00, h: 0.50 },   // 50% + 50% = idealny podział bez dziury
@@ -205,6 +508,24 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const v = Number(n);
     if (!Number.isFinite(v)) return fallback;
     return Math.max(0, Math.min(1, v));
+  }
+
+  function normalizePriceScaleMultiplier(value, fallback = 1) {
+    const v = Number(value);
+    if (!Number.isFinite(v)) return fallback;
+    return Math.max(0.35, Math.min(4, v));
+  }
+
+  function getStoredCustomPriceTypographyFactors(text = {}) {
+    const main = Number(text?.priceMainFactor);
+    const dec = Number(text?.priceDecFactor);
+    const unit = Number(text?.priceUnitFactor);
+    if (!(main > 0) || !(unit > 0) || !(dec >= 0)) return null;
+    return {
+      main: Math.max(0.05, Math.min(2.5, main)),
+      dec: Math.max(0, Math.min(2.5, dec)),
+      unit: Math.max(0.05, Math.min(2.5, unit))
+    };
   }
 
   function normalizeFamilySpacingTightness(value, fallback = 0) {
@@ -315,6 +636,49 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
   function waitMs(ms) {
     return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+  }
+
+  function schedulePersistImageExtensionCache() {
+    if (customImageExtCachePersistTimer) return;
+    customImageExtCachePersistTimer = setTimeout(() => {
+      customImageExtCachePersistTimer = 0;
+      try {
+        const payload = {};
+        customImageExtensionCache.forEach((ext, idx) => {
+          const key = String(idx || "").trim();
+          const safeExt = String(ext || "").trim().toLowerCase();
+          if (!key || !IMAGE_EXTENSIONS.includes(safeExt)) return;
+          payload[key] = safeExt;
+        });
+        localStorage.setItem(IMAGE_EXT_CACHE_STORAGE_KEY, JSON.stringify(payload));
+      } catch (_err) {}
+    }, 180);
+  }
+
+  async function ensureCustomCanvasFontsReady(fontFamilies = []) {
+    const fontsApi = document?.fonts;
+    if (!fontsApi || typeof fontsApi.load !== "function") return;
+    if (window.APP_FONT_LOADER_PROMISE && typeof window.APP_FONT_LOADER_PROMISE.then === "function") {
+      try { await window.APP_FONT_LOADER_PROMISE; } catch (_err) {}
+    }
+    const uniqueFamilies = Array.from(new Set(
+      (Array.isArray(fontFamilies) ? fontFamilies : [])
+        .map((family) => String(family || "").trim())
+        .filter(Boolean)
+    ));
+    await Promise.allSettled(uniqueFamilies.map((family) => {
+      const cached = customCanvasFontLoadCache.get(family);
+      if (cached) return cached;
+      const loadPromise = Promise.race([
+        Promise.allSettled([
+          fontsApi.load(`400 16px "${family}"`),
+          fontsApi.load(`700 16px "${family}"`)
+        ]),
+        waitMs(1800)
+      ]).catch(() => null);
+      customCanvasFontLoadCache.set(family, loadPromise);
+      return loadPromise;
+    }));
   }
 
   async function mapWithConcurrencyLimit(items, concurrency, mapper) {
@@ -462,7 +826,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       .filter(Boolean);
     if (!indexes.length && base?.index) indexes.push(String(base.index).trim());
     const mergedIndex = normalizeIndexKey(Array.from(new Set(indexes)).join(","));
-    const styleId = String(base?.MODULE_LAYOUT_STYLE_ID || customModuleLayoutStyleId || "default");
+    const styleId = String(customModuleLayoutStyleId || "default");
     const layouts = readRenderedImageLayoutsFromPreviewTrack(count);
     pendingPreviewExportLayouts = {
       baseIndex: String(base?.index || "").trim(),
@@ -547,7 +911,274 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     });
   }
 
+  function ensureCustomStyleDarkTheme() {
+    if (document.getElementById(CUSTOM_STYLE_THEME_STYLE_ID)) return;
+    const styleEl = document.createElement("style");
+    styleEl.id = CUSTOM_STYLE_THEME_STYLE_ID;
+    styleEl.textContent = `
+      #customStyleModal.custom-style-dark-modal {
+        backdrop-filter: blur(10px);
+      }
+
+      #customStyleModal > .custom-style-dark-shell {
+        background:
+          radial-gradient(120% 140% at 0% 0%, rgba(34, 211, 238, 0.14), transparent 34%),
+          radial-gradient(100% 120% at 100% 0%, rgba(16, 185, 129, 0.14), transparent 30%),
+          linear-gradient(180deg, #08111f 0%, #0b1627 52%, #09111d 100%) !important;
+        border: 1px solid rgba(125, 211, 252, 0.14) !important;
+        box-shadow: 0 34px 84px rgba(2, 6, 23, 0.62) !important;
+        color: #dbe7f6;
+      }
+
+      #customStyleModal .custom-style-modal-grid {
+        gap: 20px !important;
+      }
+
+      #customStyleModal .custom-style-panel {
+        border-radius: 18px !important;
+        border: 1px solid rgba(148, 163, 184, 0.16) !important;
+        background: linear-gradient(180deg, rgba(9, 15, 26, 0.84), rgba(12, 20, 36, 0.94)) !important;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 36px rgba(2, 6, 23, 0.18) !important;
+      }
+
+      #customStyleModal .custom-style-panel--preview {
+        position: sticky;
+        top: 0;
+      }
+
+      #customStyleModal .custom-style-panel-toolbar,
+      #customStyleModal .custom-style-status,
+      #customStyleModal .custom-style-draft-panel,
+      #customStyleModal .custom-style-thumb-card,
+      #customStyleModal .custom-style-info-card,
+      #customStyleModal .custom-style-draft-card,
+      #customStyleModal .custom-style-blank {
+        border: 1px solid rgba(148, 163, 184, 0.16) !important;
+        background: rgba(5, 10, 18, 0.72) !important;
+        color: #dbe7f6 !important;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03) !important;
+      }
+
+      #customStyleModal .custom-style-heading {
+        color: #f8fbff !important;
+        letter-spacing: 0.02em;
+      }
+
+      #customStyleModal .custom-style-muted {
+        color: #8ea4c2 !important;
+      }
+
+      #customStyleModal .custom-style-chip {
+        border: 1px solid rgba(148, 163, 184, 0.16) !important;
+        background: rgba(8, 13, 24, 0.78) !important;
+        color: #dbe7f6 !important;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03) !important;
+      }
+
+      #customStyleModal .custom-style-field {
+        background: rgba(4, 8, 16, 0.94) !important;
+        border: 1px solid rgba(96, 165, 250, 0.18) !important;
+        color: #f8fbff !important;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03) !important;
+      }
+
+      #customStyleModal .custom-style-field::placeholder {
+        color: #8095b2;
+      }
+
+      #customStyleModal .custom-style-field:focus {
+        outline: none;
+        border-color: rgba(34, 211, 238, 0.68) !important;
+        box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12) !important;
+      }
+
+      #customStyleModal .custom-style-btn {
+        border: 1px solid rgba(148, 163, 184, 0.2) !important;
+        background: rgba(8, 14, 24, 0.82) !important;
+        color: #e5eefb !important;
+        box-shadow: 0 12px 24px rgba(2, 6, 23, 0.14) !important;
+        transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease !important;
+      }
+
+      #customStyleModal .custom-style-btn:hover {
+        transform: translateY(-1px);
+        border-color: rgba(103, 232, 249, 0.42) !important;
+        box-shadow: 0 18px 30px rgba(2, 6, 23, 0.22) !important;
+      }
+
+      #customStyleModal .custom-style-btn--primary {
+        border-color: transparent !important;
+        background: linear-gradient(135deg, #22d3ee 0%, #34d399 100%) !important;
+        color: #05202a !important;
+        box-shadow: 0 16px 30px rgba(16, 185, 129, 0.28) !important;
+      }
+
+      #customStyleModal .custom-style-btn--accent {
+        border-color: rgba(34, 211, 238, 0.26) !important;
+        background: rgba(34, 211, 238, 0.12) !important;
+        color: #8cecff !important;
+      }
+
+      #customStyleModal .custom-style-btn--ghost {
+        background: rgba(15, 23, 42, 0.58) !important;
+      }
+
+      #customStyleModal .custom-style-btn--icon {
+        width: 44px;
+        height: 44px;
+        padding: 0 !important;
+        display: inline-flex !important;
+        align-items: center;
+        justify-content: center;
+        border-radius: 14px !important;
+        font-size: 21px !important;
+      }
+
+      #customStyleModal .custom-style-color {
+        width: 28px !important;
+        height: 24px !important;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      #customStyleModal .custom-style-toggle-mark {
+        background: rgba(15, 23, 42, 0.76) !important;
+      }
+
+      #customStyleModal .custom-style-preview-card {
+        background: linear-gradient(180deg, #f8fbff 0%, #edf3fb 100%) !important;
+        border: 1px solid rgba(148, 163, 184, 0.28) !important;
+        box-shadow: 0 22px 42px rgba(2, 6, 23, 0.18) !important;
+      }
+
+      #customStyleModal .custom-style-preview-card::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        border-radius: inherit;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.44);
+      }
+
+      #customStyleModal .custom-style-image-box,
+      #customStyleModal .custom-style-draft-thumb,
+      #customStyleModal .custom-style-draft-thumb-grid {
+        background: rgba(248, 250, 252, 0.98) !important;
+      }
+
+      #customStyleModal .custom-style-editable {
+        transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+      }
+
+      #customStyleModal .custom-style-editable:focus {
+        border-color: rgba(34, 211, 238, 0.72) !important;
+        box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12);
+      }
+
+      #customStyleModal #customDraftModulesList {
+        padding-right: 4px;
+      }
+
+      #customStyleModal #customDraftModulesList::-webkit-scrollbar {
+        width: 8px;
+      }
+
+      #customStyleModal #customDraftModulesList::-webkit-scrollbar-track {
+        background: rgba(15, 23, 42, 0.36);
+        border-radius: 999px;
+      }
+
+      #customStyleModal #customDraftModulesList::-webkit-scrollbar-thumb {
+        background: rgba(96, 165, 250, 0.34);
+        border-radius: 999px;
+      }
+
+      #customStyleModal .custom-style-draft-card {
+        border-radius: 14px !important;
+        padding: 10px !important;
+      }
+
+      #customStyleModal .custom-style-draft-thumb,
+      #customStyleModal .custom-style-draft-thumb-grid {
+        border-color: rgba(148, 163, 184, 0.22) !important;
+      }
+
+      #customAddLoadingOverlay .custom-style-overlay-card,
+      #customImportProgressOverlay .custom-style-overlay-card {
+        border: 1px solid rgba(125, 211, 252, 0.18) !important;
+        background:
+          radial-gradient(120% 120% at 0% 0%, rgba(34, 211, 238, 0.14), transparent 34%),
+          linear-gradient(180deg, rgba(7, 12, 22, 0.98), rgba(10, 16, 29, 0.98)) !important;
+        box-shadow: 0 26px 52px rgba(2, 6, 23, 0.38) !important;
+      }
+
+      #customAddLoadingOverlay .custom-style-overlay-label,
+      #customImportProgressOverlay .custom-style-overlay-label {
+        color: #f8fbff !important;
+      }
+
+      #customAddLoadingOverlay .custom-style-spinner {
+        border-color: rgba(148, 163, 184, 0.26) !important;
+        border-top-color: #67e8f9 !important;
+      }
+
+      #customImportProgressOverlay .custom-style-progress-track {
+        background: rgba(148, 163, 184, 0.18) !important;
+      }
+
+      #customImportProgressOverlay .custom-style-progress-percent {
+        color: #9fb3ce !important;
+      }
+
+      @media (max-width: 1180px) {
+        #customStyleModal .custom-style-modal-grid {
+          grid-template-columns: 1fr !important;
+        }
+
+        #customStyleModal .custom-style-panel--preview {
+          position: static;
+        }
+      }
+    `;
+    document.head.appendChild(styleEl);
+  }
+
+  function decorateCustomStyleInfo(info) {
+    if (!info) return;
+    info.classList.add("custom-style-status", "custom-style-info");
+    info.querySelector("#customStyleImageBox")?.classList.add("custom-style-image-box");
+    info.querySelectorAll("[contenteditable='true']").forEach((el) => el.classList.add("custom-style-editable"));
+  }
+
+  function decorateCustomStyleModalUi(modal) {
+    ensureCustomStyleDarkTheme();
+    if (!modal) return;
+    modal.classList.add("custom-style-dark-modal");
+    modal.firstElementChild?.classList.add("custom-style-dark-shell");
+    modal.querySelectorAll("button").forEach((el) => el.classList.add("custom-style-btn"));
+    modal.querySelectorAll("label:not(.custom-style-muted)").forEach((el) => el.classList.add("custom-style-chip"));
+    modal.querySelectorAll("select, input[type='text']").forEach((el) => el.classList.add("custom-style-field"));
+    modal.querySelectorAll("input[type='color']").forEach((el) => el.classList.add("custom-style-color"));
+    modal.querySelector("#customExcelImportBtn")?.classList.add("custom-style-btn--primary");
+    modal.querySelector("#customAddProductBtn")?.classList.add("custom-style-btn--primary");
+    modal.querySelector("#customApplyStyleToImportedBtn")?.classList.add("custom-style-btn--accent");
+    modal.querySelector("#customOpenDraftTrayBtn")?.classList.add("custom-style-btn--accent");
+    modal.querySelector("#customBulkImageImportBtn")?.classList.add("custom-style-btn--ghost");
+    modal.querySelector("#customSaveDraftBtn")?.classList.add("custom-style-btn--ghost");
+    modal.querySelector("#customAddFamilyProductBtn")?.classList.add("custom-style-btn--ghost");
+    modal.querySelector("#customClearEditorBtn")?.classList.add("custom-style-btn--ghost");
+    modal.querySelector("#customStyleClose")?.classList.add("custom-style-btn--icon");
+    modal.querySelector("#customShowFlagToggleMark")?.classList.add("custom-style-toggle-mark");
+    modal.querySelector("#customShowBarcodeToggleMark")?.classList.add("custom-style-toggle-mark");
+    modal.querySelector("#customPreviewCard")?.classList.add("custom-style-preview-card");
+    modal.querySelector("#customExcelImportStatus")?.classList.add("custom-style-status");
+    modal.querySelector("#customFamilyStatusBox")?.classList.add("custom-style-status");
+    modal.querySelector("#customDraftModulesList")?.classList.add("custom-style-draft-list");
+    decorateCustomStyleInfo(modal.querySelector("#customStyleInfo"));
+  }
+
   function ensureCustomAddLoadingOverlay() {
+    ensureCustomStyleDarkTheme();
     let styleEl = document.getElementById("customAddLoadingStyle");
     if (!styleEl) {
       styleEl = document.createElement("style");
@@ -571,14 +1202,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       "display:none",
       "align-items:center",
       "justify-content:center",
-      "background:rgba(15,23,42,.22)",
+      "background:rgba(3,8,18,.48)",
       "z-index:1000002",
       "pointer-events:auto"
     ].join(";");
     overlay.innerHTML = `
-      <div style="min-width:260px;max-width:min(90vw,420px);display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:12px;background:#ffffff;border:1px solid #d7dfec;box-shadow:0 10px 30px rgba(0,0,0,.14);font-family:Inter,Arial,sans-serif;">
-        <div style="width:18px;height:18px;border-radius:999px;border:2px solid #cbd5e1;border-top-color:#0f172a;animation:customAddSpin .8s linear infinite;flex:0 0 auto;"></div>
-        <div id="customAddLoadingLabel" style="font-size:13px;font-weight:700;color:#0f172a;">Trwa dodawanie produktu...</div>
+      <div class="custom-style-overlay-card" style="min-width:260px;max-width:min(90vw,420px);display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:16px;background:#ffffff;border:1px solid #d7dfec;box-shadow:0 10px 30px rgba(0,0,0,.14);font-family:Inter,Arial,sans-serif;">
+        <div class="custom-style-spinner" style="width:18px;height:18px;border-radius:999px;border:2px solid #cbd5e1;border-top-color:#0f172a;animation:customAddSpin .8s linear infinite;flex:0 0 auto;"></div>
+        <div id="customAddLoadingLabel" class="custom-style-overlay-label" style="font-size:13px;font-weight:700;color:#0f172a;">Trwa dodawanie produktu...</div>
       </div>
     `;
     document.body.appendChild(overlay);
@@ -598,6 +1229,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   }
 
   function ensureCustomImportProgressOverlay() {
+    ensureCustomStyleDarkTheme();
     let overlay = document.getElementById("customImportProgressOverlay");
     if (overlay) return overlay;
     overlay = document.createElement("div");
@@ -608,17 +1240,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       "display:none",
       "align-items:center",
       "justify-content:center",
-      "background:rgba(15,23,42,.28)",
+      "background:rgba(3,8,18,.54)",
       "z-index:1000003",
       "pointer-events:auto"
     ].join(";");
     overlay.innerHTML = `
-      <div style="width:min(92vw,520px);padding:18px;border-radius:14px;background:#ffffff;border:1px solid #d7dfec;box-shadow:0 10px 30px rgba(0,0,0,.14);font-family:Inter,Arial,sans-serif;">
-        <div id="customImportProgressLabel" style="font-size:13px;font-weight:800;color:#0f172a;margin-bottom:10px;">Trwa import produktów...</div>
-        <div style="height:12px;border-radius:999px;background:#e2e8f0;overflow:hidden;">
+      <div class="custom-style-overlay-card" style="width:min(92vw,520px);padding:18px;border-radius:16px;background:#ffffff;border:1px solid #d7dfec;box-shadow:0 10px 30px rgba(0,0,0,.14);font-family:Inter,Arial,sans-serif;">
+        <div id="customImportProgressLabel" class="custom-style-overlay-label" style="font-size:13px;font-weight:800;color:#0f172a;margin-bottom:10px;">Trwa import produktów...</div>
+        <div class="custom-style-progress-track" style="height:12px;border-radius:999px;background:#e2e8f0;overflow:hidden;">
           <div id="customImportProgressBar" style="height:100%;width:0%;background:linear-gradient(90deg,#06b6d4,#14b8a6);transition:width .22s ease;"></div>
         </div>
-        <div id="customImportProgressPercent" style="margin-top:8px;font-size:11px;color:#334155;">0%</div>
+        <div id="customImportProgressPercent" class="custom-style-progress-percent" style="margin-top:8px;font-size:11px;color:#334155;">0%</div>
       </div>
     `;
     document.body.appendChild(overlay);
@@ -893,6 +1525,32 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     };
   }
 
+  function normalizePriceLayoutMode(value, fallback = "classic") {
+    const raw = String(value || "").trim().toLowerCase();
+    if (raw === "prefix") return "prefix";
+    return fallback;
+  }
+
+  function buildPriceLayoutParts(currencySymbol, unitSuffix, layoutMode = "classic") {
+    const safeCurrency = String(currencySymbol || "£").trim() || "£";
+    const safeUnit = String(unitSuffix || "SZT.").trim() || "SZT.";
+    const normalized = normalizePriceLayoutMode(layoutMode, "classic");
+    if (normalized === "prefix") {
+      return {
+        mode: "prefix",
+        showCurrencyPrefix: true,
+        currencyText: safeCurrency,
+        unitText: `/ ${safeUnit}`
+      };
+    }
+    return {
+      mode: "classic",
+      showCurrencyPrefix: false,
+      currencyText: "",
+      unitText: `${safeCurrency} / ${safeUnit}`
+    };
+  }
+
   function normalizeFontOption(value, fallback = "Arial") {
     const v = String(value || "").trim();
     if (!v) return fallback;
@@ -982,17 +1640,47 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return customLastEditorSnapshot;
   }
 
-  function buildKonvaFontStyle({ bold = false, italic = false } = {}) {
+  function closeEmbeddedCustomStyleCreator() {
+    if (typeof window.CustomStyleCreatorUI?.close === "function") {
+      try { window.CustomStyleCreatorUI.close(); } catch (_err) {}
+    }
+  }
+
+  function buildKonvaFontStyle({ bold = false, italic = false, weight = "" } = {}) {
+    const normalizedWeight = String(weight || "").trim();
+    if (normalizedWeight) return italic ? `italic ${normalizedWeight}` : normalizedWeight;
     if (bold && italic) return "bold italic";
     if (bold) return "bold";
     if (italic) return "italic";
     return "normal";
   }
 
+  const DIRECT_PAGE_PRICE_SIZE_BASE = 24;
+
+  function getDirectPageStyleOverride(page, type) {
+    const styleKey = `${String(type || "").trim()}Style`;
+    const raw = page?.settings?.[styleKey];
+    if (!raw || typeof raw !== "object") return null;
+
+    const size = Number(raw.size);
+    const fontFamily = normalizeFontOption(raw.fontFamily || "", "");
+    const color = String(raw.color || "").trim();
+
+    return {
+      size: Number.isFinite(size) && size > 0 ? size : null,
+      fontFamily,
+      color,
+      bold: raw.bold === true,
+      italic: raw.italic === true,
+      underline: raw.underline === true
+    };
+  }
+
   function resetCustomStyleEditorParamsToDefaults() {
     customPriceCircleColor = "#d71920";
     customPriceBadgeStyleId = "solid";
     customModuleLayoutStyleId = "default";
+    customPriceLayoutStyleId = "";
     customPriceTextColor = "#ffffff";
     customCurrencySymbol = "£";
     customPriceTextScale = 1;
@@ -1011,8 +1699,15 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     customPreviewVisibility.showBarcode = false;
   }
 
-  function resetCustomStyleEditorSessionState() {
+  function resetCustomStyleEditorSessionState(options = {}) {
+    const blankOnNextOpen = !!options.blankOnNextOpen;
+    const allowDraftRestore = !!options.allowDraftRestore;
+    closeEmbeddedCustomStyleCreator();
     resetCustomStyleEditorParamsToDefaults();
+    customEditorBlankResetMode = blankOnNextOpen;
+    const preferredDraft = allowDraftRestore && Array.isArray(customDraftModules) && customDraftModules.length
+      ? (customDraftModules.find((d) => String(d?.id || "") === String(customActiveDraftId || "")) || customDraftModules[0] || null)
+      : null;
 
     familyBaseProduct = null;
     familyBaseImageUrl = null;
@@ -1021,6 +1716,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     currentPreviewImageUrl = null;
     currentPickerProduct = null;
     currentPickerImageUrl = null;
+    if (!allowDraftRestore) customActiveDraftId = "";
     pendingPreviewExportLayouts = null;
     isCustomPlacementActive = false;
     window.__customPlacementActive = false;
@@ -1033,37 +1729,46 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     const search = document.getElementById("customStyleSearch");
     if (search) search.value = "";
-
-    const info = document.getElementById("customStyleInfo");
-    if (info) {
-      info.innerHTML = `
-        <div style="color:#64748b;">Wybierz produkt z listy, aby rozpocząć.</div>
-      `;
-    }
+    const firstProduct = resetCustomStyleProductPickerUi();
 
     const imageBox = document.getElementById("customStyleImageBox");
     if (imageBox) {
       imageBox.innerHTML = "brak";
       imageBox.style.color = "#94a3b8";
+      imageBox.setAttribute("data-stamp", `reset-${Date.now()}`);
     }
 
     syncCustomStyleControlsFromState();
     updateFamilyUiStatus("Kliknij przycisk, aby ustawić produkt bazowy rodziny.", "info");
-    renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+    if (preferredDraft && typeof customRestoreDraftToEditor === "function") {
+      customRestoreDraftToEditor(preferredDraft, { silent: true });
+      return;
+    }
+    currentPreviewProduct = firstProduct;
+    currentPickerProduct = firstProduct;
+    currentPreviewImageUrl = null;
+    currentPickerImageUrl = null;
+    if (firstProduct) {
+      bindEditableName(firstProduct);
+      renderProductImagePreview(firstProduct);
+    } else {
+      renderModulePreview(null, "");
+    }
   }
 
   function syncCustomStyleControlsFromState() {
     const applyToggleMark = (markEl, enabled) => {
       if (!markEl) return;
       markEl.textContent = enabled ? "✓" : "✕";
-      markEl.style.color = enabled ? "#0b8f84" : "#b91c1c";
-      markEl.style.borderColor = enabled ? "#0b8f84" : "#b91c1c";
+      markEl.style.color = enabled ? "#67e8f9" : "#fca5a5";
+      markEl.style.borderColor = enabled ? "rgba(34,211,238,.54)" : "rgba(248,113,113,.42)";
+      markEl.style.background = enabled ? "rgba(8,145,178,.18)" : "rgba(69,10,10,.30)";
     };
     const applyMiniToggleButton = (btn, enabled) => {
       if (!btn) return;
-      btn.style.borderColor = enabled ? "#0b8f84" : "#d7dfec";
-      btn.style.background = enabled ? "#f0fdfa" : "#fff";
-      btn.style.color = enabled ? "#0b8f84" : "#0f172a";
+      btn.style.borderColor = enabled ? "rgba(34,211,238,.54)" : "rgba(148,163,184,.22)";
+      btn.style.background = enabled ? "rgba(8,145,178,.16)" : "rgba(15,23,42,.62)";
+      btn.style.color = enabled ? "#67e8f9" : "#e2ebf7";
     };
 
     const priceColorInput = document.getElementById("customPriceColorInput");
@@ -1090,7 +1795,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (moduleLayoutSelect) moduleLayoutSelect.value = customModuleLayoutStyleId || "default";
     if (priceStyleSelect) priceStyleSelect.value = customPriceBadgeStyleId || "solid";
     if (priceTextColorInput) priceTextColorInput.value = customPriceTextColor || "#ffffff";
-    if (currencySelect) currencySelect.value = customCurrencySymbol === "€" ? "€" : "£";
+    if (currencySelect) currencySelect.value = normalizeCustomCurrencySymbol(customCurrencySymbol, "£");
     if (priceSizeValue) priceSizeValue.textContent = `${Math.round((Number(customPriceTextScale) || 1) * 100)}%`;
     if (metaFontSelect) metaFontSelect.value = normalizeFontOption(customMetaFontFamily, "Arial");
     if (metaTextColorInput) metaTextColorInput.value = customMetaTextColor || "#1f3560";
@@ -1110,9 +1815,43 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
   function getEffectiveCurrencySymbol(productLike, fallbackSymbol = "£") {
     const saved = String(productLike?.PRICE_CURRENCY_SYMBOL || "").trim();
-    if (saved === "€" || saved === "£") return saved;
-    if (customCurrencySymbol === "€" || customCurrencySymbol === "£") return customCurrencySymbol;
-    return fallbackSymbol === "€" ? "€" : "£";
+    if (saved === "€" || saved === "£" || saved === "zł") return saved;
+    if (customCurrencySymbol === "€" || customCurrencySymbol === "£" || customCurrencySymbol === "zł") return customCurrencySymbol;
+    if (fallbackSymbol === "€" || fallbackSymbol === "£" || fallbackSymbol === "zł") return fallbackSymbol;
+    return "£";
+  }
+
+  function normalizeCustomCurrencySymbol(value, fallback = "£") {
+    const directCode = normalizeDirectCurrencyCode(value);
+    if (directCode) return getDirectCurrencySymbolByCode(directCode);
+    const fallbackCode = normalizeDirectCurrencyCode(fallback);
+    if (fallbackCode) return getDirectCurrencySymbolByCode(fallbackCode);
+    return "£";
+  }
+
+  function normalizeDirectCurrencyCode(value) {
+    const raw = String(value || "").trim().toUpperCase();
+    if (!raw) return "";
+    if (raw === "EUR" || raw === "€" || raw === "EURO") return "EUR";
+    if (raw === "PLN" || raw === "ZŁ" || raw === "ZL") return "PLN";
+    if (raw === "GBP" || raw === "£") return "GBP";
+    return "";
+  }
+
+  function getDirectCurrencySymbolByCode(code) {
+    const normalized = normalizeDirectCurrencyCode(code);
+    if (normalized === "EUR") return "€";
+    if (normalized === "PLN") return "zł";
+    return "£";
+  }
+
+  function applyPageCurrencyToCatalogEntry(catalogEntry, page) {
+    if (!catalogEntry || typeof catalogEntry !== "object") return catalogEntry;
+    const normalizedCode = normalizeDirectCurrencyCode(page?.settings?.currency);
+    if (!normalizedCode) return catalogEntry;
+    catalogEntry.PRICE_CURRENCY_CODE = normalizedCode;
+    catalogEntry.PRICE_CURRENCY_SYMBOL = getDirectCurrencySymbolByCode(normalizedCode);
+    return catalogEntry;
   }
 
   function buildPackageInfoText(product) {
@@ -1304,7 +2043,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         node instanceof window.Konva.Text ||
         node instanceof window.Konva.Image ||
         node instanceof window.Konva.Group ||
-        node instanceof window.Konva.Rect;
+        node instanceof window.Konva.Rect ||
+        node instanceof window.Konva.Circle ||
+        node instanceof window.Konva.Line;
       const isDirectPriceLike =
         !!(node.getAttr && (
           node.getAttr("isPriceGroup") ||
@@ -1353,7 +2094,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         n instanceof window.Konva.Text ||
         n instanceof window.Konva.Image ||
         n instanceof window.Konva.Group ||
-        n instanceof window.Konva.Rect
+        n instanceof window.Konva.Rect ||
+        n instanceof window.Konva.Circle ||
+        n instanceof window.Konva.Line
       );
     });
   }
@@ -1635,6 +2378,76 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     document.head.appendChild(s);
   }
 
+  const CREATOR_STYLE_EDITOR_ENABLED = false;
+
+  function ensureCreatorStyleScriptLoaded() {
+    if (!CREATOR_STYLE_EDITOR_ENABLED) return;
+    if (window.__creatorStyleLoaded || document.getElementById("creatorStyleScript")) return;
+    const s = document.createElement("script");
+    s.id = "creatorStyleScript";
+    s.src = "creator-style.js";
+    s.async = true;
+    s.onload = () => { window.__creatorStyleLoaded = true; };
+    s.onerror = () => {};
+    document.head.appendChild(s);
+  }
+
+  function renderModuleLayoutSelectOptions(selectEl, preferredValue = "") {
+    if (!selectEl) return;
+    syncRegisteredModuleLayoutStylesIntoOptions();
+    const currentValue = String(preferredValue || selectEl.value || customModuleLayoutStyleId || "default");
+    const labelUsage = MODULE_LAYOUT_STYLE_OPTIONS.reduce((acc, opt) => {
+      const key = String(opt?.label || "").trim().toLowerCase();
+      if (!key) return acc;
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+    selectEl.innerHTML = MODULE_LAYOUT_STYLE_OPTIONS
+      .map((opt) => {
+        const rawLabel = String(opt?.label || opt?.id || "").trim();
+        const labelKey = rawLabel.toLowerCase();
+        const duplicateLabel = !!(labelKey && labelUsage[labelKey] > 1);
+        const viewLabel = duplicateLabel
+          ? `${rawLabel} [${String(opt?.id || "").trim()}]`
+          : rawLabel;
+        return `<option value="${escapeHtml(opt.id)}">${escapeHtml(viewLabel)}</option>`;
+      })
+      .join("");
+    selectEl.value = MODULE_LAYOUT_STYLE_OPTIONS.some((opt) => String(opt.id) === currentValue)
+      ? currentValue
+      : "default";
+  }
+
+  function getPersistedCustomPriceStyleMeta(styleIdOverride) {
+    const styleId = String(styleIdOverride || customPriceLayoutStyleId || "").trim();
+    if (!styleId) return null;
+    const list = loadPersistedCustomPriceStyles();
+    return list.find((item) => String(item?.id || "") === styleId) || null;
+  }
+
+  function getCustomPriceLayoutEditorSnapshot(styleIdOverride) {
+    const styleMeta = getPersistedCustomPriceStyleMeta(styleIdOverride);
+    const snapshot = styleMeta?.snapshot;
+    return (snapshot && typeof snapshot === "object" && Array.isArray(snapshot.nodes) && snapshot.nodes.length)
+      ? snapshot
+      : null;
+  }
+
+  function renderCustomPriceLayoutSelectOptions(selectEl, preferredValue = "") {
+    if (!selectEl) return;
+    const currentValue = String(preferredValue || selectEl.value || customPriceLayoutStyleId || "").trim();
+    const list = loadPersistedCustomPriceStyles();
+    const options = ['<option value="">Domyślny z modułu</option>'];
+    list.forEach((item) => {
+      const id = String(item?.id || "").trim();
+      const label = String(item?.label || id || "").trim();
+      if (!id) return;
+      options.push(`<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`);
+    });
+    selectEl.innerHTML = options.join("");
+    selectEl.value = list.some((item) => String(item?.id || "") === currentValue) ? currentValue : "";
+  }
+
   function makeStripFlagDataUrl() {
     const key = "ro-strip";
     if (customBadgeImageCache.has(key)) return customBadgeImageCache.get(key);
@@ -1693,8 +2506,193 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   }
 
   function getSelectedModuleLayoutStyleMeta(styleIdOverride) {
+    syncRegisteredModuleLayoutStylesIntoOptions();
     const styleId = String(styleIdOverride || customModuleLayoutStyleId || "default");
     return MODULE_LAYOUT_STYLE_OPTIONS.find((opt) => opt.id === styleId) || MODULE_LAYOUT_STYLE_OPTIONS[0];
+  }
+
+  function cloneModuleLayoutEditorSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") return null;
+    try {
+      return JSON.parse(JSON.stringify(snapshot));
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function getModuleLayoutEditorSnapshot(styleIdOverride) {
+    const styleMeta = getSelectedModuleLayoutStyleMeta(styleIdOverride);
+    const snapshot = styleMeta?.config?.__editorSnapshot;
+    return (snapshot && typeof snapshot === "object" && Array.isArray(snapshot.nodes) && snapshot.nodes.length)
+      ? snapshot
+      : null;
+  }
+
+  function getCatalogEntryModuleLayoutEditorSnapshot(catalogEntry, styleIdOverride) {
+    const inlineSnapshot = catalogEntry?.MODULE_LAYOUT_EDITOR_SNAPSHOT;
+    const inlineSourceStyleId = String(
+      catalogEntry?.MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID ||
+      catalogEntry?.MODULE_LAYOUT_EDITOR_SOURCE_STYLE_ID ||
+      ""
+    ).trim();
+    const priceSnapshot = catalogEntry?.MODULE_LAYOUT_PRICE_STYLE_SNAPSHOT;
+    const normalizedStyleId = String(styleIdOverride || catalogEntry?.MODULE_LAYOUT_STYLE_ID || "default").trim() || "default";
+    const targetStyleSnapshot = getModuleLayoutEditorSnapshot(normalizedStyleId);
+    const hasInlineSnapshot = !!(inlineSnapshot && typeof inlineSnapshot === "object" && Array.isArray(inlineSnapshot.nodes) && inlineSnapshot.nodes.length);
+    const hasTargetStyleSnapshot = !!(targetStyleSnapshot && typeof targetStyleSnapshot === "object" && Array.isArray(targetStyleSnapshot.nodes) && targetStyleSnapshot.nodes.length);
+    const shouldUseInlineSnapshot = hasInlineSnapshot && (!inlineSourceStyleId || inlineSourceStyleId === normalizedStyleId || !hasTargetStyleSnapshot);
+    const baseSnapshot = shouldUseInlineSnapshot
+      ? inlineSnapshot
+      : (hasTargetStyleSnapshot ? targetStyleSnapshot : inlineSnapshot);
+    const priceNodes = Array.isArray(priceSnapshot?.nodes) ? priceSnapshot.nodes : [];
+    if (!priceNodes.length) return baseSnapshot;
+    return mergeModuleLayoutEditorSnapshotWithPriceStyle(baseSnapshot, priceSnapshot);
+  }
+
+  function isModuleLayoutPriceNode(def) {
+    const kind = getSnapshotNodeKind(def);
+    return kind === "priceGroup" || kind === "badgeRect" || kind === "badgeCircle" || kind === "currencySymbol";
+  }
+
+  function mergeModuleLayoutEditorSnapshotWithPriceStyle(moduleSnapshot, priceSnapshot) {
+    const base = cloneModuleLayoutEditorSnapshot(moduleSnapshot);
+    const price = cloneModuleLayoutEditorSnapshot(priceSnapshot);
+    const baseNodes = Array.isArray(base?.nodes) ? base.nodes : [];
+    const priceNodes = Array.isArray(price?.nodes) ? price.nodes : [];
+    if (!baseNodes.length) return null;
+    if (!priceNodes.length) return base;
+    return {
+      ...base,
+      nodes: [...baseNodes.filter((def) => !isModuleLayoutPriceNode(def)), ...priceNodes]
+    };
+  }
+
+  function collectSnapshotFontFamilies(snapshotOrNode, bucket = new Set()) {
+    const source = snapshotOrNode && typeof snapshotOrNode === "object" ? snapshotOrNode : null;
+    if (!source) return Array.from(bucket);
+    if (Array.isArray(source.nodes)) {
+      source.nodes.forEach((node) => collectSnapshotFontFamilies(node, bucket));
+      return Array.from(bucket);
+    }
+    const attrs = getSnapshotNodeAttrs(source);
+    if (String(source.className || "") === "Text") {
+      const fontFamily = String(attrs.fontFamily || "").trim();
+      if (fontFamily) bucket.add(fontFamily);
+    }
+    const children = Array.isArray(source.children) ? source.children : [];
+    children.forEach((child) => collectSnapshotFontFamilies(child, bucket));
+    return Array.from(bucket);
+  }
+
+  function getSnapshotNodeAttrs(def) {
+    return def?.attrs && typeof def.attrs === "object" ? def.attrs : {};
+  }
+
+  function getSnapshotNodeCustomAttrs(def) {
+    const attrs = getSnapshotNodeAttrs(def);
+    return attrs?.customAttrs && typeof attrs.customAttrs === "object" ? attrs.customAttrs : {};
+  }
+
+  function getSnapshotNodeKind(def) {
+    return String(getSnapshotNodeAttrs(def).workspaceKind || "").trim();
+  }
+
+  function inferSnapshotPriceRole(def, fallbackIndex = -1) {
+    const explicitRole = String(getSnapshotNodeCustomAttrs(def).priceRole || "").trim().toLowerCase();
+    if (explicitRole === "major" || explicitRole === "minor" || explicitRole === "unit") return explicitRole;
+    if (fallbackIndex === 0) return "major";
+    if (fallbackIndex === 1) return "minor";
+    if (fallbackIndex === 2) return "unit";
+    return "";
+  }
+
+  function inferSnapshotFlagCode(productLike) {
+    const rawCountry = String(
+      productLike?.KRAJPOCHODZENIA ||
+      productLike?.raw?.["text-left 3"] ||
+      productLike?.country ||
+      ""
+    ).trim();
+    const hay = normalizeText(rawCountry);
+    if (hay.includes("rumun")) return "RO";
+    if (hay.includes("ukrain")) return "UA";
+    if (hay.includes("litw")) return "LT";
+    if (hay.includes("bulgar")) return "BG";
+    if (hay.includes("polsk")) return "PL";
+    return rawCountry ? rawCountry.slice(0, 2).toUpperCase() : "XX";
+  }
+
+  function buildSnapshotPackageText(productLike) {
+    const value = String(
+      productLike?.CUSTOM_PACKAGE_VALUE ||
+      productLike?.packageValue ||
+      ""
+    ).trim();
+    const unit = String(
+      productLike?.CUSTOM_PACKAGE_UNIT ||
+      productLike?.packageUnit ||
+      productLike?.JEDNOSTKA ||
+      ""
+    ).trim();
+    const joined = [value, unit].filter(Boolean).join(" ").trim();
+    return joined ? `OPAK: ${joined}` : "";
+  }
+
+  function getSnapshotBarcodeDigits(context) {
+    return scientificToPlain(
+      context?.catalogEntry?.["KOD EAN"] ||
+      context?.product?.ean ||
+      ""
+    );
+  }
+
+  function resolveSnapshotTextValue(def, context, options = {}) {
+    const attrs = getSnapshotNodeAttrs(def);
+    const kind = getSnapshotNodeKind(def);
+    const fallbackText = String(attrs.text || "");
+    const product = context?.product || null;
+    const catalogEntry = context?.catalogEntry || null;
+
+    if (options.priceRole) {
+      const price = formatPrice(catalogEntry?.CENA || getDisplayPrice(product));
+      const currencySymbol = getEffectiveCurrencySymbol(catalogEntry, price.currency);
+      const priceUnitSuffix = isWeightProduct(catalogEntry || product) ? "KG" : "SZT.";
+      if (options.priceRole === "major") return price.main;
+      if (options.priceRole === "minor") return price.dec;
+      if (options.priceRole === "unit") return `${currencySymbol} / ${priceUnitSuffix}`;
+    }
+
+    if (kind === "nameText") return String(catalogEntry?.NAZWA || getDisplayName(product) || fallbackText || "-");
+    if (kind === "indexText") return String(catalogEntry?.INDEKS || getDisplayIndex(product) || fallbackText || "-");
+    if (kind === "packageText") return buildSnapshotPackageText(catalogEntry || product) || fallbackText;
+    if (kind === "currencySymbol") return getEffectiveCurrencySymbol(catalogEntry, fallbackText || "£");
+    if (kind === "flag") {
+      const country = String(catalogEntry?.KRAJPOCHODZENIA || "").trim();
+      return country ? `FLAGA ${inferSnapshotFlagCode(catalogEntry || product)}` : "";
+    }
+    if (kind === "ean") {
+      const digits = getSnapshotBarcodeDigits(context);
+      return digits ? `EAN: ${digits}` : "";
+    }
+    return fallbackText;
+  }
+
+  async function resolveSnapshotImageUrl(def, context) {
+    const attrs = getSnapshotNodeAttrs(def);
+    const kind = getSnapshotNodeKind(def);
+    if (kind === "productImage") {
+      return String(context?.imageUrl || attrs.src || "").trim();
+    }
+    if (kind === "ean") {
+      const digits = getSnapshotBarcodeDigits(context);
+      if (!digits) return "";
+      if (!context.barcodeDataUrlPromise) {
+        context.barcodeDataUrlPromise = generateBarcodeDataUrl(digits);
+      }
+      const url = await context.barcodeDataUrlPromise;
+      return String(url || attrs.src || "").trim();
+    }
+    return String(attrs.src || "").trim();
   }
 
   function getSingleDirectLayoutSpec(styleIdOverride, hasImagePriceBadge) {
@@ -1705,10 +2703,25 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const familyImageLayouts = (family.imageLayouts && typeof family.imageLayouts === "object")
       ? family.imageLayouts
       : {};
+    const resolvedStyleId = String(styleMeta?.id || styleIdOverride || customModuleLayoutStyleId || "default").trim();
+    const isLockedSystemStyle = LOCKED_SYSTEM_STYLE_IDS.has(resolvedStyleId);
     const n = (val, fallback) => {
       const parsed = Number(val);
       return Number.isFinite(parsed) ? parsed : fallback;
     };
+    const dividerAnchorRaw = String(single?.divider?.anchor || "").trim().toLowerCase();
+    const dividerAnchor = dividerAnchorRaw === "image-right"
+      ? "image-right"
+      : (dividerAnchorRaw === "module" ? "module" : "module");
+    const dividerGapFallback = n(single?.divider?.x, -1) - (n(single?.imgArea?.x, 2.8) + n(single?.imgArea?.w, 82));
+    const dividerGapFromPriceFallback = n(single?.priceArea?.y, 57) - (n(single?.divider?.y, 0) + n(single?.divider?.h, 0));
+    const dividerGapFromPriceRaw = Number(single?.divider?.gapFromPrice);
+    const dividerGapFromPrice = Number.isFinite(dividerGapFromPriceRaw)
+      ? dividerGapFromPriceRaw
+      : dividerGapFromPriceFallback;
+    const dividerSnapToPriceTop = typeof single?.divider?.snapToPriceTop === "boolean"
+      ? !!single.divider.snapToPriceTop
+      : (!isLockedSystemStyle && Math.abs(dividerGapFromPriceFallback) <= 8);
     return {
       imgArea: {
         x: n(single?.imgArea?.x, 2.8),
@@ -1744,6 +2757,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         h: n(single?.priceArea?.h, 0),
         r: n(single?.priceArea?.r, 0)
       },
+      priceTextOffset: {
+        x: n(single?.priceTextOffset?.x, 0),
+        y: n(single?.priceTextOffset?.y, 0)
+      },
       barcodeArea: {
         x: n(single?.barcodeArea?.x, 53),
         y: n(single?.barcodeArea?.y, 79.2),
@@ -1754,21 +2771,49 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         x: n(single?.divider?.x, -1),
         y: n(single?.divider?.y, 0),
         h: n(single?.divider?.h, 0),
-        w: n(single?.divider?.w, 0.45)
+        w: n(single?.divider?.w, 0.45),
+        anchor: dividerAnchor,
+        gapFromImage: n(single?.divider?.gapFromImage, dividerGapFallback),
+        gapFromPrice: n(single?.divider?.gapFromPrice, dividerGapFromPrice),
+        snapToPriceTop: dividerSnapToPriceTop
       },
       text: {
+        metaFontFamily: String(cfg?.text?.metaFontFamily || "").trim(),
+        priceFontFamily: String(cfg?.text?.priceFontFamily || "").trim(),
+        nameWeight: String(cfg?.text?.nameWeight || "").trim(),
+        indexWeight: String(cfg?.text?.indexWeight || "").trim(),
+        packageWeight: String(cfg?.text?.packageWeight || "").trim(),
+        priceMainWeight: String(cfg?.text?.priceMainWeight || "").trim(),
+        priceDecWeight: String(cfg?.text?.priceDecWeight || "").trim(),
+        priceUnitWeight: String(cfg?.text?.priceUnitWeight || "").trim(),
         nameColor: String(cfg?.text?.nameColor || "").trim(),
         indexColor: String(cfg?.text?.indexColor || "").trim(),
         packageColor: String(cfg?.text?.packageColor || "").trim(),
         indexItalic: typeof cfg?.text?.indexItalic === "boolean" ? cfg.text.indexItalic : true,
+        metaScaleMultiplier: Number.isFinite(Number(cfg?.text?.metaScaleMultiplier)) ? Number(cfg.text.metaScaleMultiplier) : 1,
         noPriceCircle: !!cfg?.text?.noPriceCircle,
+        hidePriceBadge: !!cfg?.text?.hidePriceBadge,
         priceColor: String(cfg?.text?.priceColor || "").trim(),
         forcePriceBold: !!cfg?.text?.forcePriceBold,
         priceExtraBold: !!cfg?.text?.priceExtraBold,
-        priceScaleMultiplier: Number.isFinite(Number(cfg?.text?.priceScaleMultiplier)) ? Number(cfg.text.priceScaleMultiplier) : 1,
+        priceScaleMultiplier: normalizePriceScaleMultiplier(cfg?.text?.priceScaleMultiplier, 1),
+        priceMainFactor: Number.isFinite(Number(cfg?.text?.priceMainFactor)) ? Number(cfg.text.priceMainFactor) : 0,
+        priceDecFactor: Number.isFinite(Number(cfg?.text?.priceDecFactor)) ? Number(cfg.text.priceDecFactor) : 0,
+        priceUnitFactor: Number.isFinite(Number(cfg?.text?.priceUnitFactor)) ? Number(cfg.text.priceUnitFactor) : 0,
         priceShape: String(cfg?.text?.priceShape || "").trim(),
+        priceLayoutMode: normalizePriceLayoutMode(cfg?.text?.priceLayoutMode, "classic"),
+        priceTextAlign: String(cfg?.text?.priceTextAlign || "").trim(),
+        priceTextOffsetMode: String(cfg?.text?.priceTextOffsetMode || "").trim(),
         priceBgColor: String(cfg?.text?.priceBgColor || "").trim(),
-        priceBgRadius: Number.isFinite(Number(cfg?.text?.priceBgRadius)) ? Number(cfg.text.priceBgRadius) : 0
+        priceBgRadius: Number.isFinite(Number(cfg?.text?.priceBgRadius)) ? Number(cfg.text.priceBgRadius) : 0,
+        dividerColor: String(cfg?.text?.dividerColor || "").trim(),
+        hideImage: !!cfg?.text?.hideImage,
+        hideName: !!cfg?.text?.hideName,
+        hideIndex: !!cfg?.text?.hideIndex,
+        hidePackage: !!cfg?.text?.hidePackage,
+        hidePrice: !!cfg?.text?.hidePrice,
+        hideBarcode: !!cfg?.text?.hideBarcode,
+        hideFlag: !!cfg?.text?.hideFlag
       },
       familyDirect: {
         useSingleLayout: !!family.useSingleLayout,
@@ -1848,6 +2893,300 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const img = await loadKonvaImageFromUrl(src, 3000);
     if (img && img.setAttr) img.setAttr("originalSrc", src);
     return img || null;
+  }
+
+  function normalizeSnapshotKonvaNodeGeometry(node) {
+    if (!node || !window.Konva) return;
+
+    if (node instanceof window.Konva.Group) {
+      bakeGroupTransformToChildren(node, { includeTranslation: false });
+      const children = typeof node.getChildren === "function" ? node.getChildren() : [];
+      const list = Array.isArray(children) ? children : (typeof children.toArray === "function" ? children.toArray() : []);
+      list.forEach((child) => normalizeSnapshotKonvaNodeGeometry(child));
+      return;
+    }
+
+    const sx = Math.abs(Number(node.scaleX?.() || 1));
+    const sy = Math.abs(Number(node.scaleY?.() || 1));
+    if (Math.abs(sx - 1) < 0.0001 && Math.abs(sy - 1) < 0.0001) return;
+    const uniform = Math.min(sx, sy);
+
+    if (node instanceof window.Konva.Text) {
+      if (Number.isFinite(Number(node.width?.())) && Number(node.width?.()) > 0 && typeof node.width === "function") {
+        node.width(Math.max(1, Number(node.width()) * sx));
+      }
+      if (Number.isFinite(Number(node.height?.())) && Number(node.height?.()) > 0 && typeof node.height === "function") {
+        node.height(Math.max(1, Number(node.height()) * sy));
+      }
+      if (Number.isFinite(Number(node.fontSize?.())) && typeof node.fontSize === "function") {
+        node.fontSize(Math.max(1, Number(node.fontSize()) * uniform));
+      }
+    } else if (node instanceof window.Konva.Image) {
+      if (typeof node.width === "function") node.width(Math.max(1, Number(node.width()) * sx));
+      if (typeof node.height === "function") node.height(Math.max(1, Number(node.height()) * sy));
+    } else if (node instanceof window.Konva.Rect) {
+      if (typeof node.width === "function") node.width(Math.max(1, Number(node.width()) * sx));
+      if (typeof node.height === "function") node.height(Math.max(1, Number(node.height()) * sy));
+      if (typeof node.cornerRadius === "function") {
+        const current = node.cornerRadius();
+        if (Array.isArray(current)) {
+          node.cornerRadius(current.map((value) => Math.max(0, Number(value || 0) * uniform)));
+        } else {
+          node.cornerRadius(Math.max(0, Number(current || 0) * uniform));
+        }
+      }
+    } else if (node instanceof window.Konva.Circle) {
+      if (typeof node.radius === "function") node.radius(Math.max(1, Number(node.radius()) * uniform));
+    } else if (node instanceof window.Konva.Line) {
+      const points = Array.isArray(node.points?.()) ? node.points().slice() : [];
+      if (points.length) {
+        node.points(points.map((value, index) => Number(value || 0) * (index % 2 === 0 ? sx : sy)));
+      }
+      if (typeof node.strokeWidth === "function") {
+        node.strokeWidth(Math.max(0.5, Number(node.strokeWidth()) * uniform));
+      }
+    }
+
+    if (typeof node.scaleX === "function") node.scaleX(1);
+    if (typeof node.scaleY === "function") node.scaleY(1);
+  }
+
+  async function createKonvaNodeFromEditorSnapshot(def, context, options = {}) {
+    const className = String(def?.className || "");
+    const attrs = getSnapshotNodeAttrs(def);
+    const customAttrs = getSnapshotNodeCustomAttrs(def);
+    const kind = getSnapshotNodeKind(def);
+    if (!className || !window.Konva) return null;
+
+    let node = null;
+    if (className === "Text") {
+      node = new window.Konva.Text({
+        x: Number(attrs.x || 0),
+        y: Number(attrs.y || 0),
+        text: resolveSnapshotTextValue(def, context, options),
+        fontFamily: String(attrs.fontFamily || "Arial"),
+        fontSize: Math.max(1, Number(attrs.fontSize || 24)),
+        fontStyle: String(attrs.fontStyle || "normal"),
+        fill: String(attrs.fill || "#111111"),
+        width: Number(attrs.width || 0) || undefined,
+        lineHeight: Number(attrs.lineHeight || 1),
+        align: String(attrs.align || "left"),
+        wrap: String(attrs.wrap || "word"),
+        textDecoration: String(attrs.textDecoration || ""),
+        draggable: attrs.draggable !== false
+      });
+    } else if (className === "Image") {
+      const src = await resolveSnapshotImageUrl(def, context);
+      if (!src) return null;
+      node = await createKonvaImageNodeFromUrl(src);
+      if (!node) return null;
+      const frameX = Number(attrs.x || 0);
+      const frameY = Number(attrs.y || 0);
+      const frameW = Math.max(1, Number(attrs.width || node.width() || 1));
+      const frameH = Math.max(1, Number(attrs.height || node.height() || 1));
+      if (kind === "productImage") {
+        layoutImageNodeContain(node, frameX, frameY, frameW, frameH);
+        node.setAttr("snapshotFrameX", frameX);
+        node.setAttr("snapshotFrameY", frameY);
+        node.setAttr("snapshotFrameWidth", frameW);
+        node.setAttr("snapshotFrameHeight", frameH);
+      } else {
+        node.x(frameX);
+        node.y(frameY);
+        node.width(frameW);
+        node.height(frameH);
+      }
+      node.draggable(attrs.draggable !== false);
+    } else if (className === "Rect") {
+      node = new window.Konva.Rect({
+        x: Number(attrs.x || 0),
+        y: Number(attrs.y || 0),
+        width: Math.max(1, Number(attrs.width || 1)),
+        height: Math.max(1, Number(attrs.height || 1)),
+        fill: String(attrs.fill || "transparent"),
+        stroke: String(attrs.stroke || ""),
+        strokeWidth: Math.max(0, Number(attrs.strokeWidth || 0)),
+        cornerRadius: Number(attrs.cornerRadius || 0),
+        draggable: attrs.draggable !== false
+      });
+    } else if (className === "Circle") {
+      node = new window.Konva.Circle({
+        x: Number(attrs.x || 0),
+        y: Number(attrs.y || 0),
+        radius: Math.max(1, Number(attrs.radius || 1)),
+        fill: String(attrs.fill || "transparent"),
+        stroke: String(attrs.stroke || ""),
+        strokeWidth: Math.max(0, Number(attrs.strokeWidth || 0)),
+        draggable: attrs.draggable !== false
+      });
+    } else if (className === "Line") {
+      node = new window.Konva.Line({
+        x: Number(attrs.x || 0),
+        y: Number(attrs.y || 0),
+        points: Array.isArray(attrs.points) ? attrs.points.slice() : [0, 0, 0, 120],
+        stroke: String(attrs.stroke || "#111111"),
+        strokeWidth: Math.max(0.5, Number(attrs.strokeWidth || 2)),
+        draggable: attrs.draggable !== false
+      });
+    } else if (className === "Group") {
+      node = new window.Konva.Group({
+        x: Number(attrs.x || 0),
+        y: Number(attrs.y || 0),
+        draggable: attrs.draggable !== false
+      });
+      const children = Array.isArray(def?.children) ? def.children : [];
+      let priceTextIndex = 0;
+      for (const childDef of children) {
+        const childOptions = {
+          ...options,
+          priceRole: kind === "priceGroup"
+            ? inferSnapshotPriceRole(childDef, priceTextIndex)
+            : "",
+          inPriceGroup: kind === "priceGroup"
+        };
+        if (kind === "priceGroup" && String(childDef?.className || "") === "Text") {
+          priceTextIndex += 1;
+        }
+        const childNode = await createKonvaNodeFromEditorSnapshot(childDef, context, childOptions);
+        if (childNode) node.add(childNode);
+      }
+    }
+
+    if (!node) return null;
+    if (Number.isFinite(Number(attrs.rotation)) && typeof node.rotation === "function") {
+      node.rotation(Number(attrs.rotation || 0));
+    }
+    if (typeof node.setAttr === "function") {
+      if (attrs.workspaceKind) node.setAttr("workspaceKind", String(attrs.workspaceKind));
+      if (attrs.workspaceLabel) node.setAttr("workspaceLabel", String(attrs.workspaceLabel));
+      Object.entries(customAttrs).forEach(([key, value]) => {
+        try { node.setAttr(key, value); } catch (_err) {}
+      });
+      if (options.priceRole && node instanceof window.Konva.Text) {
+        node.setAttr("priceRole", options.priceRole);
+      }
+    }
+    return node;
+  }
+
+  function decorateSnapshotNodeForDirectModule(node, def, context) {
+    if (!node || !node.setAttr || !window.Konva) return;
+    const kind = getSnapshotNodeKind(def);
+    node.setAttr("directModuleId", context.directModuleId);
+    node.setAttr("slotIndex", context.slotIndex);
+
+    if (node instanceof window.Konva.Text) {
+      node.setAttr("isProductText", true);
+      if (kind === "nameText") node.setAttr("isName", true);
+      if (kind === "indexText") node.setAttr("isIndex", true);
+      if (kind === "packageText") node.setAttr("isCustomPackageInfo", true);
+      if (kind === "flag") node.setAttr("isCountryBadge", true);
+      if (kind === "nameText" || kind === "indexText" || kind === "packageText") {
+        tightenDirectTextSelectionBox(node);
+        applySmallTextEasyHitArea(node);
+      }
+      return;
+    }
+
+    if (node instanceof window.Konva.Image) {
+      if (kind === "productImage") node.setAttr("isProductImage", true);
+      if (kind === "ean") {
+        node.setAttr("isBarcode", true);
+        node.setAttr("isOverlayElement", true);
+      }
+      if (kind === "flag") {
+        node.setAttr("isCountryBadge", true);
+        node.setAttr("isOverlayElement", true);
+      }
+      return;
+    }
+
+    if ((node instanceof window.Konva.Line || node instanceof window.Konva.Rect) && kind === "divider") {
+      node.setAttr("isLayoutDivider", true);
+      node.setAttr("isProductText", true);
+      return;
+    }
+
+    if (node instanceof window.Konva.Group) {
+      if (kind === "priceGroup") {
+        node.setAttr("isPriceGroup", true);
+        node.setAttr("isPrice", true);
+        node.setAttr("isProductText", true);
+        node.setAttr("priceTextAlign", "left");
+        node.setAttr("priceTextOffsetX", 0);
+        node.setAttr("priceTextOffsetY", 0);
+        node.setAttr("priceTextOffsetAbsolute", true);
+        node.setAttr("priceNoOpticalShift", true);
+        const box = typeof node.getClientRect === "function"
+          ? node.getClientRect({ relativeTo: node })
+          : null;
+        const size = Math.max(
+          1,
+          Number(box?.width || 0),
+          Number(box?.height || 0)
+        );
+        node.setAttr("priceCircleSize", size);
+      }
+
+      const children = typeof node.getChildren === "function" ? node.getChildren() : [];
+      const list = Array.isArray(children) ? children : (typeof children.toArray === "function" ? children.toArray() : []);
+      const defs = Array.isArray(def?.children) ? def.children : [];
+      list.forEach((child, index) => {
+        decorateSnapshotNodeForDirectModule(child, defs[index] || {}, context);
+        if (kind === "priceGroup" && child instanceof window.Konva.Text) {
+          child.draggable(false);
+          syncPriceTextNodeMetrics(child, {
+            extraPad: child.getAttr?.("priceRole") === "unit" ? 8 : 4,
+            minWidth: child.getAttr?.("priceRole") === "unit" ? 24 : 8,
+            minHeight: 8
+          });
+        }
+      });
+    }
+  }
+
+  async function createDirectModuleNodesFromEditorSnapshot(page, snapshot, context) {
+    if (!page?.layer || !window.Konva) return [];
+    const layer = page.layer;
+    const sourceW = Math.max(1, Number(snapshot?.stageWidth || CUSTOM_MODULE_BASE_WIDTH));
+    const sourceH = Math.max(1, Number(snapshot?.stageHeight || CUSTOM_MODULE_BASE_HEIGHT));
+    const root = new window.Konva.Group({
+      x: Number(context.x || 0),
+      y: Number(context.y || 0),
+      scaleX: Math.max(0.0001, Number(context.moduleW || sourceW) / sourceW),
+      scaleY: Math.max(0.0001, Number(context.moduleH || sourceH) / sourceH),
+      listening: true,
+      draggable: false
+    });
+    layer.add(root);
+
+    const materialized = [];
+    for (const def of Array.isArray(snapshot?.nodes) ? snapshot.nodes : []) {
+      const node = await createKonvaNodeFromEditorSnapshot(def, context);
+      if (!node) continue;
+      root.add(node);
+      materialized.push({ node, def });
+    }
+
+    bakeGroupTransformToChildren(root, { includeTranslation: true });
+
+    const createdNodes = [];
+    materialized.forEach(({ node, def }) => {
+      moveNodeToParentPreserveAbsolute(node, layer);
+      normalizeSnapshotKonvaNodeGeometry(node);
+      decorateSnapshotNodeForDirectModule(node, def, context);
+      if (node instanceof window.Konva.Image && node.getAttr?.("isProductImage")) {
+        if (typeof setupProductImageDrag === "function") setupProductImageDrag(node, layer);
+        if (typeof addImageShadow === "function") addImageShadow(layer, node);
+      }
+      if (node instanceof window.Konva.Group && node.getAttr?.("isPriceGroup")) {
+        bindDirectPriceGroupEditor(node, page);
+      }
+      createdNodes.push(node);
+    });
+
+    try { root.destroy(); } catch (_err) {}
+    return createdNodes;
   }
 
   function layoutImageNodeContain(node, frameX, frameY, frameW, frameH) {
@@ -2070,13 +3409,18 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const circleLocalX = Number(priceGroup.getAttr?.("priceCircleLocalX"));
       const isDirectSingle = !!priceGroup.getAttr?.("isDirectSinglePriceLayout");
       const isImageBadge = !!priceGroup.getAttr?.("isImagePriceBadge");
+      const isElegantDefault = !!priceGroup.getAttr?.("isElegantDefaultPriceLayout");
       const noPriceCircleDirect = !!priceGroup.getAttr?.("noPriceCircleDirect");
       const isRoundedRect = !!priceGroup.getAttr?.("priceShapeRoundedRect");
       const noOpticalShift = !!priceGroup.getAttr?.("priceNoOpticalShift");
+      const absoluteOffsetMode = !!priceGroup.getAttr?.("priceTextOffsetAbsolute");
+      const exactOffsetMode = !!priceGroup.getAttr?.("priceExactOffset");
       const priceBadgeStyleId = String(priceGroup.getAttr?.("priceBadgeStyleId") || "");
       const isTnzBadge = priceBadgeStyleId.includes("tnz");
       const isGranatBadge = priceBadgeStyleId.includes("granatowe");
-      const localUnitGap = isDirectSingle ? (noPriceCircleDirect ? 7 : (isRoundedRect ? 6 : 2)) : gap;
+      const compactGap = isElegantDefault && isDirectSingle && !noPriceCircleDirect && !isRoundedRect;
+      const localGap = compactGap ? 2 : gap;
+      const localUnitGap = compactGap ? 0 : (isDirectSingle ? (noPriceCircleDirect ? 7 : (isRoundedRect ? 6 : 2)) : gap);
       const mainW = Number(main.width?.() || 0);
       const decW = Number(dec.width?.() || 0);
       let unitMeasuredW = Number(unit.width?.() || 0);
@@ -2086,7 +3430,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       }
       const clusterWidth = Math.max(
         mainW,
-        mainW + gap + decW,
+        mainW + localGap + decW,
         mainW + localUnitGap + unitMeasuredW
       );
       const fallbackCircle = Number.isFinite(circleSize) ? circleSize : 80;
@@ -2099,19 +3443,28 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         opticalShiftX = Math.round(fallbackCircle * (isTnzBadge ? 0.14 : (isGranatBadge ? 0.28 : 0.16)));
         opticalShiftY = Math.round(fallbackCircle * (isTnzBadge ? 0.03 : (isGranatBadge ? 0.045 : 0.03)));
       }
-      if (Number.isFinite(circleSize) && Number.isFinite(circleLocalX)) {
+      if (absoluteOffsetMode && exactOffsetMode) {
+        safeBaseX = Number.isFinite(baseX) ? baseX : 0;
+      } else if (absoluteOffsetMode && Number.isFinite(circleSize)) {
+        const innerPad = (isDirectSingle && !noPriceCircleDirect && !isRoundedRect) ? 10 : 4;
+        safeBaseX = Number.isFinite(baseX) ? baseX : 0;
+        if (alignMode === "center") safeBaseX += (circleSize - clusterWidth) / 2;
+        else if (alignMode === "right") safeBaseX += circleSize - clusterWidth - innerPad;
+        else safeBaseX += innerPad;
+      } else if (Number.isFinite(circleSize) && Number.isFinite(circleLocalX)) {
         // W single+koło utrzymujemy taki sam "oddech" od lewej/prawej jak w podglądzie HTML.
         const innerPad = (isDirectSingle && !noPriceCircleDirect && !isRoundedRect) ? 10 : 4;
         if (alignMode === "center") safeBaseX = circleLocalX + (circleSize - clusterWidth) / 2;
         else if (alignMode === "right") safeBaseX = circleLocalX + circleSize - clusterWidth - innerPad;
         else safeBaseX = circleLocalX + innerPad;
       }
-      if ((isDirectSingle || isImageBadge) && alignMode !== "right" && !noPriceCircleDirect && !noOpticalShift) safeBaseX += opticalShiftX;
+      if (!absoluteOffsetMode && (isDirectSingle || isImageBadge) && alignMode !== "right" && !noPriceCircleDirect && !noOpticalShift) safeBaseX += opticalShiftX;
+      if (absoluteOffsetMode) opticalShiftY = 0;
       main.x(safeBaseX);
       main.y(safeBaseY + opticalShiftY);
-      dec.x(safeBaseX + (main.width?.() || 0) + gap);
+      dec.x(safeBaseX + (main.width?.() || 0) + localGap);
       dec.y((safeBaseY + opticalShiftY) + (main.height?.() || 0) * (noPriceCircleDirect ? 0.00 : (isRoundedRect ? 0.04 : 0.10)));
-      const noCircleGap = noPriceCircleDirect ? 6 : (isRoundedRect ? 6 : 2);
+      const noCircleGap = compactGap ? 0 : (noPriceCircleDirect ? 6 : (isRoundedRect ? 6 : 2));
       unit.x(safeBaseX + (main.width?.() || 0) + (isDirectSingle ? noCircleGap : gap));
       unit.y((safeBaseY + opticalShiftY) + (dec.height?.() || 0) * (isDirectSingle ? (noPriceCircleDirect ? 1.02 : (isRoundedRect ? 1.02 : 1.35)) : 1.5));
       if (typeof unit.width === "function" && typeof unit.measureSize === "function") {
@@ -2192,15 +3545,29 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const hasImagePriceBadge = String(catalogEntry?.PRICE_BG_STYLE_ID || customPriceBadgeStyleId || "solid") !== "solid";
     const selectedLayoutStyleId = String(catalogEntry?.MODULE_LAYOUT_STYLE_ID || customModuleLayoutStyleId || "default");
     const singleSpec = getSingleDirectLayoutSpec(selectedLayoutStyleId, hasImagePriceBadge);
+    const elegantCatalogPriceScale = getElegantPriceCatalogScale(selectedLayoutStyleId);
+    const isElegantDefault = isElegantDefaultStyle(selectedLayoutStyleId);
+    const elegantTextShiftXPct = getElegantPriceTextShiftXPct(selectedLayoutStyleId);
+    const elegantPriceScaleBoost = getElegantPriceTextScaleBoost(selectedLayoutStyleId);
     const useSingleLayoutForFamily = !isSingleDirectLayout && !!singleSpec.familyDirect?.useSingleLayout;
     const useSingleLikeDirectLayout = isSingleDirectLayout || useSingleLayoutForFamily;
     const useCustomSinglePalette = useSingleLikeDirectLayout && isCustomSingleStyle(selectedLayoutStyleId);
+    const exactCustomSinglePriceLayout = useCustomSinglePalette && String(singleSpec.text.priceTextOffsetMode || "").trim().toLowerCase() === "absolute";
     const isStyle2FamilyTwoFinal = !isSingleDirectLayout && selectedLayoutStyleId === "styl-numer-2" && imageUrls.length === 2;
-    const noPriceCircleDirect = useCustomSinglePalette && !!singleSpec.text.noPriceCircle;
-    const isRoundedRectPriceDirect = useCustomSinglePalette && !noPriceCircleDirect && singleSpec.text.priceShape === "roundedRect";
-    const nameFontSizeDirect = Math.max(6, Math.round((useSingleLikeDirectLayout ? 10 : 12) * moduleScale));
-    const indexFontSizeDirect = Math.max(5, Math.round((useSingleLikeDirectLayout ? 12 : 8) * moduleScale));
-    const packageFontSizeDirect = Math.max(5, Math.round((useSingleLikeDirectLayout ? 12 : 8) * moduleScale));
+    const hidePriceBadgeDirect = useCustomSinglePalette && !!singleSpec.text.hidePriceBadge;
+    const noPriceCircleDirect = useCustomSinglePalette && (!!singleSpec.text.noPriceCircle || hidePriceBadgeDirect);
+    const isRoundedRectPriceDirect = useCustomSinglePalette && !hidePriceBadgeDirect && !noPriceCircleDirect && singleSpec.text.priceShape === "roundedRect";
+    const hideImageDirect = useCustomSinglePalette && !!singleSpec.text.hideImage;
+    const hideNameDirect = useCustomSinglePalette && !!singleSpec.text.hideName;
+    const hideIndexDirect = useCustomSinglePalette && !!singleSpec.text.hideIndex;
+    const hidePackageDirect = useCustomSinglePalette && !!singleSpec.text.hidePackage;
+    const hidePriceDirect = useCustomSinglePalette && !!singleSpec.text.hidePrice;
+    const hideBarcodeDirect = useCustomSinglePalette && !!singleSpec.text.hideBarcode;
+    const hideFlagDirect = useCustomSinglePalette && !!singleSpec.text.hideFlag;
+    const metaScaleMultiplierDirect = useCustomSinglePalette ? Math.max(0.8, Number(singleSpec.text.metaScaleMultiplier || 1)) : 1;
+    const nameFontSizeDirect = Math.max(6, Math.round((useSingleLikeDirectLayout ? 10 : 12) * moduleScale * metaScaleMultiplierDirect));
+    const indexFontSizeDirect = Math.max(5, Math.round((useSingleLikeDirectLayout ? 12 : 8) * moduleScale * metaScaleMultiplierDirect));
+    const packageFontSizeDirect = Math.max(5, Math.round((useSingleLikeDirectLayout ? 12 : 8) * moduleScale * metaScaleMultiplierDirect));
     const infoTextMinWidth = Math.max(56, Math.round(120 * moduleScale));
 
     // Nowy układ direct (single): jak na przykładzie użytkownika
@@ -2220,72 +3587,221 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const flagArea = useSingleLikeDirectLayout
       ? { x: x + pct(singleSpec.flagArea.x, moduleW), y: y + pct(singleSpec.flagArea.y, moduleH), w: pct(singleSpec.flagArea.w, moduleW), h: pct(singleSpec.flagArea.h, moduleH) }
       : { x: x + pct(49, moduleW), y: y + pct(72, moduleH), w: pct(34, moduleW), h: pct(3, moduleH) };
+    const rawSavedPriceRadius = Number(singleSpec.priceArea.r || 0);
+    const resolvedPriceRadius = (() => {
+      if (!Number.isFinite(rawSavedPriceRadius) || rawSavedPriceRadius <= 0) return 0;
+      // New Style zapisuje radius w px (na bazie 500px), starsze style w %.
+      if (rawSavedPriceRadius > 5) {
+        return Math.max(0, (rawSavedPriceRadius / CUSTOM_MODULE_BASE_WIDTH) * moduleW);
+      }
+      return Math.max(0, pct(rawSavedPriceRadius, moduleW));
+    })();
     const priceArea = useSingleLikeDirectLayout
       ? {
           x: x + pct(singleSpec.priceArea.x, moduleW),
           y: y + pct(singleSpec.priceArea.y, moduleH),
-          s: Math.max(56, pct(singleSpec.priceArea.s, moduleW)),
-          w: Math.max(72, pct(singleSpec.priceArea.w > 0 ? singleSpec.priceArea.w : singleSpec.priceArea.s * 1.5, moduleW)),
-          h: Math.max(32, pct(singleSpec.priceArea.h > 0 ? singleSpec.priceArea.h : singleSpec.priceArea.s * 0.64, moduleH)),
-          r: Math.max(0, pct(singleSpec.priceArea.r || 0, moduleW))
+          s: exactCustomSinglePriceLayout
+            ? pct(singleSpec.priceArea.s, moduleW)
+            : Math.max(56, pct(singleSpec.priceArea.s, moduleW) * elegantCatalogPriceScale),
+          w: exactCustomSinglePriceLayout
+            ? pct(singleSpec.priceArea.w > 0 ? singleSpec.priceArea.w : singleSpec.priceArea.s * 1.5, moduleW)
+            : Math.max(72, pct(singleSpec.priceArea.w > 0 ? singleSpec.priceArea.w : singleSpec.priceArea.s * 1.5, moduleW) * elegantCatalogPriceScale),
+          h: exactCustomSinglePriceLayout
+            ? pct(singleSpec.priceArea.h > 0 ? singleSpec.priceArea.h : singleSpec.priceArea.s * 0.64, moduleH)
+            : Math.max(32, pct(singleSpec.priceArea.h > 0 ? singleSpec.priceArea.h : singleSpec.priceArea.s * 0.64, moduleH) * elegantCatalogPriceScale),
+          r: resolvedPriceRadius
         }
       : { x: x + pct(22, moduleW), y: y + pct(70, moduleH), s: Math.max(48, pct(18, moduleW)) };
     const barcodeArea = useSingleLikeDirectLayout
       ? { x: x + pct(singleSpec.barcodeArea.x, moduleW), y: y + pct(singleSpec.barcodeArea.y, moduleH), w: pct(singleSpec.barcodeArea.w, moduleW), h: pct(singleSpec.barcodeArea.h, moduleH) }
       : { x: x + pct(40, moduleW), y: y + pct(76, moduleH), w: pct(49, moduleW), h: pct(22, moduleH) };
-    const dividerArea = useSingleLikeDirectLayout && singleSpec.divider.x >= 0 && singleSpec.divider.h > 0
+    let dividerArea = useSingleLikeDirectLayout && singleSpec.divider.x >= 0 && singleSpec.divider.h > 0
       ? { x: x + pct(singleSpec.divider.x, moduleW), y: y + pct(singleSpec.divider.y, moduleH), w: pct(singleSpec.divider.w, moduleW), h: pct(singleSpec.divider.h, moduleH) }
       : null;
+    const renderedImageBounds = [];
     const createdNodes = [];
     const addNode = (node) => {
       if (!node) return;
       layer.add(node);
       createdNodes.push(node);
     };
-    const metaFontFamily = normalizeFontOption(catalogEntry?.TEXT_FONT_FAMILY || customMetaFontFamily, page.settings?.fontFamily || "Arial");
+    const editorSnapshot = isSingleDirectLayout
+      ? getCatalogEntryModuleLayoutEditorSnapshot(catalogEntry, selectedLayoutStyleId)
+      : null;
+    if (editorSnapshot) {
+      const snapshotFonts = collectSnapshotFontFamilies(editorSnapshot);
+      if (snapshotFonts.length) {
+        await ensureCustomCanvasFontsReady(snapshotFonts);
+      }
+      const snapshotNodes = await createDirectModuleNodesFromEditorSnapshot(page, editorSnapshot, {
+        directModuleId,
+        slotIndex,
+        x,
+        y,
+        moduleW,
+        moduleH,
+        catalogEntry,
+        imageUrl: String(options.effectiveImageUrl || imageUrls[0] || "").trim()
+      });
+      snapshotNodes.forEach((node) => {
+        if (node) createdNodes.push(node);
+      });
+      if (!createdNodes.length) return false;
+
+      const moduleGroup = new window.Konva.Group({
+        x: 0,
+        y: 0,
+        draggable: true,
+        listening: true
+      });
+      moduleGroup.setAttrs({
+        isUserGroup: true,
+        isAutoSlotGroup: true,
+        preservedSlotIndex: slotIndex,
+        slotIndex: null,
+        isDirectCustomModuleGroup: true,
+        directModuleId
+      });
+      layer.add(moduleGroup);
+
+      createdNodes.forEach((node) => {
+        if (!node) return;
+        const abs = node.getAbsolutePosition ? node.getAbsolutePosition() : null;
+        if (typeof node.draggable === "function") {
+          node.setAttr?.("_wasDraggableBeforeUserGroup", !!node.draggable());
+          node.draggable(false);
+        }
+        if (abs && typeof node.setAbsolutePosition === "function") {
+          try { node.setAbsolutePosition(abs); } catch (_err) {}
+        }
+        moveNodeToParentPreserveAbsolute(node, moduleGroup);
+      });
+
+      page.selectedNodes = [moduleGroup];
+      page.transformer?.nodes?.([moduleGroup]);
+      layer.batchDraw();
+      page.transformerLayer?.batchDraw?.();
+      return true;
+    }
+    const pageNameStyle = getDirectPageStyleOverride(page, "name");
+    const pageIndexStyle = getDirectPageStyleOverride(page, "index");
+    const pagePackageStyle = getDirectPageStyleOverride(page, "package");
+    const pagePriceStyle = getDirectPageStyleOverride(page, "price");
+    const styleMetaFontFamily = normalizeFontOption(singleSpec.text.metaFontFamily || "", "");
+    const metaFontFamilyBase = normalizeFontOption(
+      (useCustomSinglePalette && styleMetaFontFamily) ? styleMetaFontFamily : (catalogEntry?.TEXT_FONT_FAMILY || customMetaFontFamily),
+      page.settings?.fontFamily || "Arial"
+    );
     const metaTextColor = String(catalogEntry?.TEXT_COLOR || customMetaTextColor || (useSingleLikeDirectLayout ? "#1f3560" : "#111827"));
-    const nameTextColor = useCustomSinglePalette ? (singleSpec.text.nameColor || "#111111") : metaTextColor;
-    const indexTextColor = useCustomSinglePalette
+    const baseNameTextColor = useCustomSinglePalette ? (singleSpec.text.nameColor || "#111111") : metaTextColor;
+    const baseIndexTextColor = useCustomSinglePalette
       ? (singleSpec.text.indexColor || DEFAULT_INDEX_TEXT_COLOR)
       : String(catalogEntry?.TEXT_INDEX_COLOR || DEFAULT_INDEX_TEXT_COLOR);
-    const packageTextColor = useCustomSinglePalette ? (singleSpec.text.packageColor || "#111111") : metaTextColor;
+    const basePackageTextColor = useCustomSinglePalette ? (singleSpec.text.packageColor || "#111111") : metaTextColor;
+    const dividerColorDirect = useCustomSinglePalette
+      ? (String(singleSpec.text.dividerColor || "").trim() || "#d9d9d9")
+      : "#d9d9d9";
     const metaTextBold = boolAttrToFlag(catalogEntry?.TEXT_BOLD ?? customMetaTextBold);
     const metaTextUnderline = boolAttrToFlag(catalogEntry?.TEXT_UNDERLINE ?? customMetaTextUnderline);
     const metaTextAlign = normalizeAlignOption(catalogEntry?.TEXT_ALIGN || customMetaTextAlign, "left");
-    const priceFontFamily = normalizeFontOption(catalogEntry?.PRICE_FONT_FAMILY || customPriceFontFamily, page.settings?.fontFamily || "Arial");
+    const nameFontFamily = normalizeFontOption(pageNameStyle?.fontFamily || metaFontFamilyBase, metaFontFamilyBase || "Arial");
+    const indexFontFamily = normalizeFontOption(pageIndexStyle?.fontFamily || metaFontFamilyBase, metaFontFamilyBase || "Arial");
+    const packageFontFamily = normalizeFontOption(pagePackageStyle?.fontFamily || metaFontFamilyBase, metaFontFamilyBase || "Arial");
+    const nameFontSizeResolved = Number.isFinite(pageNameStyle?.size) && pageNameStyle.size > 0 ? pageNameStyle.size : nameFontSizeDirect;
+    const indexFontSizeResolved = Number.isFinite(pageIndexStyle?.size) && pageIndexStyle.size > 0 ? pageIndexStyle.size : indexFontSizeDirect;
+    const packageFontSizeResolved = Number.isFinite(pagePackageStyle?.size) && pagePackageStyle.size > 0 ? pagePackageStyle.size : packageFontSizeDirect;
+    const nameTextColor = String(pageNameStyle?.color || baseNameTextColor);
+    const indexTextColor = String(pageIndexStyle?.color || baseIndexTextColor);
+    const packageTextColor = String(pagePackageStyle?.color || basePackageTextColor);
+    const nameTextBold = pageNameStyle ? !!pageNameStyle.bold : metaTextBold;
+    const indexTextBold = pageIndexStyle ? !!pageIndexStyle.bold : metaTextBold;
+    const packageTextBold = pagePackageStyle ? !!pagePackageStyle.bold : metaTextBold;
+    const nameTextItalic = pageNameStyle ? !!pageNameStyle.italic : false;
+    const indexTextItalic = pageIndexStyle ? !!pageIndexStyle.italic : (useCustomSinglePalette ? !!singleSpec.text.indexItalic : true);
+    const packageTextItalic = pagePackageStyle ? !!pagePackageStyle.italic : false;
+    const nameTextUnderline = pageNameStyle ? !!pageNameStyle.underline : metaTextUnderline;
+    const indexTextUnderline = pageIndexStyle ? !!pageIndexStyle.underline : metaTextUnderline;
+    const packageTextUnderline = pagePackageStyle ? !!pagePackageStyle.underline : metaTextUnderline;
+    const stylePriceFontFamily = normalizeFontOption(singleSpec.text.priceFontFamily || "", "");
+    const priceFontFamilyBase = normalizeFontOption(
+      (useCustomSinglePalette && stylePriceFontFamily) ? stylePriceFontFamily : (catalogEntry?.PRICE_FONT_FAMILY || customPriceFontFamily),
+      page.settings?.fontFamily || "Arial"
+    );
+    const priceFontFamily = normalizeFontOption(pagePriceStyle?.fontFamily || priceFontFamilyBase, priceFontFamilyBase || "Arial");
+    await ensureCustomCanvasFontsReady(Array.from(new Set([
+      metaFontFamilyBase,
+      nameFontFamily,
+      indexFontFamily,
+      packageFontFamily,
+      priceFontFamily
+    ].filter(Boolean))));
     const priceTextBold = boolAttrToFlag(catalogEntry?.PRICE_TEXT_BOLD ?? customPriceTextBold);
-    const effectivePriceBoldDirect = useCustomSinglePalette && singleSpec.text.forcePriceBold ? true : priceTextBold;
+    const effectivePriceBoldDirect = pagePriceStyle
+      ? !!pagePriceStyle.bold
+      : (useCustomSinglePalette && singleSpec.text.forcePriceBold ? true : priceTextBold);
+    const effectivePriceItalicDirect = pagePriceStyle ? !!pagePriceStyle.italic : false;
     const effectivePriceExtraBoldDirect = useCustomSinglePalette && !!singleSpec.text.priceExtraBold;
-    const priceTextUnderline = boolAttrToFlag(catalogEntry?.PRICE_TEXT_UNDERLINE ?? customPriceTextUnderline);
-    const priceTextAlign = normalizeAlignOption(catalogEntry?.PRICE_TEXT_ALIGN || customPriceTextAlign, "left");
+    const priceTextUnderline = pagePriceStyle ? !!pagePriceStyle.underline : boolAttrToFlag(catalogEntry?.PRICE_TEXT_UNDERLINE ?? customPriceTextUnderline);
+    const stylePriceTextAlignDirect = useCustomSinglePalette && String(singleSpec.text.priceTextAlign || "").trim()
+      ? normalizeAlignOption(singleSpec.text.priceTextAlign, "left")
+      : "";
+    const priceTextAlign = stylePriceTextAlignDirect || normalizeAlignOption(catalogEntry?.PRICE_TEXT_ALIGN || customPriceTextAlign, "left");
+    const effectivePriceTextAlignDirect = stylePriceTextAlignDirect || (isElegantDefault && useSingleLikeDirectLayout && !noPriceCircleDirect && !isRoundedRectPriceDirect
+      ? "center"
+      : priceTextAlign);
 
-    const layouts = Array.isArray(catalogEntry?.CUSTOM_IMAGE_LAYOUTS) ? catalogEntry.CUSTOM_IMAGE_LAYOUTS : [];
-    for (let i = 0; i < Math.min(4, imageUrls.length); i++) {
-      const kImg = await createKonvaImageNodeFromUrl(imageUrls[i]);
-      if (!kImg) continue;
-      const layout = layouts[i] || { x: 0.02, y: 0.02, w: 0.96, h: 0.96 };
-      const frame = {
-        x: imgArea.x + imgArea.w * clamp01(layout.x, 0),
-        y: imgArea.y + imgArea.h * clamp01(layout.y, 0),
-        w: imgArea.w * Math.max(0.05, clamp01(layout.w, 0.96)),
-        h: imgArea.h * Math.max(0.05, clamp01(layout.h, 0.96))
-      };
-      if (isStyle2FamilyTwoFinal) {
-        // Tylko finalny moduł: w Styl numer 2 (2 produkty) dosuwamy zdjęcia bliżej bloku tekstu/ceny.
-        frame.x += imgArea.w * 0.08;
+    if (!hideImageDirect) {
+      const layouts = Array.isArray(catalogEntry?.CUSTOM_IMAGE_LAYOUTS) ? catalogEntry.CUSTOM_IMAGE_LAYOUTS : [];
+      for (let i = 0; i < Math.min(4, imageUrls.length); i++) {
+        const kImg = await createKonvaImageNodeFromUrl(imageUrls[i]);
+        if (!kImg) continue;
+        const layout = layouts[i] || { x: 0.00, y: 0.00, w: 1.00, h: 1.00 };
+        const frame = {
+          x: imgArea.x + imgArea.w * clamp01(layout.x, 0),
+          y: imgArea.y + imgArea.h * clamp01(layout.y, 0),
+          w: imgArea.w * Math.max(0.05, clamp01(layout.w, 0.96)),
+          h: imgArea.h * Math.max(0.05, clamp01(layout.h, 0.96))
+        };
+        if (isStyle2FamilyTwoFinal) {
+          // Tylko finalny moduł: w Styl numer 2 (2 produkty) dosuwamy zdjęcia bliżej bloku tekstu/ceny.
+          frame.x += imgArea.w * 0.08;
+        }
+        layoutImageNodeContain(kImg, frame.x, frame.y, frame.w, frame.h);
+        if (typeof kImg.getClientRect === "function") {
+          const drawnRect = kImg.getClientRect({ skipShadow: true, skipStroke: true });
+          if (drawnRect && Number.isFinite(drawnRect.x) && Number.isFinite(drawnRect.width)) {
+            renderedImageBounds.push(drawnRect);
+          }
+        }
+        kImg.draggable(true);
+        kImg.listening(true);
+        kImg.setAttrs({
+          slotIndex,
+          directModuleId,
+          isProductImage: true,
+          familyImageIndex: i
+        });
+        addNode(kImg);
+        if (typeof setupProductImageDrag === "function") setupProductImageDrag(kImg, layer);
+        if (typeof addImageShadow === "function") addImageShadow(layer, kImg);
       }
-      layoutImageNodeContain(kImg, frame.x, frame.y, frame.w, frame.h);
-      kImg.draggable(true);
-      kImg.listening(true);
-      kImg.setAttrs({
-        slotIndex,
-        directModuleId,
-        isProductImage: true,
-        familyImageIndex: i
-      });
-      addNode(kImg);
-      if (typeof setupProductImageDrag === "function") setupProductImageDrag(kImg, layer);
-      if (typeof addImageShadow === "function") addImageShadow(layer, kImg);
+    }
+
+    if (dividerArea && singleSpec.divider.anchor === "image-right" && renderedImageBounds.length) {
+      const rightEdge = Math.max(...renderedImageBounds.map((rect) => Number(rect.x || 0) + Number(rect.width || 0)));
+      if (Number.isFinite(rightEdge)) {
+        const gapPx = pct(singleSpec.divider.gapFromImage, moduleW);
+        const minX = x;
+        const maxX = x + moduleW - Math.max(1, dividerArea.w);
+        dividerArea.x = Math.max(minX, Math.min(maxX, rightEdge + gapPx));
+      }
+    }
+    if (dividerArea && singleSpec.divider.snapToPriceTop && !hidePriceDirect) {
+      const targetBottom = priceArea.y - pct(singleSpec.divider.gapFromPrice, moduleH);
+      const minBottom = dividerArea.y + 8;
+      const maxBottom = y + moduleH;
+      const resolvedBottom = Math.max(minBottom, Math.min(maxBottom, targetBottom));
+      dividerArea.h = Math.max(8, resolvedBottom - dividerArea.y);
     }
 
     if (dividerArea) {
@@ -2294,7 +3810,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         y: dividerArea.y,
         width: Math.max(1, dividerArea.w),
         height: Math.max(8, dividerArea.h),
-        fill: "#d9d9d9",
+        fill: dividerColorDirect,
         cornerRadius: 1,
         draggable: true
       });
@@ -2302,68 +3818,87 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       addNode(dividerNode);
     }
 
-    const nameText = new window.Konva.Text({
-      x: nameArea.x,
-      y: nameArea.y,
-      width: nameArea.w,
-      height: nameArea.h,
-      text: String(catalogEntry?.NAZWA || "-"),
-      fontSize: nameFontSizeDirect,
-      lineHeight: 1.04,
-      fontFamily: metaFontFamily,
-      fill: nameTextColor,
-      fontStyle: buildKonvaFontStyle({ bold: metaTextBold, italic: false }),
-      textDecoration: metaTextUnderline ? "underline" : "",
-      wrap: "word",
-      align: metaTextAlign,
-      draggable: true
-    });
-    nameText.setAttrs({ slotIndex, isProductText: true, isName: true });
-    nameText.setAttr("layoutMaxHeight", nameArea.h);
-    nameText.setAttr("layoutBaseFontSize", nameFontSizeDirect);
-    nameText.setAttr("directModuleId", directModuleId);
-    tightenDirectTextSelectionBox(nameText);
-    addNode(nameText);
-    if (typeof enableEditableText === "function") enableEditableText(nameText, page);
+    let nameText = null;
+    if (!hideNameDirect) {
+      nameText = new window.Konva.Text({
+        x: nameArea.x,
+        y: nameArea.y,
+        width: nameArea.w,
+        height: nameArea.h,
+        text: String(catalogEntry?.NAZWA || "-"),
+        fontSize: nameFontSizeResolved,
+        lineHeight: 1.04,
+        fontFamily: nameFontFamily,
+        fill: nameTextColor,
+        fontStyle: buildKonvaFontStyle({
+          bold: nameTextBold,
+          italic: nameTextItalic,
+          weight: pageNameStyle ? "" : (useCustomSinglePalette ? singleSpec.text.nameWeight : "")
+        }),
+        textDecoration: nameTextUnderline ? "underline" : "",
+        wrap: "word",
+        align: metaTextAlign,
+        draggable: true
+      });
+      nameText.setAttrs({ slotIndex, isProductText: true, isName: true });
+      nameText.setAttr("layoutMaxHeight", nameArea.h);
+      nameText.setAttr("layoutBaseFontSize", nameFontSizeResolved);
+      nameText.setAttr("directModuleId", directModuleId);
+      tightenDirectTextSelectionBox(nameText);
+      addNode(nameText);
+      if (typeof enableEditableText === "function") enableEditableText(nameText, page);
+    }
 
-    const indexText = new window.Konva.Text({
-      x: indexPos.x,
-      y: indexPos.y,
-      width: Math.max(infoTextMinWidth, nameArea.w * 0.95),
-      text: String(catalogEntry?.INDEKS || "-"),
-      fontSize: indexFontSizeDirect,
-      lineHeight: 1.05,
-      fontFamily: metaFontFamily,
-      fill: indexTextColor,
-      fontStyle: buildKonvaFontStyle({ bold: metaTextBold, italic: useCustomSinglePalette ? !!singleSpec.text.indexItalic : true }),
-      textDecoration: metaTextUnderline ? "underline" : "",
-      wrap: "none",
-      align: metaTextAlign,
-      draggable: true
-    });
-    indexText.setAttrs({ slotIndex, isProductText: true, isIndex: true });
-    indexText.setAttr("layoutBaseX", indexPos.x);
-    indexText.setAttr("layoutBaseY", indexPos.y);
-    indexText.setAttr("layoutBaseWidth", Math.max(infoTextMinWidth, nameArea.w * 0.95));
-    indexText.setAttr("directModuleId", directModuleId);
-    applySmallTextEasyHitArea(indexText);
-    tightenDirectTextSelectionBox(indexText);
-    addNode(indexText);
-    if (typeof enableEditableText === "function") enableEditableText(indexText, page);
+    let indexText = null;
+    if (!hideIndexDirect) {
+      indexText = new window.Konva.Text({
+        x: indexPos.x,
+        y: indexPos.y,
+        width: Math.max(infoTextMinWidth, nameArea.w * 0.95),
+        text: String(catalogEntry?.INDEKS || "-"),
+        fontSize: indexFontSizeResolved,
+        lineHeight: 1.05,
+        fontFamily: indexFontFamily,
+        fill: indexTextColor,
+        fontStyle: buildKonvaFontStyle({
+          bold: indexTextBold,
+          italic: indexTextItalic,
+          weight: pageIndexStyle ? "" : (useCustomSinglePalette ? singleSpec.text.indexWeight : "")
+        }),
+        textDecoration: indexTextUnderline ? "underline" : "",
+        wrap: "none",
+        align: metaTextAlign,
+        draggable: true
+      });
+      indexText.setAttrs({ slotIndex, isProductText: true, isIndex: true });
+      indexText.setAttr("layoutBaseX", indexPos.x);
+      indexText.setAttr("layoutBaseY", indexPos.y);
+      indexText.setAttr("layoutBaseWidth", Math.max(infoTextMinWidth, nameArea.w * 0.95));
+      indexText.setAttr("directModuleId", directModuleId);
+      applySmallTextEasyHitArea(indexText);
+      tightenDirectTextSelectionBox(indexText);
+      addNode(indexText);
+      if (typeof enableEditableText === "function") enableEditableText(indexText, page);
+    }
 
+    let packageNode = null;
     const packageInfoText = String(catalogEntry?.CUSTOM_PACKAGE_INFO_TEXT || "").trim();
-    if (packageInfoText) {
-      const packageNode = new window.Konva.Text({
+    if (!hidePackageDirect && packageInfoText) {
+      packageNode = new window.Konva.Text({
         x: packagePos.x,
         y: packagePos.y,
         width: Math.max(infoTextMinWidth, nameArea.w * 0.95),
         text: packageInfoText,
-        fontSize: packageFontSizeDirect,
+        fontSize: packageFontSizeResolved,
         lineHeight: 1.05,
-        fontFamily: metaFontFamily,
+        fontFamily: packageFontFamily,
         fill: packageTextColor,
-        fontStyle: buildKonvaFontStyle({ bold: metaTextBold, italic: false }),
-        textDecoration: metaTextUnderline ? "underline" : "",
+        fontStyle: buildKonvaFontStyle({
+          bold: packageTextBold,
+          italic: packageTextItalic,
+          weight: pagePackageStyle ? "" : (useCustomSinglePalette ? singleSpec.text.packageWeight : "")
+        }),
+        textDecoration: packageTextUnderline ? "underline" : "",
         wrap: "none",
         align: metaTextAlign,
         draggable: true
@@ -2379,7 +3914,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       if (typeof enableEditableText === "function") enableEditableText(packageNode, page);
     }
 
-    if (String(catalogEntry?.KRAJPOCHODZENIA || "").trim()) {
+    if (!hideFlagDirect && String(catalogEntry?.KRAJPOCHODZENIA || "").trim()) {
       const flagUrl = makeStripFlagDataUrl();
       const flagImg = await createKonvaImageNodeFromUrl(flagUrl);
       if (flagImg) {
@@ -2400,15 +3935,30 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const priceScale = Number.isFinite(Number(catalogEntry?.PRICE_TEXT_SCALE))
       ? Number(catalogEntry.PRICE_TEXT_SCALE)
       : 1;
-    const effectivePriceScaleDirect = priceScale * (useCustomSinglePalette ? Math.max(1, Number(singleSpec.text.priceScaleMultiplier || 1)) : 1);
-    const priceColor = resolveDirectPriceTextColor(catalogEntry?.PRICE_TEXT_COLOR, singleSpec, {
-      noPriceCircle: !!noPriceCircleDirect
+    const pagePriceScaleMultiplier = Number.isFinite(pagePriceStyle?.size) && pagePriceStyle.size > 0
+      ? Math.max(0.2, pagePriceStyle.size / DIRECT_PAGE_PRICE_SIZE_BASE)
+      : 1;
+    const effectivePriceScaleDirect = priceScale
+      * (useCustomSinglePalette ? normalizePriceScaleMultiplier(singleSpec.text.priceScaleMultiplier, 1) : 1)
+      * pagePriceScaleMultiplier;
+    const basePriceColor = resolveDirectPriceTextColor(catalogEntry?.PRICE_TEXT_COLOR, singleSpec, {
+      noPriceCircle: !!(noPriceCircleDirect || hidePriceBadgeDirect)
     });
-    const priceTextOffsetX = noPriceCircleDirect ? 0 : (isRoundedRectPriceDirect ? Math.round(priceArea.w * 0.06) : Math.round(priceArea.s * (useSingleLikeDirectLayout ? 0.16 : 0.22)));
+    const priceColor = String(pagePriceStyle?.color || basePriceColor);
+    const priceTextOffsetMode = useCustomSinglePalette ? String(singleSpec.text.priceTextOffsetMode || "").trim().toLowerCase() : "";
+    const useAbsolutePriceTextOffset = priceTextOffsetMode === "absolute";
+    const customPriceTextOffsetX = Number(singleSpec.priceTextOffset?.x || 0) * (isRoundedRectPriceDirect ? priceArea.w : priceArea.s);
+    const customPriceTextOffsetY = Number(singleSpec.priceTextOffset?.y || 0) * (isRoundedRectPriceDirect ? priceArea.h : priceArea.s);
+    const priceTextOffsetXBase = noPriceCircleDirect ? 0 : (isRoundedRectPriceDirect ? Math.round(priceArea.w * 0.06) : Math.round(priceArea.s * (useSingleLikeDirectLayout ? 0.16 : 0.22)));
+    const priceTextOffsetX = isElegantDefault && useSingleLikeDirectLayout && !noPriceCircleDirect && !isRoundedRectPriceDirect
+      ? priceTextOffsetXBase + Math.round(priceArea.s * elegantTextShiftXPct)
+      : priceTextOffsetXBase;
     const priceTextOffsetY = noPriceCircleDirect ? 0 : (isRoundedRectPriceDirect ? Math.round(priceArea.h * 0.10) : Math.round(priceArea.s * (useSingleLikeDirectLayout ? 0.235 : 0.26)));
+    const finalPriceTextOffsetX = useAbsolutePriceTextOffset ? customPriceTextOffsetX : (priceTextOffsetX + customPriceTextOffsetX);
+    const finalPriceTextOffsetY = useAbsolutePriceTextOffset ? customPriceTextOffsetY : (priceTextOffsetY + customPriceTextOffsetY);
 
     const priceBadgeStyleId = String(catalogEntry?.PRICE_BG_STYLE_ID || customPriceBadgeStyleId || "solid");
-    if (!noPriceCircleDirect && !isRoundedRectPriceDirect) {
+    if (!hidePriceDirect && !hidePriceBadgeDirect && !noPriceCircleDirect && !isRoundedRectPriceDirect) {
       const priceCircleUrl = String(catalogEntry?.PRICE_BG_IMAGE_URL || "").trim() || getSelectedPriceBadgeBackgroundUrl();
       const priceBg = await createKonvaImageNodeFromUrl(priceCircleUrl);
       if (priceBg) {
@@ -2438,9 +3988,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       }
     }
     let priceRectBgNode = null;
+    if (!hidePriceDirect) {
     const priceGroup = new window.Konva.Group({
-      x: priceArea.x + priceTextOffsetX,
-      y: priceArea.y + priceTextOffsetY,
+      x: useAbsolutePriceTextOffset ? priceArea.x : (priceArea.x + finalPriceTextOffsetX),
+      y: useAbsolutePriceTextOffset ? priceArea.y : (priceArea.y + finalPriceTextOffsetY),
       draggable: true,
       listening: true
     });
@@ -2448,16 +3999,20 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     priceGroup.setAttr("directModuleId", directModuleId);
     if (useSingleLikeDirectLayout) priceGroup.setAttr("isDirectSinglePriceLayout", true);
     if (noPriceCircleDirect) priceGroup.setAttr("noPriceCircleDirect", true);
+    if (hidePriceBadgeDirect) priceGroup.setAttr("hidePriceBadgeDirect", true);
     if (isRoundedRectPriceDirect) priceGroup.setAttr("priceShapeRoundedRect", true);
     if (hasImagePriceBadge) priceGroup.setAttr("isImagePriceBadge", true);
     priceGroup.setAttr("priceBadgeStyleId", priceBadgeStyleId);
-    priceGroup.setAttr("priceTextAlign", priceTextAlign);
-    priceGroup.setAttr("priceTextOffsetX", 0);
-    priceGroup.setAttr("priceTextOffsetY", 0);
+    priceGroup.setAttr("priceTextAlign", effectivePriceTextAlignDirect);
+    priceGroup.setAttr("priceTextOffsetX", useAbsolutePriceTextOffset ? finalPriceTextOffsetX : 0);
+    priceGroup.setAttr("priceTextOffsetY", useAbsolutePriceTextOffset ? finalPriceTextOffsetY : 0);
+    if (useAbsolutePriceTextOffset && useCustomSinglePalette) priceGroup.setAttr("priceExactOffset", true);
     priceGroup.setAttr("priceCircleSize", isRoundedRectPriceDirect ? priceArea.w : priceArea.s);
-    priceGroup.setAttr("priceCircleLocalX", -priceTextOffsetX);
-    if (isRoundedRectPriceDirect) priceGroup.setAttr("priceNoOpticalShift", true);
-    if (isRoundedRectPriceDirect) {
+    priceGroup.setAttr("priceCircleLocalX", useAbsolutePriceTextOffset ? 0 : -priceTextOffsetX);
+    if (useAbsolutePriceTextOffset) priceGroup.setAttr("priceTextOffsetAbsolute", true);
+    if (useAbsolutePriceTextOffset || isRoundedRectPriceDirect || isElegantDefault) priceGroup.setAttr("priceNoOpticalShift", true);
+    if (isElegantDefault) priceGroup.setAttr("isElegantDefaultPriceLayout", true);
+    if (!hidePriceBadgeDirect && isRoundedRectPriceDirect) {
       priceGroup.setAttr("priceBgOffsetX", -priceTextOffsetX);
       priceGroup.setAttr("priceBgOffsetY", -priceTextOffsetY);
       priceGroup.setAttr("priceBgWidth", priceArea.w);
@@ -2493,44 +4048,50 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       bindDirectPriceRectEditor(priceRectBgNode, page);
     }
 
-    // Lekko powiększony obszar trafienia dla tekstu ceny (nie całego koła),
-    // żeby transformer nie robił ogromnej ramki.
-    const priceHitPadding = 6;
-    const priceHitRect = new window.Konva.Rect({
-      x: isRoundedRectPriceDirect ? -priceTextOffsetX : -priceHitPadding,
-      y: isRoundedRectPriceDirect ? -priceTextOffsetY : -priceHitPadding,
-      width: noPriceCircleDirect ? 170 : (isRoundedRectPriceDirect ? priceArea.w : 140),
-      height: noPriceCircleDirect ? 58 : (isRoundedRectPriceDirect ? priceArea.h : 70),
-      fill: "#000000",
-      opacity: 0.001,
-      listening: true,
-      draggable: false
-    });
-    priceHitRect.setAttrs({ slotIndex, directModuleId, isPriceHitArea: true });
-    priceGroup.add(priceHitRect);
-
+    const customPriceFactorsDirect = useCustomSinglePalette ? getStoredCustomPriceTypographyFactors(singleSpec.text) : null;
     const priceBaseSize = isRoundedRectPriceDirect ? Math.max(24, priceArea.h) : priceArea.s;
     const isSingleCirclePriceDirect = useSingleLikeDirectLayout && !noPriceCircleDirect && !isRoundedRectPriceDirect;
-    const unitFactor = noPriceCircleDirect
-      ? 0.20
-      : (isRoundedRectPriceDirect ? 0.26 : (isSingleCirclePriceDirect ? 0.095 : 0.10));
-    const decFactor = noPriceCircleDirect
-      ? 0
-      : (isRoundedRectPriceDirect ? 0.26 : (isSingleCirclePriceDirect ? 0.14 : 0.12));
-    const mainFactor = noPriceCircleDirect
-      ? 0.52
-      : (isRoundedRectPriceDirect ? 0.80 : (isSingleCirclePriceDirect ? 0.475 : 0.34));
-    const unitSize = Math.max(7, Math.round(priceBaseSize * unitFactor * effectivePriceScaleDirect));
+    const unitFactor = customPriceFactorsDirect
+      ? customPriceFactorsDirect.unit
+      : (noPriceCircleDirect
+        ? 0.20
+        : (isRoundedRectPriceDirect ? 0.26 : (isSingleCirclePriceDirect ? 0.095 : 0.10)));
+    const decFactor = customPriceFactorsDirect
+      ? customPriceFactorsDirect.dec
+      : (noPriceCircleDirect
+        ? 0
+        : (isRoundedRectPriceDirect ? 0.26 : (isSingleCirclePriceDirect ? 0.14 : 0.12)));
+    const mainFactor = customPriceFactorsDirect
+      ? customPriceFactorsDirect.main
+      : (noPriceCircleDirect
+        ? 0.52
+        : (isRoundedRectPriceDirect ? 0.80 : (isSingleCirclePriceDirect ? 0.475 : 0.34)));
+    const effectiveElegantPriceScaleBoost = !exactCustomSinglePriceLayout && isElegantDefault && useSingleLikeDirectLayout && !noPriceCircleDirect && !isRoundedRectPriceDirect
+      ? elegantPriceScaleBoost
+      : 1;
+    const unitSize = exactCustomSinglePriceLayout
+      ? Math.max(1, Math.round(priceBaseSize * unitFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost))
+      : Math.max(7, Math.round(priceBaseSize * unitFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost));
     const decSize = noPriceCircleDirect
       ? unitSize
-      : Math.max(8, Math.round(priceBaseSize * decFactor * effectivePriceScaleDirect));
-    const mainSize = Math.max(12, Math.round(priceBaseSize * mainFactor * effectivePriceScaleDirect));
+      : (exactCustomSinglePriceLayout
+        ? Math.max(1, Math.round(priceBaseSize * decFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost))
+        : Math.max(8, Math.round(priceBaseSize * decFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost)));
+    const mainSize = exactCustomSinglePriceLayout
+      ? Math.max(1, Math.round(priceBaseSize * mainFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost))
+      : Math.max(12, Math.round(priceBaseSize * mainFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost));
     const mainNode = new window.Konva.Text({
-      x: 0, y: 0, text: priceParts.main, fontSize: mainSize, fontStyle: "bold",
+      x: 0, y: 0, text: priceParts.main, fontSize: mainSize,
+      fontStyle: buildKonvaFontStyle({
+        bold: effectivePriceBoldDirect,
+        italic: effectivePriceItalicDirect,
+        weight: pagePriceStyle ? "" : (useCustomSinglePalette ? singleSpec.text.priceMainWeight : "")
+      }),
       fontFamily: priceFontFamily, fill: priceColor, lineHeight: 1,
       textDecoration: priceTextUnderline ? "underline" : ""
     });
     mainNode.setAttr("pricePart", "main");
+    mainNode.setAttr("priceStrokeManaged", !!effectivePriceExtraBoldDirect);
     if (effectivePriceBoldDirect === false) mainNode.fontStyle("normal");
     if (effectivePriceExtraBoldDirect) {
       mainNode.stroke(priceColor);
@@ -2539,11 +4100,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     }
     const decNode = new window.Konva.Text({
       x: (mainNode.width?.() || 0) + (noPriceCircleDirect ? 6 : (isRoundedRectPriceDirect ? 6 : 4)), y: (mainNode.height?.() || 0) * (noPriceCircleDirect ? 0.00 : (isRoundedRectPriceDirect ? 0.04 : 0.10)),
-      text: priceParts.dec, fontSize: decSize, fontStyle: "bold",
+      text: priceParts.dec, fontSize: decSize,
+      fontStyle: buildKonvaFontStyle({
+        bold: pagePriceStyle ? false : effectivePriceBoldDirect,
+        italic: false,
+        weight: pagePriceStyle ? "" : (useCustomSinglePalette ? singleSpec.text.priceDecWeight : "")
+      }),
       fontFamily: priceFontFamily, fill: priceColor, lineHeight: 1,
       textDecoration: priceTextUnderline ? "underline" : ""
     });
     decNode.setAttr("pricePart", "dec");
+    decNode.setAttr("priceStrokeManaged", !!effectivePriceExtraBoldDirect);
     if (effectivePriceBoldDirect === false) decNode.fontStyle("normal");
     if (effectivePriceExtraBoldDirect) {
       decNode.stroke(priceColor);
@@ -2552,13 +4119,19 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     }
     const unitNode = new window.Konva.Text({
       x: (mainNode.width?.() || 0) + (useSingleLikeDirectLayout ? (noPriceCircleDirect ? 6 : (isRoundedRectPriceDirect ? 6 : 2)) : 4), y: (decNode.height?.() || 0) * (useSingleLikeDirectLayout ? (noPriceCircleDirect ? 1.02 : (isRoundedRectPriceDirect ? 1.02 : 1.35)) : 1.5),
-      text: `${priceCurrencySymbol} / ${priceUnitSuffix}`, fontSize: unitSize, fontStyle: "bold",
+      text: `${priceCurrencySymbol} / ${priceUnitSuffix}`, fontSize: unitSize,
+      fontStyle: buildKonvaFontStyle({
+        bold: pagePriceStyle ? false : effectivePriceBoldDirect,
+        italic: false,
+        weight: pagePriceStyle ? "" : (useCustomSinglePalette ? singleSpec.text.priceUnitWeight : "")
+      }),
       fontFamily: priceFontFamily, fill: priceColor, lineHeight: 1,
       textDecoration: priceTextUnderline ? "underline" : "",
       width: Math.max(noPriceCircleDirect ? 68 : (isRoundedRectPriceDirect ? Math.round(priceArea.w * 0.42) : 52), Math.round((isRoundedRectPriceDirect ? priceBaseSize : priceArea.s) * (noPriceCircleDirect ? 0.78 : 0.62))),
       wrap: "none"
     });
     unitNode.setAttr("pricePart", "unit");
+    unitNode.setAttr("priceStrokeManaged", !!effectivePriceExtraBoldDirect);
     if (effectivePriceBoldDirect === false) unitNode.fontStyle("normal");
     if (effectivePriceExtraBoldDirect) {
       unitNode.stroke(priceColor);
@@ -2568,9 +4141,15 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     priceGroup.add(mainNode, decNode, unitNode);
     addNode(priceGroup);
     bindDirectPriceGroupEditor(priceGroup, page);
+    }
+
+    // Meta-teksty mają pozostać widoczne także po nałożeniu na badge ceny.
+    if (nameText && typeof nameText.moveToTop === "function") nameText.moveToTop();
+    if (indexText && typeof indexText.moveToTop === "function") indexText.moveToTop();
+    if (packageNode && typeof packageNode.moveToTop === "function") packageNode.moveToTop();
 
     const eanValue = String(catalogEntry?.["KOD EAN"] || "").trim();
-    if (eanValue) {
+    if (!hideBarcodeDirect && eanValue) {
       const barcodeUrl = await generateBarcodeDataUrl(eanValue);
       const barcodeNode = await createKonvaImageNodeFromUrl(barcodeUrl);
       if (barcodeNode) {
@@ -2653,6 +4232,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
   function ensureModal() {
     if (document.getElementById("customStyleModal")) return;
+    ensureCustomStyleDarkTheme();
     syncCustomFontOptionsFromWindow();
 
     const overlay = document.createElement("div");
@@ -2668,18 +4248,18 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     ].join(";");
 
     overlay.innerHTML = `
-      <div style="width:min(1460px,98vw);height:min(94vh,1200px);overflow:auto;background:#fff;border-radius:16px;padding:24px 26px 24px 26px;box-shadow:0 24px 54px rgba(0,0,0,.24);font-family:Inter,Arial,sans-serif;">
+      <div class="custom-style-dark-shell" style="width:min(1460px,98vw);height:min(94vh,1200px);overflow:auto;background:#fff;border-radius:16px;padding:24px 26px 24px 26px;box-shadow:0 24px 54px rgba(0,0,0,.24);font-family:Inter,Arial,sans-serif;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;">
-          <h3 style="margin:0;font-size:15px;font-weight:800;color:#0f172a;">Kreator katalogu - styl własny</h3>
+          <h3 class="custom-style-heading" style="margin:0;font-size:15px;font-weight:800;color:#0f172a;">Kreator katalogu - styl własny</h3>
           <button id="customStyleClose" type="button" style="border:none;background:#eef2f7;color:#1f2937;font-size:24px;line-height:1;padding:8px 12px;border-radius:10px;cursor:pointer;">x</button>
         </div>
 
-        <div style="display:grid;grid-template-columns:minmax(0,1fr) 520px;gap:16px;align-items:start;">
-          <div style="border:1px solid #e5e7eb;border-radius:12px;padding:18px;background:#fbfdff;min-height:560px;">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid #d7dfec;border-radius:10px;background:#ffffff;margin-bottom:10px;">
+        <div class="custom-style-modal-grid" style="display:grid;grid-template-columns:minmax(0,1fr) 520px;gap:16px;align-items:start;">
+          <div class="custom-style-panel custom-style-panel--editor" style="border:1px solid #e5e7eb;border-radius:12px;padding:18px;background:#fbfdff;min-height:560px;">
+            <div class="custom-style-panel-toolbar" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid #d7dfec;border-radius:10px;background:#ffffff;margin-bottom:10px;">
               <div style="min-width:0;">
-                <div style="font-size:11px;font-weight:700;color:#0f172a;">Import danych (Excel)</div>
-                <div style="font-size:10px;color:#64748b;">Kolumny: Indeks, Marka, Cena, TNZ, Grupa produktów</div>
+                <div class="custom-style-heading" style="font-size:11px;font-weight:700;color:#0f172a;">Import danych (Excel)</div>
+                <div class="custom-style-muted" style="font-size:10px;color:#64748b;">Kolumny: Indeks, Marka, Cena, TNZ, Grupa produktów</div>
               </div>
               <div style="display:flex;gap:8px;align-items:center;">
                 <input id="customExcelImportInput" type="file" accept=".xlsx,.xls,.csv" style="display:none;">
@@ -2688,22 +4268,22 @@ const CUSTOM_PRODUCT_LAYOUTS = {
                 <button id="customExcelImportBtn" type="button" style="border:1px solid #0b8f84;background:#fff;color:#0b8f84;border-radius:8px;padding:6px 10px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Importuj Excel</button>
               </div>
             </div>
-            <div id="customExcelImportStatus" style="display:none;margin:-2px 0 10px 0;padding:7px 9px;border:1px solid #d7dfec;border-radius:8px;background:#f8fafc;font-size:10px;color:#334155;"></div>
+            <div id="customExcelImportStatus" class="custom-style-status" style="display:none;margin:-2px 0 10px 0;padding:7px 9px;border:1px solid #d7dfec;border-radius:8px;background:#f8fafc;font-size:10px;color:#334155;"></div>
 
-            <div style="font-size:11px;font-weight:700;color:#0f172a;margin-bottom:8px;">1. Dodawanie produktu</div>
+            <div class="custom-style-heading" style="font-size:11px;font-weight:700;color:#0f172a;margin-bottom:8px;">1. Dodawanie produktu</div>
 
             <div style="display:grid;grid-template-columns:1fr 320px;gap:16px;align-items:end;">
               <div>
-                <label for="customStyleSearch" style="display:block;font-size:10px;color:#64748b;margin-bottom:6px;font-weight:500;">Wyszukiwarka (nazwa lub indeks)</label>
+                <label for="customStyleSearch" class="custom-style-muted" style="display:block;font-size:10px;color:#64748b;margin-bottom:6px;font-weight:500;">Wyszukiwarka (nazwa lub indeks)</label>
                 <input id="customStyleSearch" type="text" placeholder="np. 29552 albo GERULA" style="width:100%;padding:6px 7px;border:1px solid #d7dfec;border-radius:10px;font-size:10px;outline:none;">
               </div>
               <div>
-                <label for="customStyleSelect" style="display:block;font-size:10px;color:#64748b;margin-bottom:6px;font-weight:500;">Produkt (dropdown)</label>
+                <label for="customStyleSelect" class="custom-style-muted" style="display:block;font-size:10px;color:#64748b;margin-bottom:6px;font-weight:500;">Produkt (dropdown)</label>
                 <select id="customStyleSelect" size="1" style="width:100%;padding:5px 7px;border:1px solid #d7dfec;border-radius:10px;font-size:10px;background:#fff;color:#0f172a;"></select>
               </div>
             </div>
 
-              <div id="customStyleInfo" style="margin-top:12px;padding:8px 10px;border:1px dashed #cbd5e1;border-radius:10px;background:#fff;font-size:10px;color:#334155;min-height:70px;">
+              <div id="customStyleInfo" class="custom-style-status custom-style-info" style="margin-top:12px;padding:8px 10px;border:1px dashed #cbd5e1;border-radius:10px;background:#fff;font-size:10px;color:#334155;min-height:70px;">
               Ładowanie produktów...
             </div>
               <div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -2720,9 +4300,15 @@ const CUSTOM_PRODUCT_LAYOUTS = {
                   <input id="customPriceColorInput" type="color" value="#d71920" style="width:24px;height:20px;padding:0;border:none;background:transparent;cursor:pointer;">
                 </label>
                 <label for="customPriceStyleSelect" style="display:inline-flex;align-items:center;gap:8px;border:1px solid #d7dfec;background:#fff;color:#0f172a;border-radius:8px;padding:6px 9px;font-size:10px;">
-                  Wybierz styl
+                  Tło ceny
                   <select id="customPriceStyleSelect" style="max-width:180px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:6px;font-size:10px;background:#fff;color:#0f172a;">
                     ${PRICE_BADGE_STYLE_OPTIONS.map((opt) => `<option value="${escapeHtml(opt.id)}">${escapeHtml(opt.label)}</option>`).join("")}
+                  </select>
+                </label>
+                <label for="customPriceLayoutSelect" style="display:inline-flex;align-items:center;gap:8px;border:1px solid #d7dfec;background:#fff;color:#0f172a;border-radius:8px;padding:6px 9px;font-size:10px;">
+                  Styl ceny
+                  <select id="customPriceLayoutSelect" style="max-width:180px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:6px;font-size:10px;background:#fff;color:#0f172a;">
+                    <option value="">Domyślny z modułu</option>
                   </select>
                 </label>
                 <label for="customPriceTextColorInput" style="display:inline-flex;align-items:center;gap:8px;border:1px solid #d7dfec;background:#fff;color:#0f172a;border-radius:8px;padding:6px 9px;font-size:10px;">
@@ -2732,6 +4318,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
                 <label for="customCurrencySelect" style="display:inline-flex;align-items:center;gap:8px;border:1px solid #d7dfec;background:#fff;color:#0f172a;border-radius:8px;padding:6px 9px;font-size:10px;">
                   Waluta
                   <select id="customCurrencySelect" style="padding:2px 6px;border:1px solid #cbd5e1;border-radius:6px;font-size:10px;background:#fff;color:#0f172a;">
+                    <option value="zł">PLN (zł)</option>
                     <option value="£">Funt (£)</option>
                     <option value="€">Euro (€)</option>
                   </select>
@@ -2795,9 +4382,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
               <input id="customImageUploadInput" type="file" accept="image/*" style="display:none;">
           </div>
 
-          <div style="border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#f8fafc;">
+          <div class="custom-style-panel custom-style-panel--preview" style="border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#f8fafc;">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;">
-              <div style="font-size:11px;font-weight:700;color:#0f172a;">Podgląd modułu 1:1 (styl elegancki)</div>
+              <div class="custom-style-heading" style="font-size:11px;font-weight:700;color:#0f172a;">Podgląd modułu 1:1 (styl elegancki)</div>
               <label for="customModuleLayoutSelect" style="display:inline-flex;align-items:center;gap:6px;font-size:10px;color:#334155;">
                 Styl modułu
                 <select id="customModuleLayoutSelect" style="max-width:170px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:6px;font-size:10px;background:#fff;color:#0f172a;">
@@ -2806,21 +4393,22 @@ const CUSTOM_PRODUCT_LAYOUTS = {
               </label>
               <button id="customApplyStyleToImportedBtn" type="button" style="border:1px solid #0b8f84;background:#fff;color:#0b8f84;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Zastosuj do zaimportowanych</button>
             </div>
-            <div id="customPreviewCard" style="position:relative;width:100%;aspect-ratio:1.38/1;background:#ffffff;border:1px solid #dbe4ef;border-radius:12px;overflow:hidden;">
+            <div id="customPreviewCard" class="custom-style-preview-card" style="position:relative;width:min(100%, 500px);margin:0 auto;aspect-ratio:500/362;background:#ffffff;border:1px solid #dbe4ef;border-radius:12px;overflow:hidden;">
               <div id="customPreviewImagesTrack" style="position:absolute;left:0%;top:4%;width:48%;height:83%;overflow:hidden;">
                 <img id="customPreviewImage" alt="Podgląd produktu" style="width:100%;height:100%;object-fit:contain;flex:1 1 auto;min-width:0;">
               </div>
               <div id="customPreviewDivider" style="display:none;position:absolute;left:63.6%;top:15.5%;width:0.55%;height:58.5%;background:#d9d9d9;border-radius:2px;"></div>
-              <div id="customPreviewName" style="position:absolute;left:49%;top:50%;width:47%;font-size:12px;line-height:1.04;font-weight:600;color:#111827;text-align:left;"></div>
-              <div id="customPreviewIndex" style="position:absolute;left:48.7%;top:62%;font-size:7px;font-weight:700;font-style:italic;color:#b9b9b9;"></div>
-              <div id="customPreviewPackageInfo" style="position:absolute;left:48.7%;top:65.2%;font-size:7px;font-weight:600;color:#334155;"></div>
+              <div id="customPreviewName" style="position:absolute;left:49%;top:50%;width:47%;font-size:12px;line-height:1.04;font-weight:600;color:#111827;text-align:left;z-index:4;"></div>
+              <div id="customPreviewIndex" style="position:absolute;left:48.7%;top:62%;font-size:7px;font-weight:700;font-style:italic;color:#b9b9b9;z-index:4;"></div>
+              <div id="customPreviewPackageInfo" style="position:absolute;left:48.7%;top:65.2%;font-size:7px;font-weight:600;color:#334155;z-index:4;"></div>
               <div id="customPreviewFlag" style="position:absolute;left:49%;top:72%;width:34%;height:3%;display:flex;border-radius:2px;overflow:hidden;border:1px solid rgba(0,0,0,.08);">
                 <span style="flex:1;background:#22409a;"></span>
                 <span style="flex:1;background:#f3d31f;"></span>
                 <span style="flex:1;background:#c4003a;"></span>
               </div>
-              <div id="customPreviewPriceCircle" style="position:absolute;left:22%;top:70%;width:84px;height:84px;border-radius:50%;background:#d71920;display:flex;align-items:center;justify-content:center;color:#fff;z-index:2;">
+              <div id="customPreviewPriceCircle" style="position:absolute;left:22%;top:70%;width:84px;height:84px;border-radius:50%;background:#d71920;display:flex;align-items:center;justify-content:center;color:#fff;z-index:1;">
                 <div id="customPreviewPriceRow" style="display:flex;align-items:center;gap:5px;width:100%;justify-content:flex-start;padding:0 8px;box-sizing:border-box;">
+                  <span id="customPreviewPriceCurrency" style="display:none;font-size:14px;font-weight:700;line-height:1;white-space:nowrap;">£</span>
                   <div id="customPreviewPriceMain" style="font-size:32px;font-weight:800;line-height:1;">0</div>
                   <div style="display:flex;flex-direction:column;line-height:1;">
                     <span id="customPreviewPriceDec" style="font-size:12px;font-weight:700;">00</span>
@@ -2855,20 +4443,20 @@ const CUSTOM_PRODUCT_LAYOUTS = {
                 Dodaj kolejny produkt (rodzina)
               </button>
             </div>
-            <div id="customFamilyStatusBox" style="margin-top:8px;padding:8px 10px;border:1px solid #d7dfec;border-radius:8px;background:#fff;color:#334155;font-size:10px;line-height:1.35;">
-              <div id="customFamilyStatusLine" style="font-weight:600;">Rodzina: brak</div>
-              <div id="customFamilyStatusDetails" style="margin-top:4px;color:#64748b;">Kliknij przycisk, aby ustawić produkt bazowy rodziny.</div>
+            <div id="customFamilyStatusBox" class="custom-style-status" style="margin-top:8px;padding:8px 10px;border:1px solid #d7dfec;border-radius:8px;background:#fff;color:#334155;font-size:10px;line-height:1.35;">
+              <div id="customFamilyStatusLine" class="custom-style-heading" style="font-weight:600;">Rodzina: brak</div>
+              <div id="customFamilyStatusDetails" class="custom-style-muted" style="margin-top:4px;color:#64748b;">Kliknij przycisk, aby ustawić produkt bazowy rodziny.</div>
             </div>
-            <div style="margin-top:10px;padding:8px 10px;border:1px solid #d7dfec;border-radius:10px;background:#fff;">
+            <div class="custom-style-draft-panel" style="margin-top:10px;padding:8px 10px;border:1px solid #d7dfec;border-radius:10px;background:#fff;">
               <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
-                <div style="font-size:10px;font-weight:700;color:#0f172a;">Lista modułów roboczych</div>
+                <div class="custom-style-heading" style="font-size:10px;font-weight:700;color:#0f172a;">Lista modułów roboczych</div>
                 <div style="display:flex;gap:6px;align-items:center;">
                   <button id="customClearEditorBtn" type="button" style="border:1px solid #cbd5e1;background:#fff;color:#334155;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;">Wyczyść</button>
                   <button id="customOpenDraftTrayBtn" type="button" style="border:1px solid #334155;background:#fff;color:#0f172a;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;">Dodaj te produkty do katalogu</button>
                 </div>
               </div>
-              <div id="customDraftModulesList" style="display:grid;gap:8px;max-height:220px;overflow:auto;">
-                <div style="font-size:10px;color:#64748b;">Brak zapisanych modułów roboczych.</div>
+              <div id="customDraftModulesList" class="custom-style-draft-list" style="display:grid;gap:8px;max-height:220px;overflow:auto;">
+                <div class="custom-style-blank" style="font-size:10px;color:#64748b;">Brak zapisanych modułów roboczych.</div>
               </div>
             </div>
           </div>
@@ -2877,8 +4465,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     `;
 
     document.body.appendChild(overlay);
+    decorateCustomStyleModalUi(overlay);
 
     const close = () => {
+      closeEmbeddedCustomStyleCreator();
       storeCustomStyleEditorSnapshot();
       overlay.style.display = "none";
     };
@@ -2893,59 +4483,124 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
   function renderSelect(select, list) {
     if (!select) return;
-    const options = list.map((p) => {
+    const options = [`<option value="">Wybierz produkt...</option>`].concat(list.map((p) => {
       const label = `${p.index ? `[${p.index}] ` : ""}${p.name || "(bez nazwy)"}`;
       return `<option value="${p.id}">${label}</option>`;
-    });
+    }));
     select.innerHTML = options.join("");
   }
+
+  function resetCustomStyleProductPickerUi() {
+    const select = document.getElementById("customStyleSelect");
+    const info = document.getElementById("customStyleInfo");
+    const products = customEditorProductsById instanceof Map
+      ? Array.from(customEditorProductsById.values())
+      : [];
+    const firstProduct = products[0] || null;
+    if (select) {
+      renderSelect(select, products);
+      if (firstProduct) select.value = String(firstProduct.id || "");
+      else {
+        select.value = "";
+        select.selectedIndex = 0;
+      }
+    }
+    if (info) {
+      if (firstProduct) updateInfo(info, firstProduct, products.length, products.length, products.length);
+      else {
+        info.innerHTML = `
+          <div class="custom-style-blank custom-style-muted" style="color:#64748b;">Wybierz produkt z listy, aby rozpocząć.</div>
+        `;
+        decorateCustomStyleInfo(info);
+      }
+    }
+    return firstProduct;
+  }
+
+  window.refreshStylWlasnyModuleLayoutOptions = function refreshStylWlasnyModuleLayoutOptions() {
+    const moduleLayoutSelect = document.getElementById("customModuleLayoutSelect");
+    renderModuleLayoutSelectOptions(moduleLayoutSelect, customModuleLayoutStyleId || "default");
+    if (moduleLayoutSelect) {
+      customModuleLayoutStyleId = String(moduleLayoutSelect.value || "default");
+      saveLastSelectedModuleLayoutStyleId(customModuleLayoutStyleId);
+    }
+  };
+  window.refreshStylWlasnyCustomPriceStyleOptions = function refreshStylWlasnyCustomPriceStyleOptions() {
+    const priceLayoutSelect = document.getElementById("customPriceLayoutSelect");
+    renderCustomPriceLayoutSelectOptions(priceLayoutSelect, customPriceLayoutStyleId || "");
+    if (priceLayoutSelect) {
+      customPriceLayoutStyleId = String(priceLayoutSelect.value || "").trim();
+    }
+  };
+  window.addEventListener("stylWlasny:module-layout-style-saved", (event) => {
+    const moduleLayoutSelect = document.getElementById("customModuleLayoutSelect");
+    renderModuleLayoutSelectOptions(moduleLayoutSelect, customModuleLayoutStyleId || "default");
+    if (moduleLayoutSelect) {
+      customModuleLayoutStyleId = String(moduleLayoutSelect.value || "default");
+      saveLastSelectedModuleLayoutStyleId(customModuleLayoutStyleId);
+    }
+    renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+  });
+  window.addEventListener("stylWlasny:price-style-saved", () => {
+    const priceLayoutSelect = document.getElementById("customPriceLayoutSelect");
+    renderCustomPriceLayoutSelectOptions(priceLayoutSelect, customPriceLayoutStyleId || "");
+    if (priceLayoutSelect) {
+      customPriceLayoutStyleId = String(priceLayoutSelect.value || "").trim();
+    }
+    renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+  });
 
   function updateInfo(info, product, allCount, filteredCount, renderedCount) {
     if (!info) return;
     if (!product) {
-      info.innerHTML = `Brak dopasowań. Łącznie produktów: <strong>${allCount}</strong>.`;
+      info.innerHTML = `<div class="custom-style-blank custom-style-muted">Brak dopasowań. Łącznie produktów: <strong>${allCount}</strong>.</div>`;
+      decorateCustomStyleInfo(info);
       return;
     }
     info.innerHTML = `
       <div style="display:grid;grid-template-columns:120px 1fr;gap:12px;align-items:start;">
-        <div style="border:1px solid #d7dfec;border-radius:8px;background:#fff;padding:6px;">
-          <div style="font-size:10px;color:#64748b;margin-bottom:6px;">Zdjęcie</div>
-          <div id="customStyleImageBox" style="width:100%;height:84px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:10px;">brak</div>
+        <div class="custom-style-thumb-card" style="border:1px solid #d7dfec;border-radius:8px;background:#fff;padding:6px;">
+          <div class="custom-style-muted" style="font-size:10px;color:#64748b;margin-bottom:6px;">Zdjęcie</div>
+          <div id="customStyleImageBox" class="custom-style-image-box" style="width:100%;height:84px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:10px;">brak</div>
         </div>
-        <div style="border:1px solid #d7dfec;border-radius:8px;background:#fff;padding:8px;">
-          <div><strong>Indeks:</strong>
+        <div class="custom-style-info-card" style="border:1px solid #d7dfec;border-radius:8px;background:#fff;padding:8px;">
+          <div><strong class="custom-style-heading">Indeks:</strong>
             <span
               id="customEditableIndex"
               contenteditable="true"
               spellcheck="false"
               title="Kliknij, aby edytować indeks"
+              class="custom-style-editable"
               style="display:inline-block;min-width:120px;padding:1px 4px;border-radius:4px;border:1px dashed transparent;cursor:text;outline:none;"
             >${escapeHtml(getDisplayIndex(product) || "-")}</span>
           </div>
-          <div><strong>Nazwa:</strong>
+          <div><strong class="custom-style-heading">Nazwa:</strong>
             <span
               id="customEditableName"
               contenteditable="true"
               spellcheck="false"
               title="Kliknij, aby edytować nazwę"
+              class="custom-style-editable"
               style="display:inline-block;min-width:220px;padding:1px 4px;border-radius:4px;border:1px dashed transparent;cursor:text;outline:none;"
             >${escapeHtml(getDisplayName(product))}</span>
           </div>
-          <div><strong>Cena:</strong>
+          <div><strong class="custom-style-heading">Cena:</strong>
             <span
               id="customEditablePrice"
               contenteditable="true"
               spellcheck="false"
               title="Kliknij, aby edytować cenę"
+              class="custom-style-editable"
               style="display:inline-block;min-width:90px;padding:1px 4px;border-radius:4px;border:1px dashed transparent;cursor:text;outline:none;"
             >${escapeHtml(getDisplayPrice(product) || "0.00")}</span>
           </div>
-          <div><strong>Opakowanie:</strong> ${product.packageValue || "-"} ${product.packageUnit || ""}</div>
-          <div><strong>EAN:</strong> ${product.ean || "-"}</div>
+          <div><strong class="custom-style-heading">Opakowanie:</strong> ${product.packageValue || "-"} ${product.packageUnit || ""}</div>
+          <div><strong class="custom-style-heading">EAN:</strong> ${product.ean || "-"}</div>
         </div>
       </div>
-      <div style="margin-top:6px;color:#64748b;">Dopasowań: ${filteredCount} / ${allCount}${Number.isFinite(renderedCount) ? ` (pokazano: ${renderedCount})` : ""}</div>
+      <div class="custom-style-muted" style="margin-top:6px;color:#64748b;">Dopasowań: ${filteredCount} / ${allCount}${Number.isFinite(renderedCount) ? ` (pokazano: ${renderedCount})` : ""}</div>
     `;
+    decorateCustomStyleInfo(info);
   }
 
   function bindEditableName(product) {
@@ -2957,12 +4612,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const bindEditableField = (el, handlers = {}) => {
       if (!el) return;
       el.addEventListener("focus", () => {
-        el.style.borderColor = "#93c5fd";
-        el.style.background = "#eff6ff";
+        el.style.borderColor = "rgba(34,211,238,.68)";
+        el.style.background = "rgba(8,145,178,.16)";
+        el.style.boxShadow = "0 0 0 3px rgba(34,211,238,.12)";
       });
       el.addEventListener("blur", () => {
         el.style.borderColor = "transparent";
         el.style.background = "transparent";
+        el.style.boxShadow = "none";
         if (typeof handlers.onBlur === "function") handlers.onBlur();
       });
       el.addEventListener("keydown", (e) => {
@@ -3030,16 +4687,23 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       onReady(null);
       return;
     }
+    const preferredExt = String(customImageExtensionCache.get(safeIndex) || "").trim().toLowerCase();
+    const extCandidates = preferredExt
+      ? [preferredExt, ...IMAGE_EXTENSIONS.filter((ext) => ext !== preferredExt)]
+      : IMAGE_EXTENSIONS.slice();
     let i = 0;
     const tryNext = () => {
-      if (i >= IMAGE_EXTENSIONS.length) {
+      if (i >= extCandidates.length) {
         onReady(null);
         return;
       }
-      const url = buildImageUrl(safeIndex, IMAGE_EXTENSIONS[i++]);
+      const currentExt = extCandidates[i++];
+      const url = buildImageUrl(safeIndex, currentExt);
       const img = new Image();
       img.onload = () => {
         cacheImageMeta(url, img.naturalWidth || img.width, img.naturalHeight || img.height);
+        customImageExtensionCache.set(safeIndex, currentExt);
+        schedulePersistImageExtensionCache();
         onReady(url);
       };
       img.onerror = tryNext;
@@ -3087,7 +4751,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     }
 
     const resolvePromise = new Promise((resolve) => {
-      loadImageWithFallback(product.index, (url) => {
+      loadImageWithFallback(indexKey || product.index, (url) => {
         resolve(url || null);
       });
     });
@@ -3187,14 +4851,15 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (!track) return;
     const entries = Array.isArray(currentFamilyProducts) ? currentFamilyProducts : [];
     const base = getEffectivePreviewProduct();
-    const selectedLayoutStyleId = String(base?.MODULE_LAYOUT_STYLE_ID || customModuleLayoutStyleId || "default");
+    const selectedLayoutStyleId = String(customModuleLayoutStyleId || "default");
+    const useExactSingleImagePreview = isCustomSingleStyle(selectedLayoutStyleId);
     const familyIndexes = entries
       .map((item) => String(item && item.product && item.product.index ? item.product.index : "").trim())
       .filter(Boolean);
     if (!familyIndexes.length && base && base.index) familyIndexes.push(String(base.index).trim());
     const mergedIndex = normalizeIndexKey(Array.from(new Set(familyIndexes)).join(","));
     if (!entries.length) {
-      track.innerHTML = `<img id="customPreviewImage" alt="Podgląd produktu" style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform:scale(1.08);transform-origin:left top;">`;
+      track.innerHTML = `<img id="customPreviewImage" alt="Podgląd produktu" style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform:${useExactSingleImagePreview ? "none" : "scale(1.08)"};transform-origin:left top;">`;
       const imgEl = document.getElementById("customPreviewImage");
       const effectiveUrl = getEffectivePreviewImageUrl();
       if (imgEl) {
@@ -3206,7 +4871,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     if (entries.length === 1) {
       const escaped = escapeHtml(entries[0].url || "");
-      track.innerHTML = `<img src="${escaped}" alt="Zdjęcie produktu 1" style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform:scale(1.08);transform-origin:left top;">`;
+      track.innerHTML = `<img src="${escaped}" alt="Zdjęcie produktu 1" style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform:${useExactSingleImagePreview ? "none" : "scale(1.08)"};transform-origin:left top;">`;
       return;
     }
 
@@ -3283,9 +4948,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       btn.textContent = !familyBaseProduct
         ? "Ustaw produkt bazowy (rodzina)"
         : `Dodaj do rodziny (${count}/4)`;
-      btn.style.borderColor = familyBaseProduct ? "#0b8f84" : "#334155";
-      btn.style.color = familyBaseProduct ? "#0b8f84" : "#0f172a";
-      btn.style.background = familyBaseProduct ? "#f0fdfa" : "#ffffff";
+      btn.style.borderColor = familyBaseProduct ? "rgba(34,211,238,.48)" : "rgba(148,163,184,.24)";
+      btn.style.color = familyBaseProduct ? "#67e8f9" : "#e2ebf7";
+      btn.style.background = familyBaseProduct ? "rgba(8,145,178,.16)" : "rgba(15,23,42,.62)";
     }
 
     if (lineEl) {
@@ -3309,17 +4974,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     }
 
     if (boxEl) {
-      let border = "#d7dfec";
-      let bg = "#fff";
+      let border = "rgba(148,163,184,.18)";
+      let bg = "rgba(5,10,18,.72)";
       if (tone === "success") {
-        border = "#86efac";
-        bg = "#f0fdf4";
+        border = "rgba(52,211,153,.28)";
+        bg = "rgba(6,78,59,.36)";
       } else if (tone === "error") {
-        border = "#fca5a5";
-        bg = "#fef2f2";
+        border = "rgba(248,113,113,.34)";
+        bg = "rgba(69,10,10,.36)";
       } else if (familyBaseProduct) {
-        border = "#99f6e4";
-        bg = "#f0fdfa";
+        border = "rgba(34,211,238,.28)";
+        bg = "rgba(8,47,73,.34)";
       }
       boxEl.style.borderColor = border;
       boxEl.style.background = bg;
@@ -3337,6 +5002,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const dividerEl = document.getElementById("customPreviewDivider");
     const hasImageBadgePreview = String(customPriceBadgeStyleId || "solid") !== "solid";
     const singleSpec = getSingleDirectLayoutSpec(styleIdOverride, hasImageBadgePreview);
+    const metaScaleMultiplierPreview = isCustomSingleStyle(styleIdOverride) ? Math.max(0.8, Number(singleSpec.text.metaScaleMultiplier || 1)) : 1;
     const previewFamilyCount = Array.isArray(currentFamilyProducts) ? currentFamilyProducts.length : 0;
     const previewStyleLayouts = getModuleStyleFamilyLayouts(styleIdOverride, previewFamilyCount);
     const previewLayoutOverflowsTrack = Array.isArray(previewStyleLayouts) && previewStyleLayouts.some((item) => {
@@ -3347,6 +5013,57 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       if (![x, y, w, h].every(Number.isFinite)) return false;
       return x < 0 || y < 0 || (x + w) > 1 || (y + h) > 1;
     });
+
+    const getPreviewImageContentRect = (imgEl) => {
+      if (!(imgEl instanceof HTMLImageElement)) return null;
+      const rect = imgEl.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+      const naturalW = Number(imgEl.naturalWidth || 0);
+      const naturalH = Number(imgEl.naturalHeight || 0);
+      if (!(naturalW > 0 && naturalH > 0)) return rect;
+
+      const scale = Math.min(rect.width / naturalW, rect.height / naturalH);
+      const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+      const drawW = naturalW * safeScale;
+      const drawH = naturalH * safeScale;
+      const freeX = Math.max(0, rect.width - drawW);
+      const freeY = Math.max(0, rect.height - drawH);
+
+      const computed = window.getComputedStyle(imgEl);
+      const fit = String(computed.objectFit || "").trim().toLowerCase();
+      if (fit !== "contain") return rect;
+
+      const rawPos = String(computed.objectPosition || "50% 50%").trim();
+      const parts = rawPos.split(/\s+/).filter(Boolean);
+      const xToken = parts[0] || "50%";
+      const yToken = parts[1] || "50%";
+      const mapPosToken = (token, freeSpace, axis) => {
+        const t = String(token || "").trim().toLowerCase();
+        if (!Number.isFinite(freeSpace) || freeSpace <= 0) return 0;
+        if (t === "left" || t === "top") return 0;
+        if (t === "center") return freeSpace / 2;
+        if (t === "right" || t === "bottom") return freeSpace;
+        if (t.endsWith("%")) {
+          const ratio = Number.parseFloat(t.slice(0, -1));
+          if (Number.isFinite(ratio)) return (ratio / 100) * freeSpace;
+        }
+        if (t.endsWith("px")) {
+          const px = Number.parseFloat(t.slice(0, -2));
+          if (Number.isFinite(px)) return Math.max(0, Math.min(freeSpace, px));
+        }
+        const asNum = Number.parseFloat(t);
+        if (Number.isFinite(asNum)) return Math.max(0, Math.min(freeSpace, asNum));
+        return axis === "x" ? (freeSpace / 2) : (freeSpace / 2);
+      };
+      const offsetX = mapPosToken(xToken, freeX, "x");
+      const offsetY = mapPosToken(yToken, freeY, "y");
+      return {
+        left: rect.left + offsetX,
+        top: rect.top + offsetY,
+        width: drawW,
+        height: drawH
+      };
+    };
 
     if (track) {
       if (isSingleDirectMode) {
@@ -3382,7 +5099,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         nameEl.style.left = `${singleSpec.nameArea.x}%`;
         nameEl.style.top = `${singleSpec.nameArea.y}%`;
         nameEl.style.width = `${singleSpec.nameArea.w}%`;
-        nameEl.style.fontSize = "10px";
+        nameEl.style.fontSize = `${Math.round(10 * metaScaleMultiplierPreview)}px`;
         nameEl.style.fontWeight = "700";
         nameEl.style.color = "#1f3560";
       } else {
@@ -3399,7 +5116,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       if (isSingleDirectMode) {
         indexEl.style.left = `${singleSpec.indexPos.x}%`;
         indexEl.style.top = `${singleSpec.indexPos.y}%`;
-        indexEl.style.fontSize = "12px";
+        indexEl.style.fontSize = `${Math.round(12 * metaScaleMultiplierPreview)}px`;
         indexEl.style.color = DEFAULT_INDEX_TEXT_COLOR;
       } else {
         indexEl.style.left = "48.7%";
@@ -3414,7 +5131,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       if (isSingleDirectMode) {
         packageInfoEl.style.left = `${singleSpec.packagePos.x}%`;
         packageInfoEl.style.top = `${singleSpec.packagePos.y}%`;
-        packageInfoEl.style.fontSize = "12px";
+        packageInfoEl.style.fontSize = `${Math.round(12 * metaScaleMultiplierPreview)}px`;
         packageInfoEl.style.color = "#1f3560";
       } else {
         packageInfoEl.style.left = "48.7%";
@@ -3464,15 +5181,262 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     if (dividerEl) {
       if (isSingleDirectMode && singleSpec.divider.x >= 0 && singleSpec.divider.h > 0) {
+        let dividerLeftPct = Number(singleSpec.divider.x);
+        if (singleSpec.divider.anchor === "image-right" && track) {
+          const hostRect = dividerEl.parentElement?.getBoundingClientRect?.();
+          const imgs = Array.from(track.querySelectorAll("img"));
+          if (hostRect && hostRect.width > 0 && imgs.length) {
+            const rightEdge = Math.max(...imgs.map((img) => {
+              const rect = getPreviewImageContentRect(img);
+              return rect ? (Number(rect.left || 0) + Number(rect.width || 0)) : Number.NEGATIVE_INFINITY;
+            }));
+            if (Number.isFinite(rightEdge)) {
+              const gapPx = (Number(singleSpec.divider.gapFromImage || 0) / 100) * hostRect.width;
+              dividerLeftPct = ((rightEdge + gapPx - hostRect.left) / hostRect.width) * 100;
+            }
+          }
+        }
+        dividerLeftPct = Math.max(0, Math.min(100, Number.isFinite(dividerLeftPct) ? dividerLeftPct : Number(singleSpec.divider.x || 0)));
+        const dividerTopPct = Math.max(0, Math.min(100, Number(singleSpec.divider.y || 0)));
+        let dividerHeightPct = Math.max(0, Number(singleSpec.divider.h || 0));
+        if (singleSpec.divider.snapToPriceTop && !singleSpec.text.hidePrice) {
+          const targetBottomPct = Number(singleSpec.priceArea.y || 0) - Number(singleSpec.divider.gapFromPrice || 0);
+          dividerHeightPct = Math.max(0.2, targetBottomPct - dividerTopPct);
+        }
         dividerEl.style.display = "block";
-        dividerEl.style.left = `${singleSpec.divider.x}%`;
-        dividerEl.style.top = `${singleSpec.divider.y}%`;
+        dividerEl.style.left = `${dividerLeftPct}%`;
+        dividerEl.style.top = `${dividerTopPct}%`;
         dividerEl.style.width = `${singleSpec.divider.w}%`;
-        dividerEl.style.height = `${singleSpec.divider.h}%`;
+        dividerEl.style.height = `${dividerHeightPct}%`;
+        dividerEl.style.background = String(singleSpec.text.dividerColor || "").trim() || "#d9d9d9";
       } else {
         dividerEl.style.display = "none";
       }
     }
+  }
+
+  function ensurePreviewSnapshotLayer() {
+    const card = document.getElementById("customPreviewCard");
+    if (!card) return null;
+    let layer = document.getElementById("customPreviewSnapshotLayer");
+    if (!layer) {
+      layer = document.createElement("div");
+      layer.id = "customPreviewSnapshotLayer";
+      layer.style.position = "absolute";
+      layer.style.left = "0";
+      layer.style.top = "0";
+      layer.style.transformOrigin = "left top";
+      layer.style.pointerEvents = "none";
+      layer.style.zIndex = "15";
+      layer.style.display = "none";
+      card.appendChild(layer);
+    }
+    return layer;
+  }
+
+  function setPreviewSnapshotMode(enabled) {
+    const layer = ensurePreviewSnapshotLayer();
+    const ids = [
+      "customPreviewImagesTrack",
+      "customPreviewDivider",
+      "customPreviewName",
+      "customPreviewIndex",
+      "customPreviewPackageInfo",
+      "customPreviewFlag",
+      "customPreviewPriceCircle",
+      "customPreviewBarcodeWrap"
+    ];
+    ids.forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.style.visibility = enabled ? "hidden" : "";
+    });
+    if (layer) {
+      layer.style.display = enabled ? "block" : "none";
+      if (!enabled) {
+        layer.innerHTML = "";
+      }
+    }
+    if (!enabled) customSnapshotPreviewRenderStamp += 1;
+  }
+
+  function parseSnapshotFontStyle(fontStyle) {
+    const raw = String(fontStyle || "normal").trim().toLowerCase();
+    const weightMatch = raw.match(/\b([1-9]00)\b/);
+    const hasBold = raw.includes("bold");
+    return {
+      fontStyle: raw.includes("italic") ? "italic" : "normal",
+      fontWeight: weightMatch ? weightMatch[1] : (hasBold ? "700" : "400")
+    };
+  }
+
+  function createPreviewSnapshotLineElement(attrs) {
+    const points = Array.isArray(attrs.points) ? attrs.points : [];
+    if (points.length < 4) return null;
+    const x1 = Number(points[0] || 0);
+    const y1 = Number(points[1] || 0);
+    const x2 = Number(points[points.length - 2] || 0);
+    const y2 = Number(points[points.length - 1] || 0);
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const length = Math.max(1, Math.sqrt((dx * dx) + (dy * dy)));
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    const strokeWidth = Math.max(1, Number(attrs.strokeWidth || 2));
+    const line = document.createElement("div");
+    line.style.position = "absolute";
+    line.style.left = `${Number(attrs.x || 0) + x1}px`;
+    line.style.top = `${Number(attrs.y || 0) + y1 - (strokeWidth / 2)}px`;
+    line.style.width = `${length}px`;
+    line.style.height = `${strokeWidth}px`;
+    line.style.background = String(attrs.stroke || "#ffffff");
+    line.style.borderRadius = `${Math.max(1, strokeWidth / 2)}px`;
+    line.style.transformOrigin = "0 50%";
+    line.style.transform = `rotate(${angle + Number(attrs.rotation || 0)}deg)`;
+    return line;
+  }
+
+  async function createPreviewSnapshotNodeElement(def, context, options = {}) {
+    const className = String(def?.className || "");
+    const attrs = getSnapshotNodeAttrs(def);
+    const kind = getSnapshotNodeKind(def);
+    if (!className) return null;
+
+    if (className === "Group") {
+      const group = document.createElement("div");
+      group.style.position = "absolute";
+      group.style.left = `${Number(attrs.x || 0)}px`;
+      group.style.top = `${Number(attrs.y || 0)}px`;
+      group.style.transformOrigin = "left top";
+      group.style.transform = `rotate(${Number(attrs.rotation || 0)}deg)`;
+      const children = Array.isArray(def?.children) ? def.children : [];
+      let priceTextIndex = 0;
+      for (const childDef of children) {
+        const childOptions = {
+          ...options,
+          priceRole: kind === "priceGroup"
+            ? inferSnapshotPriceRole(childDef, priceTextIndex)
+            : "",
+          inPriceGroup: kind === "priceGroup"
+        };
+        if (kind === "priceGroup" && String(childDef?.className || "") === "Text") {
+          priceTextIndex += 1;
+        }
+        const childEl = await createPreviewSnapshotNodeElement(childDef, context, childOptions);
+        if (childEl) group.appendChild(childEl);
+      }
+      return group;
+    }
+
+    if (className === "Text") {
+      const textValue = resolveSnapshotTextValue(def, context, options);
+      if (!textValue && (kind === "flag" || kind === "ean")) return null;
+      const text = document.createElement("div");
+      const fontMeta = parseSnapshotFontStyle(attrs.fontStyle);
+      text.textContent = textValue || " ";
+      text.style.position = "absolute";
+      text.style.left = `${Number(attrs.x || 0)}px`;
+      text.style.top = `${Number(attrs.y || 0)}px`;
+      text.style.color = String(attrs.fill || "#111111");
+      text.style.fontFamily = String(attrs.fontFamily || "Arial");
+      text.style.fontSize = `${Math.max(1, Number(attrs.fontSize || 24))}px`;
+      text.style.fontStyle = fontMeta.fontStyle;
+      text.style.fontWeight = fontMeta.fontWeight;
+      text.style.lineHeight = String(Number(attrs.lineHeight || 1));
+      text.style.textAlign = String(attrs.align || "left");
+      text.style.textDecoration = String(attrs.textDecoration || "none") || "none";
+      text.style.whiteSpace = String(attrs.wrap || "word") === "none" ? "nowrap" : "pre-wrap";
+      text.style.wordBreak = String(attrs.wrap || "word") === "none" ? "normal" : "break-word";
+      text.style.transformOrigin = "left top";
+      text.style.transform = `rotate(${Number(attrs.rotation || 0)}deg)`;
+      if (Number(attrs.width || 0) > 0) {
+        text.style.width = `${Math.max(1, Number(attrs.width || 0))}px`;
+      }
+      return text;
+    }
+
+    if (className === "Image") {
+      const src = await resolveSnapshotImageUrl(def, context);
+      if (!src) return null;
+      const img = document.createElement("img");
+      img.alt = kind || "snapshot";
+      img.src = src;
+      img.style.position = "absolute";
+      img.style.left = `${Number(attrs.x || 0)}px`;
+      img.style.top = `${Number(attrs.y || 0)}px`;
+      img.style.width = `${Math.max(1, Number(attrs.width || 1))}px`;
+      img.style.height = `${Math.max(1, Number(attrs.height || 1))}px`;
+      img.style.objectFit = "contain";
+      img.style.transformOrigin = "left top";
+      img.style.transform = `rotate(${Number(attrs.rotation || 0)}deg)`;
+      return img;
+    }
+
+    if (className === "Rect") {
+      const rect = document.createElement("div");
+      rect.style.position = "absolute";
+      rect.style.left = `${Number(attrs.x || 0)}px`;
+      rect.style.top = `${Number(attrs.y || 0)}px`;
+      rect.style.width = `${Math.max(1, Number(attrs.width || 1))}px`;
+      rect.style.height = `${Math.max(1, Number(attrs.height || 1))}px`;
+      rect.style.background = String(attrs.fill || "transparent");
+      rect.style.borderStyle = Number(attrs.strokeWidth || 0) > 0 ? "solid" : "none";
+      rect.style.borderWidth = `${Math.max(0, Number(attrs.strokeWidth || 0))}px`;
+      rect.style.borderColor = String(attrs.stroke || "transparent");
+      rect.style.borderRadius = `${Math.max(0, Number(attrs.cornerRadius || 0))}px`;
+      rect.style.boxSizing = "border-box";
+      rect.style.transformOrigin = "left top";
+      rect.style.transform = `rotate(${Number(attrs.rotation || 0)}deg)`;
+      return rect;
+    }
+
+    if (className === "Circle") {
+      const radius = Math.max(1, Number(attrs.radius || 1));
+      const circle = document.createElement("div");
+      circle.style.position = "absolute";
+      circle.style.left = `${Number(attrs.x || 0) - radius}px`;
+      circle.style.top = `${Number(attrs.y || 0) - radius}px`;
+      circle.style.width = `${radius * 2}px`;
+      circle.style.height = `${radius * 2}px`;
+      circle.style.background = String(attrs.fill || "transparent");
+      circle.style.borderStyle = Number(attrs.strokeWidth || 0) > 0 ? "solid" : "none";
+      circle.style.borderWidth = `${Math.max(0, Number(attrs.strokeWidth || 0))}px`;
+      circle.style.borderColor = String(attrs.stroke || "transparent");
+      circle.style.borderRadius = "50%";
+      circle.style.boxSizing = "border-box";
+      return circle;
+    }
+
+    if (className === "Line") {
+      return createPreviewSnapshotLineElement(attrs);
+    }
+
+    return null;
+  }
+
+  async function renderPreviewFromEditorSnapshot(snapshot, context) {
+    const card = document.getElementById("customPreviewCard");
+    const layer = ensurePreviewSnapshotLayer();
+    if (!card || !layer) return false;
+    const stamp = ++customSnapshotPreviewRenderStamp;
+    const sourceW = Math.max(1, Number(snapshot?.stageWidth || CUSTOM_MODULE_BASE_WIDTH));
+    const sourceH = Math.max(1, Number(snapshot?.stageHeight || CUSTOM_MODULE_BASE_HEIGHT));
+    const targetW = Math.max(1, Number(card.clientWidth || sourceW));
+    const targetH = Math.max(1, Number(card.clientHeight || sourceH));
+    layer.innerHTML = "";
+    layer.style.width = `${sourceW}px`;
+    layer.style.height = `${sourceH}px`;
+    layer.style.transform = `scale(${targetW / sourceW}, ${targetH / sourceH})`;
+    setPreviewSnapshotMode(true);
+
+    for (const def of Array.isArray(snapshot?.nodes) ? snapshot.nodes : []) {
+      const el = await createPreviewSnapshotNodeElement(def, context);
+      if (stamp !== customSnapshotPreviewRenderStamp) return false;
+      if (el) layer.appendChild(el);
+    }
+
+    if (stamp !== customSnapshotPreviewRenderStamp) return false;
+    window.dispatchEvent(new CustomEvent("customStylePreviewRendered"));
+    return true;
   }
 
   function renderModulePreview(product, imageUrl) {
@@ -3491,6 +5455,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     if (!nameEl || !indexEl || !mainEl || !decEl || !unitEl || !barcodeEl) return;
     if (!product) {
+      setPreviewSnapshotMode(false);
       nameEl.textContent = "";
       indexEl.textContent = "";
       if (packageInfoEl) packageInfoEl.textContent = "";
@@ -3508,44 +5473,91 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       return;
     }
 
-    renderFamilyImagesTrack();
+    const previewCatalogEntry = buildCatalogProductFromCustom(product) || {};
     const familyCountPreview = Array.isArray(currentFamilyProducts) ? currentFamilyProducts.length : 0;
     const hasFamilyPreview = familyCountPreview > 1;
-    const hasImageBadgePreview = String(customPriceBadgeStyleId || "solid") !== "solid";
-    const selectedLayoutStyleId = String(product?.MODULE_LAYOUT_STYLE_ID || customModuleLayoutStyleId || "default");
+    const selectedLayoutStyleId = String(previewCatalogEntry?.MODULE_LAYOUT_STYLE_ID || customModuleLayoutStyleId || "default");
+    const editorSnapshot = !hasFamilyPreview
+      ? getCatalogEntryModuleLayoutEditorSnapshot(previewCatalogEntry, selectedLayoutStyleId)
+      : null;
+    if (editorSnapshot) {
+      void renderPreviewFromEditorSnapshot(editorSnapshot, {
+        product,
+        catalogEntry: previewCatalogEntry,
+        imageUrl: String(imageUrl || getEffectivePreviewImageUrl() || "")
+      });
+      return;
+    }
+
+    setPreviewSnapshotMode(false);
+    renderFamilyImagesTrack();
+    const previewPriceBadgeStyleId = String(previewCatalogEntry?.PRICE_BG_STYLE_ID || customPriceBadgeStyleId || "solid");
+    const hasImageBadgePreview = previewPriceBadgeStyleId !== "solid";
     const singleSpec = getSingleDirectLayoutSpec(selectedLayoutStyleId, hasImageBadgePreview);
+    const elegantPreviewPriceScale = getElegantPricePreviewScale(selectedLayoutStyleId);
     const isSingleDirectPreview = !!DIRECT_CUSTOM_MODULE_MODE && (!hasFamilyPreview || !!singleSpec.familyDirect?.useSingleLayout);
+    const hideNamePreview = isSingleDirectPreview && !!singleSpec.text.hideName;
+    const hideIndexPreview = isSingleDirectPreview && !!singleSpec.text.hideIndex;
+    const hidePackagePreview = isSingleDirectPreview && !!singleSpec.text.hidePackage;
+    const hidePricePreview = isSingleDirectPreview && !!singleSpec.text.hidePrice;
+    const hideBarcodePreview = isSingleDirectPreview && !!singleSpec.text.hideBarcode;
+    const hideFlagPreview = isSingleDirectPreview && !!singleSpec.text.hideFlag;
     applyPreviewLayoutMode(isSingleDirectPreview, selectedLayoutStyleId);
-    nameEl.textContent = getDisplayName(product);
-    indexEl.textContent = getDisplayIndex(product) || "-";
-    if (packageInfoEl) packageInfoEl.textContent = buildPackageInfoText(product);
+    nameEl.textContent = hideNamePreview
+      ? ""
+      : String(previewCatalogEntry?.NAZWA || getDisplayName(product) || "-");
+    indexEl.textContent = hideIndexPreview
+      ? ""
+      : String(previewCatalogEntry?.INDEKS || getDisplayIndex(product) || "-");
+    if (packageInfoEl) {
+      packageInfoEl.textContent = hidePackagePreview
+        ? ""
+        : String(previewCatalogEntry?.CUSTOM_PACKAGE_INFO_TEXT || buildPackageInfoText(product) || "");
+    }
+    nameEl.style.display = hideNamePreview ? "none" : "block";
+    indexEl.style.display = hideIndexPreview ? "none" : "block";
+    if (packageInfoEl) packageInfoEl.style.display = hidePackagePreview ? "none" : "block";
+    if (priceCircle) priceCircle.style.display = hidePricePreview ? "none" : "flex";
     if (Array.isArray(currentFamilyProducts) && currentFamilyProducts.length > 1) {
       updateFamilyIndexPreviewText();
     }
 
-    const price = formatPrice(getDisplayPrice(product));
-    const currencySymbol = getEffectiveCurrencySymbol(product, price.currency);
-    const metaAlign = normalizeAlignOption(product?.TEXT_ALIGN || customMetaTextAlign, "left");
-    const metaFont = normalizeFontOption(product?.TEXT_FONT_FAMILY || customMetaFontFamily, "Arial");
-    const metaColor = String(product?.TEXT_COLOR || customMetaTextColor || "#1f3560");
-    const metaBold = boolAttrToFlag(product?.TEXT_BOLD ?? customMetaTextBold);
-    const metaUnderline = boolAttrToFlag(product?.TEXT_UNDERLINE ?? customMetaTextUnderline);
-    const priceFont = normalizeFontOption(product?.PRICE_FONT_FAMILY || customPriceFontFamily, "Arial");
-    const priceBold = boolAttrToFlag(product?.PRICE_TEXT_BOLD ?? customPriceTextBold);
+    const price = formatPrice(previewCatalogEntry?.CENA || getDisplayPrice(product));
+    const currencySymbol = getEffectiveCurrencySymbol(previewCatalogEntry, price.currency);
+    const metaAlign = normalizeAlignOption(previewCatalogEntry?.TEXT_ALIGN || customMetaTextAlign, "left");
     const useCustomSingleTextPalette = isSingleDirectPreview && isCustomSingleStyle(selectedLayoutStyleId);
+    const useAbsolutePriceTextOffsetPreview = useCustomSingleTextPalette && String(singleSpec.text.priceTextOffsetMode || "").trim().toLowerCase() === "absolute";
+    const styleMetaFontPreview = normalizeFontOption(singleSpec.text.metaFontFamily || "", "");
+    const metaFont = normalizeFontOption(
+      (useCustomSingleTextPalette && styleMetaFontPreview) ? styleMetaFontPreview : (previewCatalogEntry?.TEXT_FONT_FAMILY || customMetaFontFamily),
+      "Arial"
+    );
+    const metaColor = String(previewCatalogEntry?.TEXT_COLOR || customMetaTextColor || "#1f3560");
+    const metaBold = boolAttrToFlag(previewCatalogEntry?.TEXT_BOLD ?? customMetaTextBold);
+    const metaUnderline = boolAttrToFlag(previewCatalogEntry?.TEXT_UNDERLINE ?? customMetaTextUnderline);
+    const stylePriceFontPreview = normalizeFontOption(singleSpec.text.priceFontFamily || "", "");
+    const priceFont = normalizeFontOption(
+      (useCustomSingleTextPalette && stylePriceFontPreview) ? stylePriceFontPreview : (previewCatalogEntry?.PRICE_FONT_FAMILY || customPriceFontFamily),
+      "Arial"
+    );
+    const priceBold = boolAttrToFlag(previewCatalogEntry?.PRICE_TEXT_BOLD ?? customPriceTextBold);
+    const hidePriceBadgePreview = useCustomSingleTextPalette && !!singleSpec.text.hidePriceBadge;
     const noPriceCirclePreview = useCustomSingleTextPalette && !!singleSpec.text.noPriceCircle;
-    const isRoundedRectPricePreview = useCustomSingleTextPalette && !noPriceCirclePreview && singleSpec.text.priceShape === "roundedRect";
+    const isRoundedRectPricePreview = useCustomSingleTextPalette && !hidePriceBadgePreview && !noPriceCirclePreview && singleSpec.text.priceShape === "roundedRect";
     const effectivePriceBoldPreview = useCustomSingleTextPalette && singleSpec.text.forcePriceBold ? true : priceBold;
     const priceScaleBoostPreview = useCustomSingleTextPalette
-      ? Math.max(1, Number(singleSpec.text.priceScaleMultiplier || 1))
+      ? normalizePriceScaleMultiplier(singleSpec.text.priceScaleMultiplier, 1)
       : 1;
-    const priceUnderline = boolAttrToFlag(product?.PRICE_TEXT_UNDERLINE ?? customPriceTextUnderline);
-    const priceAlign = normalizeAlignOption(product?.PRICE_TEXT_ALIGN || customPriceTextAlign, "left");
+    const priceUnderline = boolAttrToFlag(previewCatalogEntry?.PRICE_TEXT_UNDERLINE ?? customPriceTextUnderline);
+    const stylePriceAlignPreview = useCustomSingleTextPalette && String(singleSpec.text.priceTextAlign || "").trim()
+      ? normalizeAlignOption(singleSpec.text.priceTextAlign, "left")
+      : "";
+    const priceAlign = stylePriceAlignPreview || normalizeAlignOption(previewCatalogEntry?.PRICE_TEXT_ALIGN || customPriceTextAlign, "left");
 
     const nameColor = useCustomSingleTextPalette ? (singleSpec.text.nameColor || "#111111") : metaColor;
     const indexColor = useCustomSingleTextPalette
       ? (singleSpec.text.indexColor || DEFAULT_INDEX_TEXT_COLOR)
-      : String(product?.TEXT_INDEX_COLOR || DEFAULT_INDEX_TEXT_COLOR);
+      : String(previewCatalogEntry?.TEXT_INDEX_COLOR || DEFAULT_INDEX_TEXT_COLOR);
     const packageColor = useCustomSingleTextPalette ? (singleSpec.text.packageColor || "#111111") : metaColor;
     nameEl.style.fontFamily = metaFont;
     indexEl.style.fontFamily = metaFont;
@@ -3553,9 +5565,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     nameEl.style.color = nameColor;
     indexEl.style.color = indexColor;
     if (packageInfoEl) packageInfoEl.style.color = packageColor;
-    nameEl.style.fontWeight = metaBold ? "700" : "500";
-    indexEl.style.fontWeight = metaBold ? "700" : "700";
-    if (packageInfoEl) packageInfoEl.style.fontWeight = metaBold ? "700" : "600";
+    nameEl.style.fontWeight = (useCustomSingleTextPalette && singleSpec.text.nameWeight)
+      ? singleSpec.text.nameWeight
+      : (metaBold ? "700" : "500");
+    indexEl.style.fontWeight = (useCustomSingleTextPalette && singleSpec.text.indexWeight)
+      ? singleSpec.text.indexWeight
+      : (metaBold ? "700" : "700");
+    if (packageInfoEl) {
+      packageInfoEl.style.fontWeight = (useCustomSingleTextPalette && singleSpec.text.packageWeight)
+        ? singleSpec.text.packageWeight
+        : (metaBold ? "700" : "600");
+    }
     nameEl.style.textDecoration = metaUnderline ? "underline" : "none";
     indexEl.style.textDecoration = metaUnderline ? "underline" : "none";
     if (packageInfoEl) packageInfoEl.style.textDecoration = metaUnderline ? "underline" : "none";
@@ -3564,14 +5584,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (packageInfoEl) packageInfoEl.style.textAlign = metaAlign;
     indexEl.style.fontStyle = (isSingleDirectPreview && useCustomSingleTextPalette)
       ? (singleSpec.text.indexItalic ? "italic" : "normal")
-      : ((product?.TEXT_INDEX_ITALIC === false) ? "normal" : "italic");
+      : ((previewCatalogEntry?.TEXT_INDEX_ITALIC === false) ? "normal" : "italic");
 
     mainEl.textContent = price.main;
     decEl.textContent = price.dec;
-    const priceUnitSuffix = isWeightProduct(product) ? "KG" : "SZT.";
+    const priceUnitSuffix = isWeightProduct(previewCatalogEntry) ? "KG" : "SZT.";
     unitEl.textContent = `${currencySymbol} / ${priceUnitSuffix}`;
-    const effectivePriceTextColor = resolveDirectPriceTextColor(product?.PRICE_TEXT_COLOR, singleSpec, {
-      noPriceCircle: !!noPriceCirclePreview
+    const effectivePriceTextColor = resolveDirectPriceTextColor(previewCatalogEntry?.PRICE_TEXT_COLOR, singleSpec, {
+      noPriceCircle: !!(noPriceCirclePreview || hidePriceBadgePreview)
     });
     mainEl.style.color = effectivePriceTextColor;
     decEl.style.color = effectivePriceTextColor;
@@ -3580,23 +5600,50 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     decEl.style.fontFamily = priceFont;
     unitEl.style.fontFamily = priceFont;
     const strongNoCircleBoldPreview = noPriceCirclePreview && effectivePriceBoldPreview;
-    mainEl.style.fontWeight = strongNoCircleBoldPreview ? "900" : (effectivePriceBoldPreview ? "800" : "600");
-    decEl.style.fontWeight = strongNoCircleBoldPreview ? "800" : (effectivePriceBoldPreview ? "700" : "500");
-    unitEl.style.fontWeight = strongNoCircleBoldPreview ? "800" : (effectivePriceBoldPreview ? "700" : "500");
+    mainEl.style.fontWeight = (useCustomSingleTextPalette && singleSpec.text.priceMainWeight)
+      ? singleSpec.text.priceMainWeight
+      : (strongNoCircleBoldPreview ? "900" : (effectivePriceBoldPreview ? "800" : "600"));
+    decEl.style.fontWeight = (useCustomSingleTextPalette && singleSpec.text.priceDecWeight)
+      ? singleSpec.text.priceDecWeight
+      : (strongNoCircleBoldPreview ? "800" : (effectivePriceBoldPreview ? "700" : "500"));
+    unitEl.style.fontWeight = (useCustomSingleTextPalette && singleSpec.text.priceUnitWeight)
+      ? singleSpec.text.priceUnitWeight
+      : (strongNoCircleBoldPreview ? "800" : (effectivePriceBoldPreview ? "700" : "500"));
     mainEl.style.textDecoration = priceUnderline ? "underline" : "none";
     decEl.style.textDecoration = priceUnderline ? "underline" : "none";
     unitEl.style.textDecoration = priceUnderline ? "underline" : "none";
     if (priceRowEl) {
+      priceRowEl.style.position = "";
+      priceRowEl.style.left = "";
+      priceRowEl.style.top = "";
+      priceRowEl.style.width = "";
+      priceRowEl.style.maxWidth = "";
+      priceRowEl.style.flex = "";
+      priceRowEl.style.gap = "";
       priceRowEl.style.justifyContent = priceAlign === "right" ? "flex-end" : (priceAlign === "center" ? "center" : "flex-start");
-      if (noPriceCirclePreview) {
+      if (useCustomSingleTextPalette) {
+        const customOffsetX = Number(singleSpec.priceTextOffset?.x || 0);
+        const customOffsetY = Number(singleSpec.priceTextOffset?.y || 0);
+        priceRowEl.style.position = "absolute";
+        priceRowEl.style.left = `${customOffsetX * 100}%`;
+        priceRowEl.style.top = `${customOffsetY * 100}%`;
+        priceRowEl.style.width = "100%";
+        priceRowEl.style.gap = "5px";
+      }
+      if (useAbsolutePriceTextOffsetPreview) {
+        priceRowEl.style.padding = hidePriceBadgePreview || noPriceCirclePreview
+          ? "0 0 0 0"
+          : (isRoundedRectPricePreview ? "0 6px" : "0 8px");
+        priceRowEl.style.transform = "none";
+      } else if (hidePriceBadgePreview || noPriceCirclePreview) {
         priceRowEl.style.padding = "0 0 0 0";
         priceRowEl.style.transform = "none";
       } else if (isRoundedRectPricePreview) {
         priceRowEl.style.padding = "0 6px";
         priceRowEl.style.transform = "none";
       } else if (isSingleDirectPreview) {
-        const isTnzBadgePreview = String(customPriceBadgeStyleId || "").includes("tnz");
-        const isGranatBadgePreview = String(customPriceBadgeStyleId || "").includes("granatowe");
+        const isTnzBadgePreview = previewPriceBadgeStyleId.includes("tnz");
+        const isGranatBadgePreview = previewPriceBadgeStyleId.includes("granatowe");
         priceRowEl.style.padding = "0 10px 0 10px";
         if (priceAlign === "right") {
           priceRowEl.style.transform = isTnzBadgePreview
@@ -3614,8 +5661,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       } else {
         priceRowEl.style.padding = "0 8px";
         if (hasImageBadgePreview) {
-          const isTnzBadgePreview = String(customPriceBadgeStyleId || "").includes("tnz");
-          const isGranatBadgePreview = String(customPriceBadgeStyleId || "").includes("granatowe");
+          const isTnzBadgePreview = previewPriceBadgeStyleId.includes("tnz");
+          const isGranatBadgePreview = previewPriceBadgeStyleId.includes("granatowe");
           if (priceAlign === "right") {
             priceRowEl.style.transform = isGranatBadgePreview ? "translate(10px, 3px)" : (isTnzBadgePreview ? "translate(4px, 3px)" : "translate(2px, 2px)");
           } else if (priceAlign === "center") {
@@ -3632,37 +5679,61 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     // Skalowanie ceny proporcjonalnie do podglądu (bliżej stylu eleganckiego 1:1).
     if (priceCircle) {
       const card = document.getElementById("customPreviewCard");
+      const cardW = card ? card.clientWidth : 520;
+      const cardH = card ? card.clientHeight : Math.round(cardW / 1.38);
       const singlePriceRatio = Math.max(0.12, (Number(singleSpec.priceArea.s) || 24) / 100);
-      const base = card
-        ? Math.max(isSingleDirectPreview ? 78 : 68, Math.round(card.clientWidth * (isSingleDirectPreview ? singlePriceRatio : 0.18)))
-        : 84;
-      const scale = (Number.isFinite(customPriceTextScale) ? customPriceTextScale : 1) * priceScaleBoostPreview;
-      if (noPriceCirclePreview) {
-        priceCircle.style.width = `${Math.max(140, Math.round(base * 3.2))}px`;
-        priceCircle.style.height = `${Math.max(34, Math.round(base * 0.75))}px`;
+      const exactCircleBase = Math.max(1, Math.round((Number(singleSpec.priceArea.s) || 24) * cardW / 100));
+      const base = useCustomSingleTextPalette
+        ? exactCircleBase
+        : (card
+        ? Math.max(
+            isSingleDirectPreview ? 78 : 68,
+            Math.round(card.clientWidth * (isSingleDirectPreview ? singlePriceRatio : 0.18) * elegantPreviewPriceScale)
+          )
+        : 84);
+      const priceTextScalePreview = Number(previewCatalogEntry?.PRICE_TEXT_SCALE);
+      const scale = (Number.isFinite(priceTextScalePreview) ? priceTextScalePreview : (Number.isFinite(customPriceTextScale) ? customPriceTextScale : 1)) * priceScaleBoostPreview;
+      if (hidePriceBadgePreview) {
+        priceCircle.style.width = `${base}px`;
+        priceCircle.style.height = `${base}px`;
+        priceCircle.style.background = "transparent";
+        priceCircle.style.backgroundImage = "none";
+        priceCircle.style.borderRadius = "0";
+      } else if (noPriceCirclePreview) {
+        if (useCustomSingleTextPalette) {
+          priceCircle.style.width = `${base}px`;
+          priceCircle.style.height = `${base}px`;
+        } else {
+          priceCircle.style.width = `${Math.max(140, Math.round(base * 3.2))}px`;
+          priceCircle.style.height = `${Math.max(34, Math.round(base * 0.75))}px`;
+        }
         priceCircle.style.background = "transparent";
         priceCircle.style.backgroundImage = "none";
         priceCircle.style.borderRadius = "0";
       } else if (isRoundedRectPricePreview) {
-        const cardW = card ? card.clientWidth : 520;
-        const cardH = card ? card.clientHeight : Math.round(cardW / 1.38);
-        const rectW = Math.max(86, Math.round((Number(singleSpec.priceArea.w) > 0 ? singleSpec.priceArea.w : 24) * cardW / 100));
-        const rectH = Math.max(34, Math.round((Number(singleSpec.priceArea.h) > 0 ? singleSpec.priceArea.h : 11.5) * cardH / 100));
-        const rectR = Math.max(6, Math.round((Number(singleSpec.text.priceBgRadius || singleSpec.priceArea.r || 2.2)) * cardW / 100));
+        const rectW = useCustomSingleTextPalette
+          ? Math.max(1, Math.round((Number(singleSpec.priceArea.w) > 0 ? singleSpec.priceArea.w : 24) * cardW / 100))
+          : Math.max(86, Math.round((Number(singleSpec.priceArea.w) > 0 ? singleSpec.priceArea.w : 24) * cardW / 100));
+        const rectH = useCustomSingleTextPalette
+          ? Math.max(1, Math.round((Number(singleSpec.priceArea.h) > 0 ? singleSpec.priceArea.h : 11.5) * cardH / 100))
+          : Math.max(34, Math.round((Number(singleSpec.priceArea.h) > 0 ? singleSpec.priceArea.h : 11.5) * cardH / 100));
+        const rectR = useCustomSingleTextPalette
+          ? Math.max(0, Math.round((Number(singleSpec.text.priceBgRadius || singleSpec.priceArea.r || 2.2)) * cardW / 100))
+          : Math.max(6, Math.round((Number(singleSpec.text.priceBgRadius || singleSpec.priceArea.r || 2.2)) * cardW / 100));
         priceCircle.style.width = `${rectW}px`;
         priceCircle.style.height = `${rectH}px`;
         priceCircle.style.borderRadius = `${rectR}px`;
         priceCircle.style.backgroundImage = "none";
-        const roundedPreviewBg = String(product?.PRICE_BG_COLOR || customPriceCircleColor || singleSpec.text.priceBgColor || "#2eaee8");
+        const roundedPreviewBg = String(previewCatalogEntry?.PRICE_BG_COLOR || customPriceCircleColor || singleSpec.text.priceBgColor || "#2eaee8");
         priceCircle.style.background = roundedPreviewBg;
       } else {
         priceCircle.style.width = `${base}px`;
         priceCircle.style.height = `${base}px`;
         priceCircle.style.borderRadius = "50%";
-        const badgeBgUrl = getSelectedPriceBadgeBackgroundUrl();
-        if (customPriceBadgeStyleId && customPriceBadgeStyleId !== "solid" && badgeBgUrl) {
-          const isGranatBadgePreview = String(customPriceBadgeStyleId || "").includes("granatowe");
-          const isTnzBadgePreview = String(customPriceBadgeStyleId || "").includes("tnz");
+        const badgeBgUrl = String(previewCatalogEntry?.PRICE_BG_IMAGE_URL || "").trim() || getSelectedPriceBadgeBackgroundUrl();
+        if (previewPriceBadgeStyleId !== "solid" && badgeBgUrl) {
+          const isGranatBadgePreview = previewPriceBadgeStyleId.includes("granatowe");
+          const isTnzBadgePreview = previewPriceBadgeStyleId.includes("tnz");
           priceCircle.style.background = "transparent";
           priceCircle.style.backgroundImage = `url("${badgeBgUrl}")`;
           priceCircle.style.backgroundRepeat = "no-repeat";
@@ -3674,38 +5745,57 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           }
         } else {
           priceCircle.style.backgroundImage = "none";
-          priceCircle.style.background = customPriceCircleColor || "#d71920";
+          priceCircle.style.background = String(previewCatalogEntry?.PRICE_BG_COLOR || customPriceCircleColor || "#d71920");
         }
       }
-      const previewPriceBase = isRoundedRectPricePreview
+      const previewPriceBase = hidePriceBadgePreview
+        ? base
+        : (isRoundedRectPricePreview
         ? Math.max(34, parseInt(priceCircle.style.height || "34", 10))
-        : base;
-      const previewUnitPx = Math.max(7, Math.round(previewPriceBase * (noPriceCirclePreview ? 0.22 : (isRoundedRectPricePreview ? 0.26 : (isSingleDirectPreview ? 0.095 : 0.11))) * scale));
-      const previewDecPx = noPriceCirclePreview
-        ? previewUnitPx
-        : Math.max(8, Math.round(previewPriceBase * (isRoundedRectPricePreview ? 0.26 : 0.14) * scale));
-      const previewMainPx = Math.max(12, Math.round(previewPriceBase * (noPriceCirclePreview ? 0.56 : (isRoundedRectPricePreview ? 0.80 : (isSingleDirectPreview ? 0.475 : 0.38))) * scale));
+        : base);
+      const customPriceFactorsPreview = useCustomSingleTextPalette ? getStoredCustomPriceTypographyFactors(singleSpec.text) : null;
+      const previewUnitPx = useCustomSingleTextPalette
+        ? Math.max(1, Math.round(previewPriceBase * (customPriceFactorsPreview
+          ? customPriceFactorsPreview.unit
+          : ((hidePriceBadgePreview || noPriceCirclePreview) ? 0.22 : (isRoundedRectPricePreview ? 0.26 : (isSingleDirectPreview ? 0.095 : 0.11)))) * scale))
+        : Math.max(7, Math.round(previewPriceBase * ((hidePriceBadgePreview || noPriceCirclePreview) ? 0.22 : (isRoundedRectPricePreview ? 0.26 : (isSingleDirectPreview ? 0.095 : 0.11))) * scale));
+      const previewDecPx = (hidePriceBadgePreview || noPriceCirclePreview)
+        ? (customPriceFactorsPreview
+          ? Math.max(1, Math.round(previewPriceBase * customPriceFactorsPreview.dec * scale))
+          : previewUnitPx)
+        : (useCustomSingleTextPalette
+          ? Math.max(1, Math.round(previewPriceBase * (customPriceFactorsPreview
+            ? customPriceFactorsPreview.dec
+            : (isRoundedRectPricePreview ? 0.26 : 0.14)) * scale))
+          : Math.max(8, Math.round(previewPriceBase * (isRoundedRectPricePreview ? 0.26 : 0.14) * scale)));
+      const previewMainPx = useCustomSingleTextPalette
+        ? Math.max(1, Math.round(previewPriceBase * (customPriceFactorsPreview
+          ? customPriceFactorsPreview.main
+          : ((hidePriceBadgePreview || noPriceCirclePreview) ? 0.56 : (isRoundedRectPricePreview ? 0.80 : (isSingleDirectPreview ? 0.475 : 0.38)))) * scale))
+        : Math.max(12, Math.round(previewPriceBase * ((hidePriceBadgePreview || noPriceCirclePreview) ? 0.56 : (isRoundedRectPricePreview ? 0.80 : (isSingleDirectPreview ? 0.475 : 0.38))) * scale));
       mainEl.style.fontSize = `${previewMainPx}px`;
       decEl.style.fontSize = `${previewDecPx}px`;
       unitEl.style.fontSize = `${previewUnitPx}px`;
       unitEl.style.whiteSpace = "nowrap";
-      unitEl.style.letterSpacing = (isSingleDirectPreview && !noPriceCirclePreview && !isRoundedRectPricePreview) ? "-0.1px" : "0";
-      if (isSingleDirectPreview && !noPriceCirclePreview && !isRoundedRectPricePreview) {
+      unitEl.style.letterSpacing = (useCustomSingleTextPalette || !isSingleDirectPreview || noPriceCirclePreview || isRoundedRectPricePreview) ? "0" : "-0.1px";
+      if (!useCustomSingleTextPalette && isSingleDirectPreview && !noPriceCirclePreview && !isRoundedRectPricePreview) {
         unitEl.style.transform = "translateY(-1px)";
       } else {
         unitEl.style.transform = "none";
       }
     }
 
-    const eanDigits = scientificToPlain(product.ean);
+    const eanDigits = scientificToPlain(previewCatalogEntry?.["KOD EAN"] || "");
+    const showFlagPreview = !hideFlagPreview && !!String(previewCatalogEntry?.KRAJPOCHODZENIA || "").trim();
+    const showBarcodePreview = !hideBarcodePreview && !!eanDigits;
     barcodeEl.innerHTML = "";
     if (flagEl) {
-      flagEl.style.display = customPreviewVisibility.showFlag ? "flex" : "none";
+      flagEl.style.display = showFlagPreview ? "flex" : "none";
     }
     if (barcodeWrap) {
-      barcodeWrap.style.display = customPreviewVisibility.showBarcode ? "block" : "none";
+      barcodeWrap.style.display = showBarcodePreview ? "block" : "none";
     }
-    if (customPreviewVisibility.showBarcode && window.JsBarcode && eanDigits) {
+    if (showBarcodePreview && window.JsBarcode && eanDigits) {
       try {
         window.JsBarcode(barcodeEl, eanDigits, {
           format: "EAN13",
@@ -3726,6 +5816,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         barcodeEl.innerHTML = "";
       }
     }
+    window.dispatchEvent(new CustomEvent("customStylePreviewRendered"));
   }
 
   function getActiveCatalogPage() {
@@ -3753,6 +5844,20 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       .map((item) => String(item && item.url ? item.url : "").trim())
       .filter(Boolean);
     const selectedLayoutStyleId = String(customModuleLayoutStyleId || "default");
+    const selectedPriceLayoutStyleId = String(customPriceLayoutStyleId || "").trim();
+    const selectedBaseEditorSnapshot = familyImageUrls.length <= 1
+      ? cloneModuleLayoutEditorSnapshot(getModuleLayoutEditorSnapshot(selectedLayoutStyleId))
+      : null;
+    const selectedPriceLayoutSnapshot = familyImageUrls.length <= 1 && selectedPriceLayoutStyleId
+      ? cloneModuleLayoutEditorSnapshot(getCustomPriceLayoutEditorSnapshot(selectedPriceLayoutStyleId))
+      : null;
+    const selectedEditorSnapshot = familyImageUrls.length <= 1
+      ? mergeModuleLayoutEditorSnapshotWithPriceStyle(selectedBaseEditorSnapshot, selectedPriceLayoutSnapshot)
+      : null;
+    const selectedSingleSpec = getSingleDirectLayoutSpec(selectedLayoutStyleId, String(customPriceBadgeStyleId || "solid") !== "solid");
+    const styleFontPreset = getStyleFontPreset(selectedLayoutStyleId);
+    const styleMetaFontFamily = normalizeFontOption(selectedSingleSpec?.text?.metaFontFamily || "", "");
+    const stylePriceFontFamily = normalizeFontOption(selectedSingleSpec?.text?.priceFontFamily || "", "");
     const imageLayouts = buildExportImageLayouts(base.index, mergedIndex, familyImageUrls, selectedLayoutStyleId);
     const selectedPriceBadgeStyle = getSelectedPriceBadgeStyleMeta();
     const priceBadgeImageUrl = getSelectedPriceBadgeBackgroundUrl();
@@ -3769,13 +5874,18 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       PRICE_BG_IMAGE_URL: priceBadgeImageUrl || "",
       PRICE_TEXT_COLOR: customPriceTextColor || "#ffffff",
       PRICE_TEXT_SCALE: Number.isFinite(customPriceTextScale) ? customPriceTextScale : 1,
-      PRICE_CURRENCY_SYMBOL: customCurrencySymbol === "€" ? "€" : "£",
-      PRICE_FONT_FAMILY: normalizeFontOption(customPriceFontFamily, "Arial"),
+      PRICE_CURRENCY_SYMBOL: customCurrencySymbol === "€" ? "€" : (customCurrencySymbol === "zł" ? "zł" : "£"),
+      PRICE_CURRENCY_CODE: customCurrencySymbol === "€" ? "EUR" : (customCurrencySymbol === "zł" ? "PLN" : "GBP"),
+      PRICE_FONT_FAMILY: normalizeFontOption(stylePriceFontFamily || styleFontPreset.price || customPriceFontFamily, "Arial"),
       PRICE_TEXT_BOLD: !!customPriceTextBold,
       PRICE_TEXT_UNDERLINE: !!customPriceTextUnderline,
       PRICE_TEXT_ALIGN: normalizeAlignOption(customPriceTextAlign, "left"),
       MODULE_LAYOUT_STYLE_ID: selectedLayoutStyleId,
-      TEXT_FONT_FAMILY: normalizeFontOption(customMetaFontFamily, "Arial"),
+      MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID: selectedLayoutStyleId,
+      MODULE_LAYOUT_PRICE_STYLE_ID: selectedPriceLayoutStyleId,
+      MODULE_LAYOUT_PRICE_STYLE_SNAPSHOT: selectedPriceLayoutSnapshot,
+      MODULE_LAYOUT_EDITOR_SNAPSHOT: selectedEditorSnapshot,
+      TEXT_FONT_FAMILY: normalizeFontOption(styleMetaFontFamily || styleFontPreset.meta || customMetaFontFamily, "Arial"),
       TEXT_COLOR: String(customMetaTextColor || "#1f3560"),
       TEXT_INDEX_COLOR: DEFAULT_INDEX_TEXT_COLOR,
       TEXT_INDEX_ITALIC: true,
@@ -4159,6 +6269,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
       const tuneIndexTextForSlot = (targetSlot) => {
         if (!page || !page.layer) return;
+        if (shouldPreserveExactMetaLayoutForSlot(targetSlot)) return;
 
         // Przypadek przed grupowaniem / bez grupy: tekst ma slotIndex.
         page.layer.find((n) => n && n.getAttr && isIndexLikeNode(n) && n.getAttr("slotIndex") === targetSlot)
@@ -4310,6 +6421,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         if (!node || typeof node.text !== "function") return;
         if (window.isEditingText) return;
         if (node.getParent && node.getParent().getAttr && node.getParent().getAttr("isPriceGroup")) return;
+        const isCanvaLikeNameNode = !!(node.getAttr && node.getAttr("isName"));
 
         const layer = page.layer;
         const tr = page.transformer;
@@ -4332,9 +6444,11 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         node.hide?.();
         layer?.draw?.();
 
-        const pos = node.absolutePosition ? node.absolutePosition() : { x: node.x?.() || 0, y: node.y?.() || 0 };
-        const rect = page.stage?.container?.().getBoundingClientRect?.();
-        if (!rect) {
+        const canvasWrapper =
+          page.container?.querySelector?.(".canvas-wrapper") ||
+          page.stage?.container?.().parentElement ||
+          page.stage?.container?.();
+        if (!canvasWrapper) {
           node.show?.();
           tr?.show?.();
           tr?.forceUpdate?.();
@@ -4343,35 +6457,75 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           return;
         }
 
-        const absX = rect.left + pos.x + window.scrollX;
-        const absY = rect.top + pos.y + window.scrollY;
+        let editHost = canvasWrapper.querySelector?.(".inline-text-edit-host");
+        if (!editHost) {
+          editHost = document.createElement("div");
+          editHost.className = "inline-text-edit-host";
+          Object.assign(editHost.style, {
+            position: "absolute",
+            inset: "0",
+            zIndex: "99998",
+            pointerEvents: "none"
+          });
+          canvasWrapper.appendChild(editHost);
+        }
+
+        const absScale = typeof node.getAbsoluteScale === "function"
+          ? node.getAbsoluteScale()
+          : { x: 1, y: 1 };
+        const nodeScaleX = Math.max(0.001, Math.abs(Number(absScale.x || 1)));
+        const nodeScaleY = Math.max(0.001, Math.abs(Number(absScale.y || 1)));
+        const textRect = typeof node.getClientRect === "function"
+          ? node.getClientRect({
+            relativeTo: page.layer,
+            skipShadow: true,
+            skipStroke: true
+          })
+          : null;
+        const absX = Number(textRect?.x || 0);
+        const absY = Number(textRect?.y || 0);
+        const textWidth = Math.max(24, Number(textRect?.width || node.width?.() || 0));
+        const textMinHeight = Math.max(24, Number(textRect?.height || node.height?.() || 0));
+        const textFontSize = Math.max(
+          8,
+          Number(node.fontSize?.() || 12) * nodeScaleY
+        );
         const textarea = document.createElement("textarea");
-        document.body.appendChild(textarea);
+        editHost.appendChild(textarea);
 
         textarea.value = original.text;
         Object.assign(textarea.style, {
           position: "absolute",
           left: `${absX}px`,
           top: `${absY}px`,
-          width: `${Math.max(20, Number(node.width?.() || 0))}px`,
-          minHeight: `${Math.max(16, Number(node.height?.() || 0))}px`,
-          fontSize: `${Math.max(1, Number(node.fontSize?.() || 12))}px`,
+          width: `${textWidth}px`,
+          minHeight: `${textMinHeight}px`,
+          fontSize: `${textFontSize}px`,
           fontFamily: typeof node.fontFamily === "function" ? node.fontFamily() : "Arial",
           lineHeight: String(typeof node.lineHeight === "function" ? node.lineHeight() : 1.2),
           textAlign: typeof node.align === "function" ? node.align() : "left",
           color: typeof node.fill === "function" ? node.fill() : "#111",
           padding: "2px",
           border: "2px solid #0066ff",
+          borderRadius: "6px",
           background: "white",
           resize: "none",
-          zIndex: 99999,
+          zIndex: 1,
           outline: "none",
-          overflow: "hidden"
+          overflow: "hidden",
+          boxSizing: "border-box",
+          pointerEvents: "auto"
         });
 
         const localShrinkText = (typeof window.shrinkText === "function")
           ? window.shrinkText
           : (typeof shrinkText === "function" ? shrinkText : null);
+        const localGetTextNodeAutoHeight = (typeof window.getTextNodeAutoHeight === "function")
+          ? window.getTextNodeAutoHeight
+          : null;
+        const localGetPreferredWrapMode = (typeof window.getPreferredWrapModeForTextNode === "function")
+          ? window.getPreferredWrapModeForTextNode
+          : null;
 
         const finish = () => {
           const finalText = String(textarea.value || "");
@@ -4380,7 +6534,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
           if (changed) {
             node.text(normalizedFinal);
-            if (typeof localShrinkText === "function") {
+            if (isCanvaLikeNameNode && typeof localGetTextNodeAutoHeight === "function") {
+              const wrapMode = localGetPreferredWrapMode ? localGetPreferredWrapMode(node) : "word";
+              if (typeof node.wrap === "function") node.wrap(wrapMode);
+              node.height(localGetTextNodeAutoHeight(
+                node,
+                Math.max(24, Math.ceil((Number(node.fontSize?.() || 0) || 18) * (Number(node.lineHeight?.() || 1.2) || 1.2)))
+              ));
+            } else if (typeof localShrinkText === "function") {
               localShrinkText(node, 8);
             }
             tightenDirectTextSelectionBox(node);
@@ -4428,10 +6589,19 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
         textarea.addEventListener("input", () => {
           if (typeof node.text === "function") node.text(textarea.value);
-          if (typeof localShrinkText === "function") {
+          if (isCanvaLikeNameNode && typeof localGetTextNodeAutoHeight === "function") {
+            const wrapMode = localGetPreferredWrapMode ? localGetPreferredWrapMode(node) : "word";
+            if (typeof node.wrap === "function") node.wrap(wrapMode);
+            node.height(localGetTextNodeAutoHeight(
+              node,
+              Math.max(24, Math.ceil((Number(node.fontSize?.() || 0) || 18) * (Number(node.lineHeight?.() || 1.2) || 1.2)))
+            ));
+            textarea.style.fontSize = `${Math.max(8, Number(node.fontSize?.() || 0) * nodeScaleY)}px`;
+          } else if (typeof localShrinkText === "function") {
             const newSize = localShrinkText(node, 8);
-            if (Number.isFinite(newSize)) textarea.style.fontSize = `${newSize}px`;
+            if (Number.isFinite(newSize)) textarea.style.fontSize = `${Math.max(8, newSize * nodeScaleY)}px`;
           }
+          textarea.style.width = `${Math.max(24, Number(node.width?.() || 0) * nodeScaleX)}px`;
           textarea.style.height = "auto";
           textarea.style.height = `${textarea.scrollHeight}px`;
         });
@@ -4513,6 +6683,23 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         return group.findOne((n) => n && n.getAttr && n.getAttr("isName")) || null;
       };
 
+      const shouldPreserveExactMetaLayoutForSlot = (targetSlot) => {
+        const productEntry = Array.isArray(page.products) ? page.products[targetSlot] : null;
+        if (!productEntry) return false;
+        const styleId = String(productEntry?.MODULE_LAYOUT_STYLE_ID || customModuleLayoutStyleId || "default");
+        if (!isCustomSingleStyle(styleId)) return false;
+        const hasImagePriceBadge = String(productEntry?.PRICE_BG_STYLE_ID || customPriceBadgeStyleId || "solid") !== "solid";
+        const singleSpec = getSingleDirectLayoutSpec(styleId, hasImagePriceBadge);
+        const priceOffsetMode = String(singleSpec?.text?.priceTextOffsetMode || "").trim().toLowerCase();
+        if (priceOffsetMode === "absolute") return true;
+        return !!(
+          singleSpec &&
+          singleSpec.nameArea && Number.isFinite(Number(singleSpec.nameArea.x)) &&
+          singleSpec.indexPos && Number.isFinite(Number(singleSpec.indexPos.x)) &&
+          singleSpec.packagePos && Number.isFinite(Number(singleSpec.packagePos.x))
+        );
+      };
+
       const estimateTextContentHeight = (node) => {
         if (!node || !window.Konva || !(node instanceof window.Konva.Text)) return 0;
         const fontSize = Number(node.fontSize?.() || 12);
@@ -4543,6 +6730,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         const indexNode = findIndexNodeForSlot(targetSlot);
         const packageNode = findPackageInfoNodeForSlot(targetSlot);
         if (!nameNode || !indexNode) return;
+        if (shouldPreserveExactMetaLayoutForSlot(targetSlot)) {
+          tightenDirectTextSelectionBox(nameNode);
+          tightenDirectTextSelectionBox(indexNode);
+          if (packageNode) tightenDirectTextSelectionBox(packageNode);
+          page.layer?.batchDraw?.();
+          page.transformerLayer?.batchDraw?.();
+          return;
+        }
 
         const directModuleId = String(
           nameNode.getAttr?.("directModuleId") ||
@@ -4968,7 +7163,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       };
 
       if (DIRECT_CUSTOM_MODULE_MODE) {
-        catalogEntry = buildCatalogProductFromCustom(product);
+        catalogEntry = applyPageCurrencyToCatalogEntry(buildCatalogProductFromCustom(product), page);
         page.products[slotIndex] = catalogEntry;
         page.slotObjects[slotIndex] = null;
 
@@ -5008,7 +7203,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         }
 
         closeLoadingOverlay();
-        resetCustomStyleEditorSessionState();
+        resetCustomStyleEditorSessionState({ blankOnNextOpen: true });
         updateFamilyUiStatus("Rodzina wyczyszczona po dodaniu modułu do katalogu.", "info");
         return;
       }
@@ -5061,7 +7256,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         closeLoadingOverlay();
       };
 
-      catalogEntry = buildCatalogProductFromCustom(product);
+      catalogEntry = applyPageCurrencyToCatalogEntry(buildCatalogProductFromCustom(product), page);
       page.products[slotIndex] = catalogEntry;
       preservedGroups = preserveManagedGroupsBeforeRedraw();
 
@@ -5077,7 +7272,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         finalize();
       }
 
-      resetCustomStyleEditorSessionState();
+      resetCustomStyleEditorSessionState({ blankOnNextOpen: true });
       updateFamilyUiStatus("Rodzina wyczyszczona po dodaniu produktu do katalogu.", "info");
     };
 
@@ -5130,6 +7325,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const openDraftTrayBtn = document.getElementById("customOpenDraftTrayBtn");
     const clearEditorBtn = document.getElementById("customClearEditorBtn");
     const moduleLayoutSelect = document.getElementById("customModuleLayoutSelect");
+    const priceLayoutSelect = document.getElementById("customPriceLayoutSelect");
     const applyStyleToImportedBtn = document.getElementById("customApplyStyleToImportedBtn");
     const showFlagToggle = document.getElementById("customShowFlagToggle");
     const showBarcodeToggle = document.getElementById("customShowBarcodeToggle");
@@ -5212,6 +7408,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         priceOverrides,
         settings: {
           customModuleLayoutStyleId,
+          customPriceLayoutStyleId,
           customPriceCircleColor,
           customPriceBadgeStyleId,
           customPriceTextColor,
@@ -5242,10 +7439,11 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const forceTnz = !!rowMeta?.tnz;
       return {
         customModuleLayoutStyleId: customModuleLayoutStyleId || "default",
+        customPriceLayoutStyleId: String(customPriceLayoutStyleId || "").trim(),
         customPriceCircleColor: customPriceCircleColor || "#d71920",
         customPriceBadgeStyleId: forceTnz ? "kolko-czerwone-tnz" : (customPriceBadgeStyleId || "solid"),
         customPriceTextColor: customPriceTextColor || "#ffffff",
-        customCurrencySymbol: customCurrencySymbol === "€" ? "€" : "£",
+        customCurrencySymbol: normalizeCustomCurrencySymbol(customCurrencySymbol, "£"),
         customPriceTextScale: Number.isFinite(customPriceTextScale) ? customPriceTextScale : 1,
         customMetaFontFamily: normalizeFontOption(customMetaFontFamily, "Arial"),
         customMetaTextColor: customMetaTextColor || "#1f3560",
@@ -5265,10 +7463,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const showExcelImportMessage = (message, type = "info") => {
       if (!excelImportStatus) return;
       const palette = (type === "error")
-        ? { border: "#fecaca", bg: "#fef2f2", color: "#991b1b" }
+        ? { border: "rgba(248,113,113,.34)", bg: "rgba(69,10,10,.44)", color: "#fecaca" }
         : (type === "success")
-          ? { border: "#bbf7d0", bg: "#f0fdf4", color: "#166534" }
-          : { border: "#d7dfec", bg: "#f8fafc", color: "#334155" };
+          ? { border: "rgba(52,211,153,.28)", bg: "rgba(6,78,59,.38)", color: "#a7f3d0" }
+          : { border: "rgba(96,165,250,.22)", bg: "rgba(8,47,73,.34)", color: "#bfdbfe" };
       excelImportStatus.style.display = "block";
       excelImportStatus.style.borderColor = palette.border;
       excelImportStatus.style.background = palette.bg;
@@ -5558,13 +7756,15 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     };
 
     const applyAllControlValuesFromState = () => {
+      const priceLayoutSelect = document.getElementById("customPriceLayoutSelect");
       if (showFlagToggleMark) applyToggleMark(showFlagToggleMark, !!customPreviewVisibility.showFlag);
       if (showBarcodeToggleMark) applyToggleMark(showBarcodeToggleMark, !!customPreviewVisibility.showBarcode);
       if (priceColorInput) priceColorInput.value = customPriceCircleColor || "#d71920";
       if (moduleLayoutSelect) moduleLayoutSelect.value = customModuleLayoutStyleId || "default";
       if (priceStyleSelect) priceStyleSelect.value = customPriceBadgeStyleId || "solid";
+      if (priceLayoutSelect) renderCustomPriceLayoutSelectOptions(priceLayoutSelect, customPriceLayoutStyleId || "");
       if (priceTextColorInput) priceTextColorInput.value = customPriceTextColor || "#ffffff";
-      if (currencySelect) currencySelect.value = customCurrencySymbol === "€" ? "€" : "£";
+      if (currencySelect) currencySelect.value = normalizeCustomCurrencySymbol(customCurrencySymbol, "£");
       if (priceSizeValue) priceSizeValue.textContent = `${Math.round((Number(customPriceTextScale) || 1) * 100)}%`;
       if (metaFontSelect) metaFontSelect.value = normalizeFontOption(customMetaFontFamily, "Arial");
       if (metaTextColorInput) metaTextColorInput.value = customMetaTextColor || "#1f3560";
@@ -5584,7 +7784,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const renderDraftModulesList = () => {
       if (!draftListEl) return;
       if (!Array.isArray(customDraftModules) || !customDraftModules.length) {
-        draftListEl.innerHTML = `<div style="font-size:10px;color:#64748b;">Brak zapisanych modułów roboczych.</div>`;
+        draftListEl.innerHTML = `<div class="custom-style-blank custom-style-muted" style="font-size:10px;color:#64748b;">Brak zapisanych modułów roboczych.</div>`;
         draftBridgeListeners.forEach((fn) => {
           try { fn([]); } catch (_err) {}
         });
@@ -5604,10 +7804,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           .filter(Boolean)
           .slice(0, 4);
         const thumbMarkup = familyThumbs.length > 1
-          ? `<div style="width:68px;height:48px;border:1px solid #dbe4ef;border-radius:6px;background:#fff;padding:2px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2px;box-sizing:border-box;overflow:hidden;">
+          ? `<div class="custom-style-draft-thumb-grid" style="width:68px;height:48px;border:1px solid #dbe4ef;border-radius:6px;background:#fff;padding:2px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2px;box-sizing:border-box;overflow:hidden;">
               ${familyThumbs.map((src) => `<div style="border:1px solid #eef2f7;border-radius:4px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;"><img src="${escapeHtml(src)}" alt="" style="max-width:100%;max-height:100%;object-fit:contain;"></div>`).join("")}
             </div>`
-          : `<div style="width:68px;height:48px;border:1px solid #dbe4ef;border-radius:6px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+          : `<div class="custom-style-draft-thumb" style="width:68px;height:48px;border:1px solid #dbe4ef;border-radius:6px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;">
               ${thumb ? `<img src="${thumb}" alt="" style="max-width:100%;max-height:100%;object-fit:contain;">` : `<span style="font-size:9px;color:#94a3b8;">brak</span>`}
             </div>`;
         const metaFont = escapeHtml(String(draft.settings?.customMetaFontFamily || "Arial"));
@@ -5619,24 +7819,24 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         const isGroupedImport = !!(draft?.importMeta?.source === "excel" && draft?.importMeta?.isNativeGroup);
         const isSingleImport = !!(draft?.importMeta?.source === "excel" && !draft?.importMeta?.isNativeGroup);
         const isTnzImport = !!(draft?.importMeta?.tnz || String(draft?.settings?.customPriceBadgeStyleId || "").includes("tnz"));
-        const cardBg = isTnzImport ? "#f5f3ff" : (isGroupedImport ? "#fff1f4" : (isSingleImport ? "#ecfdf3" : "#f8fafc"));
-        const cardBorder = isTnzImport ? "#a78bfa" : (isGroupedImport ? "#f9a8d4" : (isSingleImport ? "#86efac" : "#e2e8f0"));
+        const cardBg = isTnzImport ? "rgba(76,29,149,.28)" : (isGroupedImport ? "rgba(131,24,67,.24)" : (isSingleImport ? "rgba(6,95,70,.26)" : "rgba(5,10,18,.72)"));
+        const cardBorder = isTnzImport ? "rgba(167,139,250,.42)" : (isGroupedImport ? "rgba(244,114,182,.40)" : (isSingleImport ? "rgba(74,222,128,.34)" : "rgba(148,163,184,.18)"));
         const groupLabel = isGroupedImport
           ? escapeHtml(String(draft?.importMeta?.groupLabel || "Grupa rodzima"))
           : "";
         return `
-          <div data-draft-id="${escapeHtml(draft.id)}" style="display:grid;grid-template-columns:68px 1fr auto;gap:8px;align-items:start;border:1px solid ${cardBorder};border-radius:8px;padding:6px;background:${cardBg};">
+          <div class="custom-style-draft-card" data-draft-id="${escapeHtml(draft.id)}" style="display:grid;grid-template-columns:68px 1fr auto;gap:8px;align-items:start;border:1px solid ${cardBorder};border-radius:8px;padding:6px;background:${cardBg};">
             ${thumbMarkup}
             <div style="min-width:0;">
-              <div style="font-size:10px;font-weight:700;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">[${index}] ${title}</div>
-              ${groupLabel ? `<div style="font-size:9px;font-weight:700;color:#9d174d;margin-top:2px;">${groupLabel}</div>` : ``}
-              <div style="font-size:9px;color:#475569;margin-top:2px;">Rodzina: ${familyCount} • Waluta: ${curr} • Cena: ${styleName}</div>
-              <div style="font-size:9px;color:#64748b;margin-top:2px;">Teksty: ${metaFont}, ${metaAlign}${draft.settings?.customMetaTextBold ? ", B" : ""}${draft.settings?.customMetaTextUnderline ? ", U" : ""}</div>
-              <div style="font-size:9px;color:#64748b;">Cena: ${priceFont}, ${priceAlign}${draft.settings?.customPriceTextBold ? ", B" : ""}${draft.settings?.customPriceTextUnderline ? ", U" : ""}</div>
+              <div class="custom-style-heading" style="font-size:10px;font-weight:700;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">[${index}] ${title}</div>
+              ${groupLabel ? `<div style="font-size:9px;font-weight:700;color:#f9a8d4;margin-top:2px;">${groupLabel}</div>` : ``}
+              <div style="font-size:9px;color:#cbd5e1;margin-top:2px;">Rodzina: ${familyCount} • Waluta: ${curr} • Cena: ${styleName}</div>
+              <div class="custom-style-muted" style="font-size:9px;color:#64748b;margin-top:2px;">Teksty: ${metaFont}, ${metaAlign}${draft.settings?.customMetaTextBold ? ", B" : ""}${draft.settings?.customMetaTextUnderline ? ", U" : ""}</div>
+              <div class="custom-style-muted" style="font-size:9px;color:#64748b;">Cena: ${priceFont}, ${priceAlign}${draft.settings?.customPriceTextBold ? ", B" : ""}${draft.settings?.customPriceTextUnderline ? ", U" : ""}</div>
             </div>
             <div style="display:flex;flex-direction:column;gap:6px;">
-              <button data-action="edit" type="button" style="border:1px solid #0b8f84;background:#f0fdfa;color:#0b8f84;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;">Edytuj</button>
-              <button data-action="delete" type="button" style="border:1px solid #e2e8f0;background:#fff;color:#64748b;border-radius:6px;padding:4px 8px;font-size:10px;cursor:pointer;">Usuń</button>
+              <button data-action="edit" type="button" style="border:1px solid rgba(34,211,238,.32);background:rgba(8,145,178,.16);color:#67e8f9;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;">Edytuj</button>
+              <button data-action="delete" type="button" style="border:1px solid rgba(148,163,184,.18);background:rgba(15,23,42,.62);color:#cbd5e1;border-radius:6px;padding:4px 8px;font-size:10px;cursor:pointer;">Usuń</button>
             </div>
           </div>
         `;
@@ -5649,12 +7849,16 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const restoreDraftToEditor = (draft, options = {}) => {
       const silent = !!options.silent;
       if (!draft) return;
+      customEditorBlankResetMode = false;
+      customActiveDraftId = String(draft.id || "");
       const s = draft.settings || {};
       customPriceCircleColor = String(s.customPriceCircleColor || customPriceCircleColor || "#d71920");
       customModuleLayoutStyleId = String(s.customModuleLayoutStyleId || customModuleLayoutStyleId || "default");
+      saveLastSelectedModuleLayoutStyleId(customModuleLayoutStyleId);
+      customPriceLayoutStyleId = String(s.customPriceLayoutStyleId || customPriceLayoutStyleId || "").trim();
       customPriceBadgeStyleId = String(s.customPriceBadgeStyleId || customPriceBadgeStyleId || "solid");
       customPriceTextColor = String(s.customPriceTextColor || customPriceTextColor || "#ffffff");
-      customCurrencySymbol = String(s.customCurrencySymbol || customCurrencySymbol || "£") === "€" ? "€" : "£";
+      customCurrencySymbol = normalizeCustomCurrencySymbol(s.customCurrencySymbol || customCurrencySymbol || "£", "£");
       customPriceTextScale = Number.isFinite(Number(s.customPriceTextScale)) ? Number(s.customPriceTextScale) : (customPriceTextScale || 1);
       customMetaFontFamily = normalizeFontOption(s.customMetaFontFamily || customMetaFontFamily, "Arial");
       customMetaTextColor = String(s.customMetaTextColor || customMetaTextColor || "#1f3560");
@@ -5721,6 +7925,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         customDraftModules = Array.isArray(customDraftModules) ? customDraftModules.slice() : [];
         customDraftModules.unshift(snap);
         customDraftModules = customDraftModules.slice(0, 24);
+        customActiveDraftId = String(snap.id || "");
         storeCustomStyleEditorSnapshot(snap);
         renderDraftModulesList();
         if (typeof window.showAppToast === "function") window.showAppToast("Dodano moduł do listy roboczej.", "success");
@@ -5742,26 +7947,73 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (applyStyleToImportedBtn) {
       applyStyleToImportedBtn.onclick = () => {
         const nextStyle = String(customModuleLayoutStyleId || "default");
+        const nextPriceLayoutStyleId = String(customPriceLayoutStyleId || "").trim();
+        const nextCurrency = normalizeCustomCurrencySymbol(customCurrencySymbol, "£");
+        const nextCurrencyCode = normalizeDirectCurrencyCode(nextCurrency) || "GBP";
+        const importedDraftIds = new Set();
         let changed = 0;
+
         customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).map((draft) => {
           if (!(draft?.importMeta?.source === "excel")) return draft;
+          const draftId = String(draft?.id || "");
+          if (draftId) importedDraftIds.add(draftId);
           const prev = String(draft?.settings?.customModuleLayoutStyleId || "default");
-          if (prev === nextStyle) return draft;
+          const prevPriceLayout = String(draft?.settings?.customPriceLayoutStyleId || "").trim();
+          const prevCurrency = normalizeCustomCurrencySymbol(draft?.settings?.customCurrencySymbol || "£", "£");
+          const productId = String(draft?.productId || "");
+          const linkedProduct = productId ? productsById.get(productId) : null;
+          if (linkedProduct) {
+            linkedProduct.MODULE_LAYOUT_STYLE_ID = nextStyle;
+            linkedProduct.PRICE_CURRENCY_SYMBOL = nextCurrency;
+            linkedProduct.PRICE_CURRENCY_CODE = nextCurrencyCode;
+          }
+          if (prev === nextStyle && prevPriceLayout === nextPriceLayoutStyleId && prevCurrency === nextCurrency) return draft;
           changed += 1;
           return {
             ...draft,
             settings: {
               ...(draft.settings || {}),
-              customModuleLayoutStyleId: nextStyle
+              customModuleLayoutStyleId: nextStyle,
+              customPriceLayoutStyleId: nextPriceLayoutStyleId,
+              customCurrencySymbol: nextCurrency
             }
           };
         });
+
+        if (currentPreviewProduct && importedDraftIds.has(String(customActiveDraftId || ""))) {
+          currentPreviewProduct.MODULE_LAYOUT_STYLE_ID = nextStyle;
+          currentPreviewProduct.PRICE_CURRENCY_SYMBOL = nextCurrency;
+          currentPreviewProduct.PRICE_CURRENCY_CODE = nextCurrencyCode;
+        }
+        if (currentPickerProduct && importedDraftIds.has(String(customActiveDraftId || ""))) {
+          currentPickerProduct.MODULE_LAYOUT_STYLE_ID = nextStyle;
+          currentPickerProduct.PRICE_CURRENCY_SYMBOL = nextCurrency;
+          currentPickerProduct.PRICE_CURRENCY_CODE = nextCurrencyCode;
+        }
+        if (customLastEditorSnapshot?.importMeta?.source === "excel" && customLastEditorSnapshot?.settings) {
+          customLastEditorSnapshot.settings.customModuleLayoutStyleId = nextStyle;
+          customLastEditorSnapshot.settings.customPriceLayoutStyleId = nextPriceLayoutStyleId;
+          customLastEditorSnapshot.settings.customCurrencySymbol = nextCurrency;
+        }
+
         renderDraftModulesList();
+        if (typeof window.CustomStyleDraftTrayUI?.refresh === "function") {
+          try { window.CustomStyleDraftTrayUI.refresh(); } catch (_err) {}
+        }
+
+        const activeDraft = (Array.isArray(customDraftModules) ? customDraftModules : []).find((draft) => String(draft?.id || "") === String(customActiveDraftId || ""));
+        if (activeDraft && activeDraft?.importMeta?.source === "excel" && typeof customRestoreDraftToEditor === "function") {
+          customRestoreDraftToEditor(activeDraft, { silent: true });
+        } else {
+          renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+          storeCustomStyleEditorSnapshot(getCurrentEditorSnapshot());
+        }
+
         if (typeof window.showAppToast === "function") {
           window.showAppToast(
             changed
-              ? `Zmieniono styl modułu dla ${changed} zaimportowanych pozycji.`
-              : "Wszystkie zaimportowane pozycje mają już wybrany styl.",
+              ? `Zmieniono styl modułu, styl ceny i walutę dla ${changed} zaimportowanych pozycji.`
+              : "Zaimportowane pozycje mają już wybrany styl modułu, styl ceny i walutę.",
             "success"
           );
         }
@@ -5926,7 +8178,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const preloadTargets = familyImageUrls.length > 1 ? familyImageUrls : [effectiveImageUrl].filter(Boolean);
       await Promise.allSettled([preloadImageUrls(preloadTargets, 1400), waitMs(80)]);
 
-      const catalogEntry = buildCatalogProductFromCustom(product);
+      const catalogEntry = applyPageCurrencyToCatalogEntry(buildCatalogProductFromCustom(product), page);
       page.products[slotIndex] = catalogEntry;
       page.slotObjects[slotIndex] = null;
 
@@ -5941,6 +8193,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       window.projectDirty = true;
 
       customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).filter((d) => String(d?.id || "") !== String(draftId || ""));
+      if (String(customActiveDraftId || "") === String(draftId || "")) {
+        customActiveDraftId = String(customDraftModules[0]?.id || "");
+      }
       renderDraftModulesList();
       if (typeof window.showAppToast === "function") window.showAppToast("Przeciągnięto moduł na stronę katalogu.", "success");
       return { ok: true, slotIndex };
@@ -5968,6 +8223,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       removeDraft: (draftId) => {
         const before = Array.isArray(customDraftModules) ? customDraftModules.length : 0;
         customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).filter((d) => String(d?.id || "") !== String(draftId || ""));
+        if (String(customActiveDraftId || "") === String(draftId || "")) {
+          customActiveDraftId = String(customDraftModules[0]?.id || "");
+        }
         renderDraftModulesList();
         return (customDraftModules.length !== before);
       },
@@ -5992,6 +8250,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         }
         if (action === "delete") {
           customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).filter((d) => String(d?.id || "") !== id);
+          if (String(customActiveDraftId || "") === id) {
+            customActiveDraftId = String(customDraftModules[0]?.id || "");
+          }
           renderDraftModulesList();
         }
       };
@@ -6030,14 +8291,15 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const applyToggleMark = (markEl, enabled) => {
       if (!markEl) return;
       markEl.textContent = enabled ? "✓" : "✕";
-      markEl.style.color = enabled ? "#0b8f84" : "#b91c1c";
-      markEl.style.borderColor = enabled ? "#0b8f84" : "#b91c1c";
+      markEl.style.color = enabled ? "#67e8f9" : "#fca5a5";
+      markEl.style.borderColor = enabled ? "rgba(34,211,238,.54)" : "rgba(248,113,113,.42)";
+      markEl.style.background = enabled ? "rgba(8,145,178,.18)" : "rgba(69,10,10,.30)";
     };
     const applyMiniToggleButton = (btn, enabled) => {
       if (!btn) return;
-      btn.style.borderColor = enabled ? "#0b8f84" : "#d7dfec";
-      btn.style.background = enabled ? "#f0fdfa" : "#fff";
-      btn.style.color = enabled ? "#0b8f84" : "#0f172a";
+      btn.style.borderColor = enabled ? "rgba(34,211,238,.54)" : "rgba(148,163,184,.22)";
+      btn.style.background = enabled ? "rgba(8,145,178,.16)" : "rgba(15,23,42,.62)";
+      btn.style.color = enabled ? "#67e8f9" : "#e2ebf7";
     };
     if (showFlagToggle) {
       applyToggleMark(showFlagToggleMark, !!customPreviewVisibility.showFlag);
@@ -6063,27 +8325,33 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       };
     }
     if (moduleLayoutSelect) {
-      moduleLayoutSelect.value = customModuleLayoutStyleId || "default";
+      renderModuleLayoutSelectOptions(moduleLayoutSelect, customModuleLayoutStyleId || "default");
       moduleLayoutSelect.onchange = () => {
         customModuleLayoutStyleId = String(moduleLayoutSelect.value || "default");
+        saveLastSelectedModuleLayoutStyleId(customModuleLayoutStyleId);
         const styleMeta = getSelectedModuleLayoutStyleMeta(customModuleLayoutStyleId);
+        const styleText = (styleMeta?.config?.text && typeof styleMeta.config.text === "object") ? styleMeta.config.text : {};
         const preset = getStyleFontPreset(customModuleLayoutStyleId);
         customMetaFontFamily = normalizeFontOption(preset.meta, customMetaFontFamily || DEFAULT_STYLE_FONT_PRESET.meta);
         customPriceFontFamily = normalizeFontOption(preset.price, customPriceFontFamily || DEFAULT_STYLE_FONT_PRESET.price);
         if (metaFontSelect) refreshFontSelectOptions(metaFontSelect, customMetaFontFamily);
         if (priceFontSelect) refreshFontSelectOptions(priceFontSelect, customPriceFontFamily);
-        if (customModuleLayoutStyleId === "styl-numer-2") {
-          const suggestedBg = String(styleMeta?.config?.text?.priceBgColor || "").trim();
-          if (suggestedBg) {
-            customPriceCircleColor = suggestedBg;
-            if (priceColorInput) priceColorInput.value = suggestedBg;
-          }
-        }
-        const suggestedText = String(styleMeta?.config?.text?.priceColor || "").trim();
-        if (suggestedText) {
-          customPriceTextColor = suggestedText;
-          if (priceTextColorInput) priceTextColorInput.value = suggestedText;
-        }
+        customPriceBadgeStyleId = "solid";
+        if (priceStyleSelect) priceStyleSelect.value = "solid";
+        const suggestedBg = String(styleText.priceBgColor || "").trim();
+        customPriceCircleColor = suggestedBg || "#d71920";
+        if (priceColorInput) priceColorInput.value = customPriceCircleColor;
+        const styleHidesBadge = !!styleText.hidePriceBadge || !!styleText.noPriceCircle || String(styleText.priceShape || "").trim() === "none";
+        const suggestedText = String(styleText.priceColor || "").trim();
+        customPriceTextColor = suggestedText || (styleHidesBadge ? "#d71920" : "#ffffff");
+        if (priceTextColorInput) priceTextColorInput.value = customPriceTextColor;
+        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+      };
+    }
+    if (priceLayoutSelect) {
+      renderCustomPriceLayoutSelectOptions(priceLayoutSelect, customPriceLayoutStyleId || "");
+      priceLayoutSelect.onchange = () => {
+        customPriceLayoutStyleId = String(priceLayoutSelect.value || "").trim();
         renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
       };
     }
@@ -6178,9 +8446,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       };
     }
     if (currencySelect) {
-      currencySelect.value = customCurrencySymbol === "€" ? "€" : "£";
+      currencySelect.value = normalizeCustomCurrencySymbol(customCurrencySymbol, "£");
       currencySelect.onchange = () => {
-        customCurrencySymbol = String(currencySelect.value || "£").trim() === "€" ? "€" : "£";
+        customCurrencySymbol = normalizeCustomCurrencySymbol(currencySelect.value, customCurrencySymbol || "£");
         renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
       };
     }
@@ -6248,19 +8516,22 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       renderSelect(select, rendered);
 
       const selected = rendered[0] || null;
-      if (selected) select.value = selected.id;
+      if (selected) customEditorBlankResetMode = false;
+      if (select) select.value = selected ? selected.id : "";
       updateInfo(info, selected, products.length, filtered.length, rendered.length);
       bindEditableName(selected);
       currentPreviewProduct = selected || null;
       currentPickerProduct = selected || null;
-      currentPickerImageUrl = currentPreviewImageUrl;
+      currentPickerImageUrl = selected ? currentPreviewImageUrl : null;
       updateFamilyUiStatus(
         familyBaseProduct
           ? `Wybrany produkt: ${selected?.index || "-"}. Kliknij "Dodaj do rodziny", aby dodać go do aktywnej rodziny.`
           : "Kliknij przycisk, aby ustawić wybrany produkt jako bazę rodziny.",
         "info"
       );
-      if (!familyBaseProduct) {
+      if (!selected) {
+        renderProductImagePreview(null);
+      } else if (!familyBaseProduct) {
         renderModulePreview(currentPreviewProduct, currentPreviewImageUrl);
       } else {
         renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
@@ -6271,19 +8542,31 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     const onSelectChange = () => {
       const id = select.value;
-      const selected = rendered.find((p) => p.id === id) || rendered[0] || null;
-      updateInfo(info, selected, products.length, filtered.length, rendered.length);
+      const selected = id
+        ? (rendered.find((p) => p.id === id) || productsById.get(String(id)) || null)
+        : null;
+      if (selected) customEditorBlankResetMode = false;
+      if (!selected) {
+        info.innerHTML = `
+          <div class="custom-style-blank custom-style-muted" style="color:#64748b;">Wybierz produkt z listy, aby rozpocząć.</div>
+        `;
+        decorateCustomStyleInfo(info);
+      } else {
+        updateInfo(info, selected, products.length, filtered.length, rendered.length);
+      }
       bindEditableName(selected);
       currentPreviewProduct = selected || null;
       currentPickerProduct = selected || null;
-      currentPickerImageUrl = currentPreviewImageUrl;
+      currentPickerImageUrl = selected ? currentPreviewImageUrl : null;
       updateFamilyUiStatus(
         familyBaseProduct
           ? `Wybrany produkt: ${selected?.index || "-"}. Kliknij "Dodaj do rodziny", aby dodać go do aktywnej rodziny.`
           : "Kliknij przycisk, aby ustawić wybrany produkt jako bazę rodziny.",
         "info"
       );
-      if (!familyBaseProduct) {
+      if (!selected) {
+        renderProductImagePreview(null);
+      } else if (!familyBaseProduct) {
         renderModulePreview(currentPreviewProduct, currentPreviewImageUrl);
       } else {
         renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
@@ -6322,7 +8605,12 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   }
 
   window.openCustomStyleCreator = async function () {
+    try {
+      customStylesSyncPromise = null;
+      await ensureStylWlasnyCustomStylesReady();
+    } catch (_err) {}
     ensureStylWlasnyHelperScriptLoaded();
+    ensureCreatorStyleScriptLoaded();
     ensureModal();
 
     const modal = document.getElementById("customStyleModal");
@@ -6331,35 +8619,20 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     modal.style.display = "flex";
 
-     if (customStyleInteractionsInitialized) {
-      syncCustomStyleControlsFromState();
+    if (customStyleInteractionsInitialized) {
+      const moduleLayoutSelect = document.getElementById("customModuleLayoutSelect");
+      if (moduleLayoutSelect) {
+        renderModuleLayoutSelectOptions(moduleLayoutSelect, customModuleLayoutStyleId || "default");
+      }
       if (typeof window.CustomStyleDraftTrayUI?.refresh === "function") {
         try { window.CustomStyleDraftTrayUI.refresh(); } catch (_err) {}
       }
-      const selectedId = String(document.getElementById("customStyleSelect")?.value || "");
-      const selectedProduct = (customEditorProductsById instanceof Map && selectedId)
-        ? (customEditorProductsById.get(selectedId) || null)
-        : null;
-      const lastSnapshot = cloneCustomDraftSnapshot(customLastEditorSnapshot);
-      if (lastSnapshot && typeof customRestoreDraftToEditor === "function") {
-        customRestoreDraftToEditor(lastSnapshot, { silent: true });
-      } else {
-        const previewProduct = getEffectivePreviewProduct() || currentPreviewProduct || selectedProduct;
-        const previewImageUrl = getEffectivePreviewImageUrl() || currentPreviewImageUrl || "";
-        if (previewProduct) {
-          currentPreviewProduct = selectedProduct || currentPreviewProduct || previewProduct;
-          currentPickerProduct = currentPreviewProduct;
-          if (selectedProduct) {
-            const select = document.getElementById("customStyleSelect");
-            if (select) select.value = String(selectedProduct.id || "");
-          }
-          renderProductImagePreview(currentPreviewProduct || previewProduct);
-        } else if (Array.isArray(customDraftModules) && customDraftModules.length && typeof customRestoreDraftToEditor === "function") {
-          customRestoreDraftToEditor(customDraftModules[0], { silent: true });
-        } else {
-          renderModulePreview(previewProduct, previewImageUrl);
-        }
-      }
+      hideCustomImportProgress();
+      const excelImportStatus = document.getElementById("customExcelImportStatus");
+      if (excelImportStatus) excelImportStatus.style.display = "none";
+      // Zwykłe wejście do kreatora ma zawsze startować od czystego stanu.
+      // Przywracanie draftu jest dostępne tylko przez jawne "Edytuj".
+      resetCustomStyleEditorSessionState();
       return;
     }
 
@@ -6369,12 +8642,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const products = await loadProducts();
       attachInteractions(products);
       customStyleInteractionsInitialized = true;
+      resetCustomStyleEditorSessionState();
     } catch (err) {
       if (info) {
         info.innerHTML = `
-          <div style="color:#b91c1c;font-weight:700;">Nie udało się pobrać bazy danych.</div>
-          <div style="margin-top:6px;color:#64748b;">Szczegóły: ${String(err && err.message ? err.message : err)}</div>
+          <div style="color:#fca5a5;font-weight:700;">Nie udało się pobrać bazy danych.</div>
+          <div class="custom-style-muted" style="margin-top:6px;color:#64748b;">Szczegóły: ${String(err && err.message ? err.message : err)}</div>
         `;
+        decorateCustomStyleInfo(info);
       }
     }
   };

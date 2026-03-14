@@ -456,6 +456,9 @@
   }
 
   window.openImageEffectsMenu = function openImageEffectsMenu(img) {
+    try {
+      window.closeBackgroundSidePanel?.({ restorePageEditor: false, resetToolbarState: true });
+    } catch (_e) {}
     if (!img || typeof window.ensureImageFX !== "function" || typeof window.getImageFxState !== "function" || typeof window.applyImageFX !== "function") {
       return;
     }

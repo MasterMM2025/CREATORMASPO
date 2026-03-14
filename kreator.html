@@ -33,16 +33,25 @@
       </a>
       <div class="header-title" id="projectTitle">Katalog produktów</div>
     </div>
-    <div class="header-center"></div>
+    <div class="header-center">
+      <div class="header-asset-toolbar-host" id="headerAssetToolbarHost">
+        <div class="asset-workspace-dock" id="assetWorkspaceDock">
+          <div class="asset-toolbar-sticky">
+            <div class="asset-toolbar asset-toolbar--workspace" aria-label="Narzędzia projektu">
+              <button class="asset-tool" type="button" data-asset-target="excel" aria-label="Import Excel" title="Import Excel"><i class="fas fa-file-excel"></i><span>Import Excel</span></button>
+              <button class="asset-tool" type="button" data-asset-target="banner" aria-label="Baner" title="Baner"><i class="fas fa-image"></i><span>Baner</span></button>
+              <button class="asset-tool" type="button" data-asset-target="background" aria-label="Tło" title="Tło"><i class="fas fa-fill-drip"></i><span>Tło</span></button>
+              <button class="asset-tool" type="button" data-asset-target="cover" aria-label="Okładka" title="Okładka"><i class="fas fa-book"></i><span>Okładka</span></button>
+              <button class="asset-tool" type="button" data-asset-target="images" aria-label="Zdjęcia" title="Zdjęcia"><i class="fas fa-images"></i><span>Zdjęcia</span></button>
+              <button class="asset-tool" type="button" data-asset-target="settings" aria-label="Kreator settings" title="Kreator settings"><i class="fas fa-sliders-h"></i><span>Kreator settings</span></button>
+            </div>
+            <div class="asset-toolbar-status" id="assetToolbarStatus" aria-live="polite">Wybierz narzędzie</div>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="header-right">
-      <button class="header-page-settings-toggle" id="pageSettingsToggleBtn" type="button" aria-label="Ustawienia strony" aria-expanded="false" title="Ustawienia strony">
-        <img
-          class="header-page-settings-toggle__icon-image"
-          src="https://firebasestorage.googleapis.com/v0/b/pdf-creator-f7a8b.firebasestorage.app/o/CREATOR%20BASIC%2Fstyl%20strony%2Ftlo%20strony.png?alt=media&token=8dd10904-b10f-4503-bc76-4449453b766b"
-          alt=""
-          aria-hidden="true"
-        >
-      </button>
+      <div class="header-page-settings-menu-host" id="headerPageSettingsMenuHost"></div>
       <button class="share-btn" id="downloadProjectBtn"><i class="fas fa-download"></i> Pobierz projekt</button>
     </div>
   </div>
@@ -88,6 +97,12 @@
     <div class="sidebar-item" id="sidebarAddImage" data-tooltip="Dodaj zdjęcia" aria-label="Dodaj zdjęcia">
       <i class="fas fa-images"></i>
       <span class="sidebar-label">Dodaj zdjęcia</span>
+    </div>
+
+    <!-- New Style -->
+    <div class="sidebar-item" id="sidebarNewStyle" data-tooltip="New Style" aria-label="New Style">
+      <i class="fas fa-object-group"></i>
+      <span class="sidebar-label">New Style</span>
     </div>
     <!-- (usunięte: Import PSD) -->
 
@@ -170,17 +185,7 @@
           <p class="editor-section-note">Kliknij ikonę w pasku. Poniżej pokaże się tylko aktywne narzędzie.</p>
         </div>
 
-        <div class="asset-toolbar asset-toolbar--workspace" aria-label="Narzędzia projektu">
-          <button class="asset-tool" type="button" data-asset-target="excel" aria-label="Import Excel" title="Import Excel"><i class="fas fa-file-excel"></i><span>Import Excel</span></button>
-          <button class="asset-tool" type="button" data-asset-target="banner" aria-label="Baner" title="Baner"><i class="fas fa-image"></i><span>Baner</span></button>
-          <button class="asset-tool" type="button" data-asset-target="background" aria-label="Tło" title="Tło"><i class="fas fa-fill-drip"></i><span>Tło</span></button>
-          <button class="asset-tool" type="button" data-asset-target="cover" aria-label="Okładka" title="Okładka"><i class="fas fa-book"></i><span>Okładka</span></button>
-          <button class="asset-tool" type="button" data-asset-target="images" aria-label="Zdjęcia" title="Zdjęcia"><i class="fas fa-images"></i><span>Zdjęcia</span></button>
-          <button class="asset-tool" type="button" data-asset-target="settings" aria-label="Kreator settings" title="Kreator settings"><i class="fas fa-sliders-h"></i><span>Kreator settings</span></button>
-        </div>
-        <div class="asset-toolbar-status" id="assetToolbarStatus" aria-live="polite">Wybierz narzędzie</div>
-
-        <div class="asset-panels asset-panels--workspace">
+          <div class="asset-panels asset-panels--workspace">
           <div class="upload-card asset-panel" data-asset-panel="excel">
             <div class="workspace-panel-caption">
               <div class="workspace-panel-title">Import arkusza</div>
@@ -298,7 +303,7 @@
               </button>
             </div>
           </div>
-        </div>
+          </div>
       </section>
 
       </div>
@@ -702,13 +707,15 @@ window.APP_FONT_LOADER_PROMISE = window.loadDynamicFonts();
 
 <script src="edytor.js?v=20260307-layout-dark-v02"></script>
 <script src="removebg.js?v=20260228-rmbg-local10"></script>
-  <script src="importdanych.js?v=20260307-projectsize-dark-v33"></script>
+  <script src="page-actions.js?v=20260312-page-actions-v01"></script>
+  <script src="page-factory.js?v=20260313-text-anchor-fix-v02"></script>
+  <script src="importdanych.js?v=20260313-line-transformer-v42"></script>
 <script src="efekty-zdjec.js?v=20260309-imagefx-dark-v01"></script>
 <script src="magic-layout.js?v=20260308-magic-layout-v01"></script>
 <script src="autosave/project-history-store.js?v=20260301-autosave08"></script>
 <script src="autosave/project-history-ui.js?v=20260301-autosave08"></script>
-<script src="autosave/project-history-bridge.js?v=20260301-autosave08"></script>
-<script src="autosave/autosave.js?v=20260301-autosave09"></script>
+<script src="autosave/project-history-bridge.js?v=20260313-autosave-history-v09"></script>
+<script src="autosave/autosave.js?v=20260313-autosave-history-v10"></script>
 <script src="styl-elegancki.js"></script>
 <script src="styles/styl-wlasny/registry.js?v=20260227-rmbg19"></script>
 <script src="styles/styl-wlasny/price-badges/kolko-czerwone.js?v=20260227-rmbg19"></script>
@@ -718,24 +725,25 @@ window.APP_FONT_LOADER_PROMISE = window.loadDynamicFonts();
 <script src="styles/styl-wlasny/module-layouts/styl-numer-1.js?v=20260306-style1imgx14"></script>
 <script src="styles/styl-wlasny/module-layouts/styl-numer-2.js?v=20260306-style2imgx13"></script>
 <script src="styles/styl-wlasny/module-layouts/styl-numer-3.js?v=20260307-style3-index-gray-italic-v05"></script>
-<script src="styl-wlasny.js?v=20260307-edit-index-price-v22"></script>
+<script src="styl-wlasny.js?v=20260313-direct-sidebar-style-v30"></script>
+<script src="new-style.js?v=20260310-new-style-v31"></script>
 <script src="baner.js"></script>
 <script src="tlo.js?v=20260307-gradient-bg-v06"></script>
 
 <!-- jeśli plik używa importów – musi być module -->
-<script type="module" src="importdanych-1.js?v=20260307-elements-panel-dark-v13"></script>
+<script type="module" src="importdanych-1.js?v=20260313-sidebar-add-fix-v14"></script>
 
-<script src="edycja.js?v=20260307-pageedit-icons-v13"></script>
-<script src="edycja-1.js?v=20260302-text-autobounds02"></script>
+<script src="edycja.js?v=20260313-pageedit-currency-layout-v19"></script>
+<script src="edycja-1.js?v=20260313-text-toolbar-v03"></script>
 <script src="okladka.js"></script>
 <script src="dodajstrone.js?v=20260304-cross-page-dnd-v1"></script>
 <script src="eangenerator.js?v=20260307-ean-dark-v02"></script>
-<script src="qrcodegenerator.js?v=20260307-qr-dark-v02"></script>
-<script src="rysowanie.js?v=20260307-shape-panel-dark-v04"></script>
+<script src="qrcodegenerator.js?v=20260314-qr-logo-v05"></script>
+<script src="rysowanie.js?v=20260313-shape-select-fix-v06"></script>
 
 
 <!-- 🔥 3. Save/load system -->
-<script type="module" src="saveall.js?v=20260307-newproject-dark-v04"></script>
+<script type="module" src="saveall.js?v=20260313-text-history-v07"></script>
 
   <!-- INICJALIZACJA -->
   <script>
@@ -832,8 +840,14 @@ const canvaPdfButton = document.getElementById('canvaPdfButton');
 
       if (addBlankPageBtn) {
         addBlankPageBtn.onclick = () => {
-          if (typeof window.createNewPage === 'function') {
-            window.createNewPage();
+          if (typeof window.createBlankPageFromMainButton === 'function') {
+            window.createBlankPageFromMainButton();
+            window.projectOpen = true;
+            window.projectDirty = true;
+            if (pdfButton) pdfButton.disabled = false;
+            if (typeof window.createZoomSlider === 'function') window.createZoomSlider();
+          } else if (typeof window.createNewPage === 'function') {
+            window.createNewPage({ reveal: true });
             window.projectOpen = true;
             window.projectDirty = true;
             if (pdfButton) pdfButton.disabled = false;
@@ -844,15 +858,139 @@ const canvaPdfButton = document.getElementById('canvaPdfButton');
         };
       }
 
+      const assetWorkspaceDock = document.getElementById('assetWorkspaceDock');
+      const headerAssetToolbarHost = document.getElementById('headerAssetToolbarHost');
+      const editorView = document.getElementById('editorView');
+      const startProjectsView = document.getElementById('startProjectsView');
+      let assetToolbarStickyRaf = 0;
+      let backgroundSidePanel = null;
+      let backgroundPanelAnchor = null;
+      let backgroundSidePanelRestorePageEditor = false;
       const assetTools = Array.from(document.querySelectorAll('.asset-tool'));
       const assetPanels = Array.from(document.querySelectorAll('.asset-panel'));
       const assetToolbarStatus = document.getElementById('assetToolbarStatus');
       const assetPanelsContainer = document.querySelector('.asset-panels--workspace');
+      const backgroundAssetPanel = assetPanels.find((panel) => panel.dataset.assetPanel === 'background') || null;
+      const syncRightSidePanelBodyClass = () => {
+        const visiblePanel = Array.from(document.querySelectorAll('.page-edit-panel')).some((panel) => {
+          return panel && window.getComputedStyle(panel).display !== 'none';
+        });
+        document.body.classList.toggle('page-edit-panel-visible', visiblePanel);
+      };
+      const ensureBackgroundPanelAnchor = () => {
+        if (!backgroundAssetPanel || !assetPanelsContainer) return null;
+        if (backgroundPanelAnchor && backgroundPanelAnchor.isConnected) return backgroundPanelAnchor;
+        backgroundPanelAnchor = document.createElement('div');
+        backgroundPanelAnchor.className = 'background-panel-anchor';
+        backgroundPanelAnchor.style.display = 'none';
+        assetPanelsContainer.insertBefore(backgroundPanelAnchor, backgroundAssetPanel);
+        return backgroundPanelAnchor;
+      };
+      const restoreBackgroundAssetPanelHome = () => {
+        const anchor = ensureBackgroundPanelAnchor();
+        if (!backgroundAssetPanel || !anchor || !anchor.parentElement) return;
+        if (backgroundAssetPanel.parentElement !== anchor.parentElement) {
+          anchor.parentElement.insertBefore(backgroundAssetPanel, anchor.nextSibling);
+        }
+      };
+      const closeBackgroundSidePanel = (options = {}) => {
+        const restorePageEditor = options.restorePageEditor !== false && backgroundSidePanelRestorePageEditor;
+        const resetToolbarState = options.resetToolbarState === true;
+        if (backgroundSidePanel) {
+          restoreBackgroundAssetPanelHome();
+          try { backgroundSidePanel.remove(); } catch (_e) {}
+          backgroundSidePanel = null;
+        }
+        backgroundSidePanelRestorePageEditor = false;
+        if (backgroundAssetPanel) backgroundAssetPanel.classList.remove('is-active');
+        if (resetToolbarState) {
+          assetTools.forEach((btn) => {
+            if (btn.dataset.assetTarget === 'background') btn.classList.remove('is-active');
+          });
+          if (assetToolbarStatus && !assetTools.some((btn) => btn.classList.contains('is-active'))) {
+            assetToolbarStatus.textContent = 'Wybierz narzędzie';
+          }
+        }
+        syncRightSidePanelBodyClass();
+        if (restorePageEditor && typeof window.showPageEditForCurrentPage === 'function') {
+          window.showPageEditForCurrentPage();
+        }
+      };
+      window.closeBackgroundSidePanel = closeBackgroundSidePanel;
+      const openBackgroundSidePanel = () => {
+        if (!backgroundAssetPanel) return;
+        ensureBackgroundPanelAnchor();
+        const pageEditorVisible = typeof window.isPageEditPanelVisible === 'function'
+          ? window.isPageEditPanelVisible()
+          : false;
+        const imgfxVisible = !!document.querySelector('.page-edit-panel.imgfx-side-panel');
+        if (imgfxVisible && typeof window.destroyPageEditPanel === 'function') {
+          window.destroyPageEditPanel();
+        } else if (pageEditorVisible && typeof window.hidePageEditPanel === 'function') {
+          window.hidePageEditPanel();
+        }
+        backgroundSidePanelRestorePageEditor = pageEditorVisible && !imgfxVisible;
+        if (!backgroundSidePanel) {
+          backgroundSidePanel = document.createElement('div');
+          backgroundSidePanel.className = 'page-edit-panel asset-bg-side-panel';
+          backgroundSidePanel.innerHTML = `
+            <div class="asset-bg-shell">
+              <div class="pe-header">
+                <div class="pe-header-copy">
+                  <div class="pe-kicker">Page Background</div>
+                  <div class="pe-title">Tlo i gradienty</div>
+                </div>
+                <button type="button" class="pe-panel-hide-btn" id="closeBackgroundSidePanelBtn" aria-label="Ukryj panel" title="Ukryj panel">
+                  <i class="fas fa-chevron-right"></i>
+                </button>
+              </div>
+              <div class="asset-bg-content" id="assetBgContent"></div>
+            </div>
+          `;
+          document.body.appendChild(backgroundSidePanel);
+          backgroundSidePanel.querySelector('#closeBackgroundSidePanelBtn')?.addEventListener('click', () => {
+            closeBackgroundSidePanel({ restorePageEditor: true, resetToolbarState: true });
+            scheduleAssetToolbarStickySync();
+          });
+        }
+        const contentHost = backgroundSidePanel.querySelector('#assetBgContent');
+        if (contentHost && backgroundAssetPanel.parentElement !== contentHost) {
+          contentHost.appendChild(backgroundAssetPanel);
+        }
+        backgroundAssetPanel.classList.add('is-active');
+        backgroundSidePanel.style.display = 'block';
+        syncRightSidePanelBodyClass();
+      };
+      const isAssetWorkspaceDockEligible = () => {
+        if (!assetWorkspaceDock) return false;
+        if (editorView && window.getComputedStyle(editorView).display === 'none') return false;
+        if (startProjectsView && window.getComputedStyle(startProjectsView).display !== 'none') return false;
+        return true;
+      };
+      const syncAssetToolbarSticky = () => {
+        assetToolbarStickyRaf = 0;
+        if (!assetWorkspaceDock) return;
+        if (headerAssetToolbarHost && assetWorkspaceDock.parentElement !== headerAssetToolbarHost) {
+          headerAssetToolbarHost.appendChild(assetWorkspaceDock);
+        }
+        if (!isAssetWorkspaceDockEligible()) {
+          closeBackgroundSidePanel({ restorePageEditor: false, resetToolbarState: true });
+          assetWorkspaceDock.classList.add('is-header-hidden');
+          return;
+        }
+        assetWorkspaceDock.classList.remove('is-header-hidden');
+      };
+      const scheduleAssetToolbarStickySync = () => {
+        if (assetToolbarStickyRaf) return;
+        assetToolbarStickyRaf = window.requestAnimationFrame(syncAssetToolbarSticky);
+      };
       const clearActiveAssetPanel = () => {
+        closeBackgroundSidePanel({ restorePageEditor: false, resetToolbarState: false });
         assetTools.forEach((btn) => btn.classList.remove('is-active'));
         assetPanels.forEach((panel) => panel.classList.remove('is-active'));
         if (assetPanelsContainer) assetPanelsContainer.classList.remove('has-active-panel');
         if (assetToolbarStatus) assetToolbarStatus.textContent = 'Wybierz narzędzie';
+        scheduleAssetToolbarStickySync();
       };
       const setActiveAssetPanel = (target) => {
         const normalized = String(target || '').trim();
@@ -862,11 +1000,21 @@ const canvaPdfButton = document.getElementById('canvaPdfButton');
           btn.classList.toggle('is-active', isActive);
           if (isActive) activeLabel = btn.getAttribute('aria-label') || btn.title || btn.dataset.assetTarget || '';
         });
+        if (normalized === 'background') {
+          assetPanels.forEach((panel) => panel.classList.remove('is-active'));
+          if (assetPanelsContainer) assetPanelsContainer.classList.remove('has-active-panel');
+          if (assetToolbarStatus) assetToolbarStatus.textContent = activeLabel || 'Narzędzie';
+          openBackgroundSidePanel();
+          scheduleAssetToolbarStickySync();
+          return;
+        }
+        closeBackgroundSidePanel({ restorePageEditor: false, resetToolbarState: false });
         assetPanels.forEach((panel) => {
           panel.classList.toggle('is-active', panel.dataset.assetPanel === normalized);
         });
         if (assetPanelsContainer) assetPanelsContainer.classList.add('has-active-panel');
         if (assetToolbarStatus) assetToolbarStatus.textContent = activeLabel || 'Narzędzie';
+        scheduleAssetToolbarStickySync();
       };
       if (assetTools.length && assetPanels.length) {
         assetTools.forEach((btn) => {
@@ -883,6 +1031,14 @@ const canvaPdfButton = document.getElementById('canvaPdfButton');
           || '';
         if (initialAsset) setActiveAssetPanel(initialAsset);
         else clearActiveAssetPanel();
+      }
+      if (assetWorkspaceDock) {
+        window.setTimeout(scheduleAssetToolbarStickySync, 60);
+        if ('MutationObserver' in window) {
+          const assetDockViewObserver = new MutationObserver(scheduleAssetToolbarStickySync);
+          if (editorView) assetDockViewObserver.observe(editorView, { attributes: true, attributeFilter: ['style', 'class'] });
+          if (startProjectsView) assetDockViewObserver.observe(startProjectsView, { attributes: true, attributeFilter: ['style', 'class'] });
+        }
       }
 
       // Pobierz projekt
@@ -933,16 +1089,6 @@ const canvaPdfButton = document.getElementById('canvaPdfButton');
             downloadName.value = window.currentProjectName.replace(/\s+/g, "_");
           }
           setDownloadPageMode('all');
-        };
-      }
-      const pageSettingsToggleBtn = document.getElementById('pageSettingsToggleBtn');
-      if (pageSettingsToggleBtn) {
-        pageSettingsToggleBtn.onclick = (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (typeof window.toggleActivePageSettingsMenu === 'function') {
-            window.toggleActivePageSettingsMenu(pageSettingsToggleBtn);
-          }
         };
       }
       if (downloadClose) downloadClose.onclick = () => downloadModal.style.display = 'none';

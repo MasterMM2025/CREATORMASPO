@@ -1597,7 +1597,14 @@ async function restoreDirectNodeRecursiveFromPayload(payload, page, layer) {
             t.setAttr("_directSavedTextDecoration", payload.textDecoration || (t.textDecoration ? t.textDecoration() : ""));
         }
         const editFn = window.enableEditableText || window.enableTextEditing;
-        if (typeof editFn === "function" && (t.getAttr("isName") || t.getAttr("isIndex") || t.getAttr("isProductText") || t.getAttr("isCustomPackageInfo"))) {
+        if (typeof editFn === "function" && (
+            t.getAttr("isName") ||
+            t.getAttr("isIndex") ||
+            t.getAttr("isProductText") ||
+            t.getAttr("isCustomPackageInfo") ||
+            t.getAttr("isSidebarText") ||
+            t.getAttr("isUserText")
+        )) {
             try { editFn(t, page); } catch (_e) {}
         }
         return t;
@@ -1967,15 +1974,45 @@ async function restoreSavedObjectsForPage(page, pagePayload) {
                 fontStyle: obj.fontStyle || "normal",
                 align: obj.align || "left",
                 lineHeight: obj.lineHeight || 1.2,
+                wrap: obj.wrap || "word",
+                padding: Number.isFinite(Number(obj.padding)) ? Number(obj.padding) : 0,
+                verticalAlign: obj.verticalAlign || "top",
                 rotation: obj.rotation,
-                draggable: true
+                draggable: obj.draggable !== false,
+                listening: obj.listening !== false,
+                opacity: obj.opacity ?? 1,
+                name: obj.name || ""
             });
+            if (typeof t.textDecoration === "function" && obj.textDecoration) {
+                t.textDecoration(obj.textDecoration);
+            }
             t.setAttrs({
                 isName: obj.isName || false,
                 isPrice: obj.isPrice || false,
                 isIndex: obj.isIndex || false,
                 slotIndex: obj.slotIndex
             });
+            if (obj.attrs && typeof obj.attrs === "object") {
+                t.setAttrs(obj.attrs);
+            }
+            const hasSlotIndex = obj.slotIndex !== null && obj.slotIndex !== undefined && Number.isFinite(Number(obj.slotIndex));
+            const hasExplicitTextMode = !!(
+                t.getAttr("isUserText") ||
+                t.getAttr("isSidebarText")
+            );
+            const looksLikeLegacyFreeText = !(
+                obj.isName ||
+                obj.isPrice ||
+                obj.isIndex ||
+                obj.isPricePart ||
+                hasSlotIndex
+            );
+            if (!hasExplicitTextMode && looksLikeLegacyFreeText) {
+                t.setAttr("isUserText", true);
+                if (!String(t.getAttr("_originalText") || "").trim()) {
+                    t.setAttr("_originalText", String(obj.text || "").trim());
+                }
+            }
             layer.add(t);
             const editFn = window.enableEditableText || window.enableTextEditing;
             if (typeof editFn === "function") editFn(t, page);
@@ -2078,6 +2115,7 @@ async function restoreSavedObjectsForPage(page, pagePayload) {
 
     layer.batchDraw?.();
 }
+window.restoreSavedObjectsForPage = restoreSavedObjectsForPage;
 
 async function ensurePageHydrated(page, opts = {}) {
     if (!page || !page.layer) return false;
@@ -2356,6 +2394,7 @@ function collectProjectData() {
         ),
         pageWidth: window.W || null,
         pageHeight: window.H || null,
+        backgroundDefault: cloneProjectSerializable(window.__PROJECT_BACKGROUND_DEFAULT || null, null),
         pages: []
     };
 
@@ -2453,6 +2492,10 @@ function collectProjectData() {
                 const parent = node.getParent && node.getParent();
                 const isPriceGroup = parent && parent.getAttr && parent.getAttr("isPriceGroup");
                 const abs = isPriceGroup ? node.getAbsolutePosition() : null;
+                const attrs = pruneTransientDirectAttrsForSave(
+                    sanitizeAttrsForSave(node.getAttrs ? node.getAttrs() : {}),
+                    "text"
+                );
                 objects.push({
                     type: "text",
                     x: abs ? abs.x : node.x(),
@@ -2466,12 +2509,21 @@ function collectProjectData() {
                     fontStyle: node.fontStyle(),
                     align: node.align(),
                     lineHeight: node.lineHeight(),
+                    textDecoration: node.textDecoration ? node.textDecoration() : "",
+                    padding: node.padding ? node.padding() : 0,
+                    wrap: node.wrap ? node.wrap() : "word",
+                    verticalAlign: node.verticalAlign ? node.verticalAlign() : "top",
                     rotation: node.rotation(),
+                    name: node.name ? node.name() : "",
+                    draggable: node.draggable ? node.draggable() : true,
+                    listening: node.listening ? node.listening() : true,
+                    opacity: node.opacity ? node.opacity() : 1,
                     isName: node.getAttr("isName") || false,
                     isPrice: node.getAttr("isPrice") || false,
                     isIndex: node.getAttr("isIndex") || false,
                     isPricePart: isPriceGroup || false,
-                    slotIndex: node.getAttr("slotIndex") ?? null
+                    slotIndex: node.getAttr("slotIndex") ?? null,
+                    attrs
                 });
                 return;
             }
@@ -4086,6 +4138,9 @@ async function loadProjectFromData(data, opts = {}) {
         loadSource === "redo" ||
         loadSource === "restore"
     );
+    const pageEditRestoreState = isHistoryReplayLoad && typeof window.getPageEditPanelRestoreState === "function"
+        ? window.getPageEditPanelRestoreState()
+        : null;
     if (window.__projectLoadMutex) {
         try { await window.__projectLoadMutex; } catch (_e) {}
     }
@@ -4174,6 +4229,12 @@ async function loadProjectFromData(data, opts = {}) {
             }
         }
 
+        window.__PROJECT_BACKGROUND_DEFAULT = (
+            data.backgroundDefault && typeof data.backgroundDefault === "object"
+        )
+            ? cloneProjectSerializable(data.backgroundDefault, null)
+            : null;
+
         const savedPages = Array.isArray(data.pages) ? data.pages : [];
         const hydrateNowLimit = getInitialHydratedPagesLimit(opts, savedPages.length);
         const hydratedPages = [];
@@ -4181,7 +4242,7 @@ async function loadProjectFromData(data, opts = {}) {
 
         for (let i = 0; i < savedPages.length; i++) {
             const savedPage = (savedPages[i] && typeof savedPages[i] === "object") ? savedPages[i] : {};
-            const page = window.createNewPage();
+            const page = window.createNewPage({ skipProjectBackgroundDefault: true });
             page.__projectLoadStamp = loadStamp;
             page.__savedUserProductGroups = normalizeSavedUserProductGroups(
                 savedPage.userProductGroups || savedPage.groupedProductKeys
@@ -4243,6 +4304,10 @@ async function loadProjectFromData(data, opts = {}) {
             window.createZoomSlider();
         } else if (typeof createZoomSlider === "function") {
             createZoomSlider();
+        }
+
+        if (pageEditRestoreState && typeof window.restorePageEditPanelState === "function") {
+            try { window.restorePageEditPanelState(pageEditRestoreState); } catch (_e) {}
         }
 
         refreshPdfButtonState();

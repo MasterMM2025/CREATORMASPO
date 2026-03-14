@@ -14,7 +14,7 @@ function markAsEditable(node) {
 
 
 // === TWORZENIE PUSTEJ STRONY POD KONKRETNĄ STRONĄ ===
-window.createEmptyPageUnder = function(parentPage) {
+function legacyCreateEmptyPageUnder(parentPage) {
   const n = ++pageCounter;
   const div = document.createElement('div');
   div.className = 'page-container';
@@ -107,8 +107,19 @@ padding: 6,                // 🔥 transformer jest widoczny przy jednej linii
     anchorSize: 12, // 🔥 większe uchwyty do łatwiejszego chwytania
     padding: 4,
     boundBoxFunc: (oldBox, newBox) => {
-        // 🔥 ograniczamy minimalny rozmiar aby nic się nie "odwróciło"
-        if (Math.abs(newBox.width) < 20 || Math.abs(newBox.height) < 20) return oldBox;
+        const selected = (tr && typeof tr.nodes === "function") ? (tr.nodes() || []) : [];
+        const single = selected.length === 1 ? selected[0] : null;
+        const isLineLikeSelection = !!(single && (
+            single instanceof Konva.Line ||
+            single instanceof Konva.Arrow ||
+            (single.getAttr && ["line", "arrow"].includes(String(single.getAttr("shapeType") || "").trim().toLowerCase()))
+        ));
+        const width = Math.abs(Number(newBox && newBox.width) || 0);
+        const height = Math.abs(Number(newBox && newBox.height) || 0);
+        const isTooSmall = isLineLikeSelection
+            ? Math.max(width, height) < 12
+            : width < 20 || height < 20;
+        if (isTooSmall) return oldBox;
         return newBox;
     }
 });
@@ -138,6 +149,17 @@ const page = {
         bannerUrl: null,
         currency: 'euro'
     }
+}
+
+if (window.PageActions && typeof window.PageActions.registerLegacyCreateEmptyPageUnder === "function") {
+  window.PageActions.registerLegacyCreateEmptyPageUnder(legacyCreateEmptyPageUnder);
+}
+
+window.createEmptyPageUnder = function(parentPage) {
+  if (window.PageActions && typeof window.PageActions.createEmptyPageUnder === "function") {
+    return window.PageActions.createEmptyPageUnder(parentPage);
+  }
+  return legacyCreateEmptyPageUnder(parentPage);
 };
 
 
@@ -606,6 +628,16 @@ stage.on('transform', () => {
 // === ANCHOR DRAG LIMIT — identycznie jak importdanych.js
 tr.anchorDragBoundFunc(function(oldPos, newPos) {
     const anchor = tr.getActiveAnchor();
+    const node = tr.nodes && tr.nodes()[0];
+    const isLineLikeSelection = !!(node && (
+        node instanceof Konva.Line ||
+        node instanceof Konva.Arrow ||
+        (node.getAttr && ["line", "arrow"].includes(String(node.getAttr("shapeType") || "").trim().toLowerCase()))
+    ));
+
+    if (isLineLikeSelection) {
+        return newPos;
+    }
 
     // Rogi — pełne skalowanie
     if (
@@ -637,6 +669,12 @@ tr.on('dragmove', (e) => {
     const anchor = e.target.getAttr('name');
     const node = tr.nodes()[0];
     if (!node) return;
+    const isLineLikeSelection = !!(
+        node instanceof Konva.Line ||
+        node instanceof Konva.Arrow ||
+        (node.getAttr && ["line", "arrow"].includes(String(node.getAttr("shapeType") || "").trim().toLowerCase()))
+    );
+    if (isLineLikeSelection) return;
 
     if (anchor === 'middle-left' || anchor === 'middle-right') {
         const box = node.getClientRect();
@@ -728,27 +766,39 @@ tr.on('dragmove', (e) => {
   };
   document.addEventListener('keydown', escHandler);
 
-  // 🔼 Przenieś stronę wyżej
+// 🔼 Przenieś stronę wyżej
 div.querySelector(".move-up").onclick = () => {
+    if (typeof window.movePage === "function") {
+      window.movePage(page, -1);
+      return;
+    }
     const parent = div.parentNode;
     if (div.previousElementSibling) {
-        parent.insertBefore(div, div.previousElementSibling);
-        reorderPages();
+      parent.insertBefore(div, div.previousElementSibling);
+      reorderPages();
     }
 };
 
 // 🔽 Przenieś stronę niżej
 div.querySelector(".move-down").onclick = () => {
+    if (typeof window.movePage === "function") {
+      window.movePage(page, +1);
+      return;
+    }
     const parent = div.parentNode;
     if (div.nextElementSibling) {
-        parent.insertBefore(div.nextElementSibling, div);
-        reorderPages();
+      parent.insertBefore(div.nextElementSibling, div);
+      reorderPages();
     }
 };
 
 // ⧉ Duplikuj stronę
 div.querySelector(".duplicate").onclick = () => {
-    window.createEmptyPageUnder(page);
+    if (typeof window.duplicatePage === "function") {
+      window.duplicatePage(page);
+    } else {
+      window.createEmptyPageUnder(page);
+    }
 };
 
 // ＋ Dodaj stronę pod spodem
@@ -781,12 +831,15 @@ btnSettings.onclick = (e) => {
 
 // 🗑 Usuń stronę
 div.querySelector(".delete").onclick = () => {
-    if (confirm("Usunąć stronę?")) {
-        stage.destroy();
-        div.remove();
-        pages.splice(pages.indexOf(page), 1);
-        reorderPages();
+    if (!confirm("Usunąć stronę?")) return;
+    if (typeof window.deletePage === "function") {
+      window.deletePage(page);
+      return;
     }
+    stage.destroy();
+    div.remove();
+    pages.splice(pages.indexOf(page), 1);
+    reorderPages();
 };
 
 

@@ -5,6 +5,7 @@
 
   const PANEL_ID = "shapePanel";
   const PANEL_CLASS = "shape-panel";
+  const DEFAULT_SHAPE_SHADOW_BLUR = 12;
 
   const SHAPES = [
     { id: "rect", label: "Prostokąt" },
@@ -510,13 +511,17 @@
     }
     if (type === "line") {
       node = new Konva.Line({
-        points: [centerX - 80, centerY, centerX + 80, centerY],
+        x: centerX - 80,
+        y: centerY,
+        points: [0, 0, 160, 0],
         stroke, strokeWidth: 4, lineCap: "round", draggable: true, listening: true, hitStrokeWidth: 20
       });
     }
     if (type === "arrow") {
       node = new Konva.Arrow({
-        points: [centerX - 80, centerY, centerX + 80, centerY],
+        x: centerX - 80,
+        y: centerY,
+        points: [0, 0, 160, 0],
         stroke, strokeWidth: 4, pointerLength: 14, pointerWidth: 14,
         lineCap: "round", lineJoin: "round", draggable: true, listening: true, hitStrokeWidth: 20
       });
@@ -524,6 +529,9 @@
 
     if (!node) return;
     node.setAttrs({ isShape: true, shapeType: type });
+    if (type === "line" || type === "arrow") {
+      node.setAttr("lineCoordsNormalized", true);
+    }
     if (node.strokeScaleEnabled) node.strokeScaleEnabled(false);
 
     layer.add(node);
@@ -534,6 +542,13 @@
 
     page.selectedNodes = [node];
     page.transformer.nodes([node]);
+    if (typeof window.applyTransformerProfileForSelection === "function") {
+      window.applyTransformerProfileForSelection(page);
+    } else {
+      page.transformer.forceUpdate?.();
+      page.layer.batchDraw?.();
+      page.transformerLayer.batchDraw?.();
+    }
     document.activeStage = stage;
     if (window.showFloatingButtons) window.showFloatingButtons();
 
@@ -762,6 +777,13 @@
 
     page.selectedNodes = [group];
     page.transformer.nodes([group]);
+    if (typeof window.applyTransformerProfileForSelection === "function") {
+      window.applyTransformerProfileForSelection(page);
+    } else {
+      page.transformer.forceUpdate?.();
+      page.layer.batchDraw?.();
+      page.transformerLayer.batchDraw?.();
+    }
     document.activeStage = stage;
     if (window.showFloatingButtons) window.showFloatingButtons();
     updatePanelFromSelection();
@@ -854,6 +876,13 @@
 
     page.selectedNodes = [group];
     page.transformer.nodes([group]);
+    if (typeof window.applyTransformerProfileForSelection === "function") {
+      window.applyTransformerProfileForSelection(page);
+    } else {
+      page.transformer.forceUpdate?.();
+      page.layer.batchDraw?.();
+      page.transformerLayer.batchDraw?.();
+    }
     document.activeStage = stage;
     if (window.showFloatingButtons) window.showFloatingButtons();
     updatePanelFromSelection();
@@ -968,18 +997,23 @@
   function applyShadow(enabled, blur) {
     const shapes = getSelectedShapes();
     if (!shapes.length) return;
+    const safeBlur = enabled ? Math.max(1, Number(blur) || DEFAULT_SHAPE_SHADOW_BLUR) : 0;
     shapes.forEach(s => {
       eachShapeNode(s, (node) => {
         if (!node.shadowColor) return;
         if (!enabled) {
+          if (node.shadowEnabled) node.shadowEnabled(false);
           node.shadowOpacity(0);
           node.shadowBlur(0);
+          if (node.shadowOffset) node.shadowOffset({ x: 0, y: 0 });
           return;
         }
-        node.shadowColor("rgba(0,0,0,0.35)");
-        node.shadowBlur(blur);
-        node.shadowOffset({ x: 0, y: Math.round(blur / 3) });
-        node.shadowOpacity(0.35);
+        if (node.shadowEnabled) node.shadowEnabled(true);
+        if (node.shadowForStrokeEnabled) node.shadowForStrokeEnabled(true);
+        node.shadowColor("#000000");
+        node.shadowBlur(safeBlur);
+        node.shadowOffset({ x: 0, y: Math.max(1, Math.round(safeBlur / 3)) });
+        node.shadowOpacity(isLineLike(node) ? 0.45 : 0.35);
       });
     });
     const page = getActivePage();
@@ -1005,7 +1039,8 @@
     const dashArr = (primary?.dash && Array.isArray(primary.dash())) ? primary.dash() : [];
     const dashStyle = dashArr.length ? (dashArr[0] <= 3 ? "dot" : "dash") : "solid";
     const shadowBlur = Math.round(primary?.shadowBlur ? primary.shadowBlur() : 0);
-    const shadowEnabled = shadowBlur > 0;
+    const shadowOpacity = Number(primary?.shadowOpacity ? primary.shadowOpacity() : 0);
+    const shadowEnabled = shadowBlur > 0 || shadowOpacity > 0.01;
 
     // zabezpieczenie: nie skaluj obrysu podczas transformacji
     shapes.forEach(s => {
@@ -1114,12 +1149,19 @@
     document.getElementById("shapeOpacityQuick")?.addEventListener("input", (e) => applyOpacity(parseInt(e.target.value, 10) / 100));
     document.getElementById("shapeDashQuick")?.addEventListener("change", (e) => applyDash(e.target.value));
     document.getElementById("shapeShadowToggle")?.addEventListener("change", (e) => {
-      const blur = parseInt(document.getElementById("shapeShadowBlur")?.value || "0", 10);
+      const blurInput = document.getElementById("shapeShadowBlur");
+      let blur = parseInt(blurInput?.value || "0", 10);
+      if (e.target.checked && blur <= 0) {
+        blur = DEFAULT_SHAPE_SHADOW_BLUR;
+        if (blurInput) blurInput.value = String(blur);
+      }
       applyShadow(e.target.checked, blur);
     });
     document.getElementById("shapeShadowBlur")?.addEventListener("input", (e) => {
-      const enabled = document.getElementById("shapeShadowToggle")?.checked;
-      applyShadow(enabled, parseInt(e.target.value, 10));
+      const shadowToggle = document.getElementById("shapeShadowToggle");
+      const blur = parseInt(e.target.value, 10);
+      const enabled = !!(shadowToggle?.checked);
+      applyShadow(enabled, blur);
     });
 
     document.querySelectorAll(".shape-bar-swatch").forEach(sw => {

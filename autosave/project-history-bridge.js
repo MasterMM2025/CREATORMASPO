@@ -53,6 +53,9 @@
       debounceMs: Number(options && options.debounceMs) > 0 ? Number(options.debounceMs) : 260,
       snapshotFn: typeof (options && options.snapshotFn) === 'function' ? options.snapshotFn : () => null,
       applyFn: typeof (options && options.applyFn) === 'function' ? options.applyFn : null,
+      shouldArchiveStateFn: typeof (options && options.shouldArchiveStateFn) === 'function'
+        ? options.shouldArchiveStateFn
+        : null,
       previewFn: typeof (options && options.previewFn) === 'function' ? options.previewFn : null,
       projectIdentityFn: typeof (options && options.projectIdentityFn) === 'function' ? options.projectIdentityFn : null,
       storeKey: options && options.storeKey ? String(options.storeKey) : 'main',
@@ -147,8 +150,16 @@
           const now = Date.now();
           const enoughTimePassed = (now - Number(history.lastArchiveAt || 0)) >= config.autosaveArchiveMinIntervalMs;
           const hashChanged = !!currentHash && currentHash !== history.lastArchiveHash;
+          let shouldArchive = !!currentData;
+          if (shouldArchive && typeof config.shouldArchiveStateFn === 'function') {
+            try {
+              shouldArchive = !!(await maybeCall(config.shouldArchiveStateFn, currentData, payload.current));
+            } catch (_e) {
+              shouldArchive = true;
+            }
+          }
           if (
-            currentData &&
+            shouldArchive &&
             typeof storeApi.appendAutosaveEntry === 'function' &&
             (hashChanged || enoughTimePassed || !history.lastArchiveHash)
           ) {
@@ -362,9 +373,23 @@
     window.clearProjectAutosave = clearAutosave;
     window.captureProjectSnapshot = () => snapshotNow('manual', true);
 
-    window.addEventListener(config.eventName, () => {
+    window.addEventListener(config.eventName, (event) => {
       if (window.__projectLoadInProgress) return;
-      scheduleSnapshot('canvasModified');
+      const detail = event ? event.detail : null;
+      const meta = detail && typeof detail === 'object' ? detail : null;
+      const source = String((meta && meta.historySource) || 'canvasModified');
+      const historyMode = String((meta && meta.historyMode) || '').toLowerCase();
+
+      if (historyMode === 'immediate') {
+        if (history.debounceTimer) {
+          clearTimeout(history.debounceTimer);
+          history.debounceTimer = null;
+        }
+        snapshotNow(source, false);
+        return;
+      }
+
+      scheduleSnapshot(source);
     });
 
     window.addEventListener('beforeunload', () => {

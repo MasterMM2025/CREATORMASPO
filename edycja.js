@@ -11,7 +11,7 @@ window.destroyPageEditPanel = function() {
   if (!pageEditPanel) return;
   try { pageEditPanel.remove(); } catch (_e) {}
   pageEditPanel = null;
-};
+    };
 
 function syncPageEditLayoutState(expanded) {
   document.body.classList.toggle('page-edit-panel-visible', !!expanded);
@@ -33,6 +33,32 @@ window.hidePageEditPanel = function() {
 
 window.isPageEditPanelVisible = function() {
   return !!(pageEditPanel && pageEditPanel.style.display !== 'none');
+};
+
+window.getPageEditPanelRestoreState = function() {
+  if (!(window.isPageEditPanelVisible && window.isPageEditPanelVisible())) return null;
+  const list = Array.isArray(window.pages) ? window.pages : [];
+  const pageIndex = currentPage ? list.indexOf(currentPage) : -1;
+  return {
+    visible: true,
+    pageIndex: pageIndex >= 0 ? pageIndex : null
+  };
+};
+
+window.restorePageEditPanelState = function(state) {
+  if (!state?.visible || typeof window.openPageEdit !== 'function') return false;
+  const list = Array.isArray(window.pages) ? window.pages : [];
+  if (!list.length) return false;
+  const preferredByIndex = Number.isInteger(state.pageIndex) ? list[state.pageIndex] : null;
+  const fallback =
+    list.find((page) => page && page.stage === document.activeStage && !page.isCover) ||
+    list.find((page) => page && !page.isCover) ||
+    list[0] ||
+    null;
+  const nextPage = (preferredByIndex && !preferredByIndex.isCover) ? preferredByIndex : fallback;
+  if (!nextPage || nextPage.isCover) return false;
+  window.openPageEdit(nextPage);
+  return true;
 };
 
 window.togglePageEditForPage = function(page) {
@@ -67,11 +93,234 @@ window.showPageEditForCurrentPage = function() {
 const DEFAULT_STYLES = {
   nameStyle: { size: 12, fontFamily: 'Arial', color: '#000000', bold: false, italic: false, underline: false },
   indexStyle: { size: 14, fontFamily: 'Arial', color: '#000000', bold: false, italic: false, underline: false },
+  packageStyle: { size: 12, fontFamily: 'Arial', color: '#000000', bold: false, italic: false, underline: false },
   priceStyle: { size: 24, fontFamily: 'Arial', color: '#000000', bold: true, italic: false, underline: false },
   ratingStyle: { size: 12, fontFamily: 'Arial', color: '#000000', bold: false, italic: false, underline: false },
 
 };
 
+
+function normalizeCurrencyCode(value) {
+  const raw = String(value || '').trim().toUpperCase();
+  if (!raw) return 'GBP';
+  if (raw === '€' || raw === 'EUR' || raw === 'EURO') return 'EUR';
+  if (raw === '£' || raw === 'GBP') return 'GBP';
+  if (raw === 'ZŁ' || raw === 'ZL' || raw === 'PLN') return 'PLN';
+  return 'GBP';
+}
+
+function normalizeColorForInput(value, fallback = '#000000') {
+  const raw = String(value || '').trim();
+  if (!raw) return fallback;
+  if (/^#[0-9a-f]{6}$/i.test(raw)) return raw.toLowerCase();
+  if (/^#[0-9a-f]{3}$/i.test(raw)) {
+    return `#${raw[1]}${raw[1]}${raw[2]}${raw[2]}${raw[3]}${raw[3]}`.toLowerCase();
+  }
+  if (typeof document === 'undefined') return fallback;
+  const probe = document.createElement('span');
+  probe.style.color = raw;
+  const normalized = String(probe.style.color || '').trim();
+  const match = normalized.match(/^rgba?\(([^)]+)\)$/i);
+  if (!match) return fallback;
+  const parts = match[1].split(',').slice(0, 3).map((part) => {
+    const num = Math.max(0, Math.min(255, parseInt(part, 10) || 0));
+    return num.toString(16).padStart(2, '0');
+  });
+  return `#${parts.join('')}`;
+}
+
+function getNodeUnderline(node) {
+  if (!node) return false;
+  const textDecoration = String(
+    (typeof node.textDecoration === 'function' ? node.textDecoration() : (node.getAttr && node.getAttr('textDecoration'))) || ''
+  ).toLowerCase();
+  return textDecoration.includes('underline') || !!(node.getAttr && node.getAttr('underline'));
+}
+
+function extractTextNodeStyle(node, fallback = {}) {
+  if (!(node instanceof Konva.Text)) return null;
+  const fontStyle = String(node.fontStyle?.() || '').toLowerCase();
+  return {
+    size: Math.max(1, Math.round(Number(node.fontSize?.() || fallback.size || 12))),
+    fontFamily: String(node.fontFamily?.() || fallback.fontFamily || 'Arial').trim() || 'Arial',
+    color: normalizeColorForInput(node.fill?.(), fallback.color || '#000000'),
+    bold: fontStyle.includes('bold'),
+    italic: fontStyle.includes('italic'),
+    underline: getNodeUnderline(node)
+  };
+}
+
+function getPageMatchingNodes(page, predicate) {
+  if (!page || !page.layer || typeof page.layer.find !== 'function') return [];
+  return page.layer.find((node) => {
+    try {
+      return !!predicate(node);
+    } catch (_e) {
+      return false;
+    }
+  }) || [];
+}
+
+function getFirstPageMatchingNode(page, predicate) {
+  const matches = getPageMatchingNodes(page, predicate);
+  return matches.length ? matches[0] : null;
+}
+
+function getLegacyStyleForType(page, type) {
+  const settings = page && page.settings ? page.settings : {};
+  const defaultStyle = DEFAULT_STYLES[type + 'Style'] || DEFAULT_STYLES.nameStyle;
+  if (type === 'name') {
+    return {
+      size: Number.isFinite(Number(settings.nameSize)) ? Number(settings.nameSize) : defaultStyle.size,
+      fontFamily: String(settings.fontFamily || defaultStyle.fontFamily || 'Arial'),
+      color: normalizeColorForInput(settings.nameColor || settings.textColor || defaultStyle.color, defaultStyle.color),
+      bold: !!defaultStyle.bold,
+      italic: !!defaultStyle.italic,
+      underline: !!defaultStyle.underline
+    };
+  }
+  if (type === 'index') {
+    return {
+      size: Number.isFinite(Number(settings.indexSize)) ? Number(settings.indexSize) : defaultStyle.size,
+      fontFamily: String(settings.fontFamily || defaultStyle.fontFamily || 'Arial'),
+      color: normalizeColorForInput(settings.indexColor || settings.textColor || defaultStyle.color, defaultStyle.color),
+      bold: !!defaultStyle.bold,
+      italic: !!defaultStyle.italic,
+      underline: !!defaultStyle.underline
+    };
+  }
+  if (type === 'package') {
+    const fallbackIndex = getLegacyStyleForType(page, 'index');
+    return {
+      size: Number.isFinite(Number(settings.packageSize)) ? Number(settings.packageSize) : fallbackIndex.size,
+      fontFamily: String(settings.packageFontFamily || fallbackIndex.fontFamily || defaultStyle.fontFamily || 'Arial'),
+      color: normalizeColorForInput(settings.packageColor || fallbackIndex.color || defaultStyle.color, defaultStyle.color),
+      bold: !!defaultStyle.bold,
+      italic: !!defaultStyle.italic,
+      underline: !!defaultStyle.underline
+    };
+  }
+  if (type === 'price') {
+    return {
+      size: Number.isFinite(Number(settings.priceSize)) ? Number(settings.priceSize) : defaultStyle.size,
+      fontFamily: String(settings.priceFontFamily || settings.fontFamily || defaultStyle.fontFamily || 'Arial'),
+      color: normalizeColorForInput(settings.priceColor || defaultStyle.color, defaultStyle.color),
+      bold: Object.prototype.hasOwnProperty.call(settings, 'priceBold') ? !!settings.priceBold : !!defaultStyle.bold,
+      italic: Object.prototype.hasOwnProperty.call(settings, 'priceItalic') ? !!settings.priceItalic : !!defaultStyle.italic,
+      underline: Object.prototype.hasOwnProperty.call(settings, 'priceUnderline') ? !!settings.priceUnderline : !!defaultStyle.underline
+    };
+  }
+  if (type === 'rating') {
+    return {
+      size: Number.isFinite(Number(settings.ratingSize)) ? Number(settings.ratingSize) : defaultStyle.size,
+      fontFamily: String(settings.ratingFontFamily || settings.fontFamily || defaultStyle.fontFamily || 'Arial'),
+      color: normalizeColorForInput(settings.ratingColor || defaultStyle.color, defaultStyle.color),
+      bold: !!defaultStyle.bold,
+      italic: !!defaultStyle.italic,
+      underline: !!defaultStyle.underline
+    };
+  }
+  return { ...defaultStyle };
+}
+
+function normalizeResolvedStyle(style, fallbackStyle) {
+  const fallback = fallbackStyle || DEFAULT_STYLES.nameStyle;
+  return {
+    size: Math.max(1, Math.round(Number(style?.size || fallback.size || 12))),
+    fontFamily: String(style?.fontFamily || fallback.fontFamily || 'Arial').trim() || 'Arial',
+    color: normalizeColorForInput(style?.color || fallback.color || '#000000', fallback.color || '#000000'),
+    bold: !!(style && style.bold),
+    italic: !!(style && style.italic),
+    underline: !!(style && style.underline)
+  };
+}
+
+function areResolvedStylesEqual(left, right) {
+  return (
+    Math.round(Number(left?.size || 0)) === Math.round(Number(right?.size || 0)) &&
+    String(left?.fontFamily || '').trim() === String(right?.fontFamily || '').trim() &&
+    normalizeColorForInput(left?.color || '', '#000000') === normalizeColorForInput(right?.color || '', '#000000') &&
+    !!left?.bold === !!right?.bold &&
+    !!left?.italic === !!right?.italic &&
+    !!left?.underline === !!right?.underline
+  );
+}
+
+function detectPageStyleFromCanvas(page, type) {
+  const legacy = getLegacyStyleForType(page, type);
+  if (type === 'price') {
+    const priceGroup = getFirstPageMatchingNode(page, (node) =>
+      node instanceof Konva.Group &&
+      node.getAttr &&
+      node.getAttr('isPriceGroup')
+    );
+    if (!priceGroup || typeof priceGroup.find !== 'function') return null;
+    const mainText =
+      priceGroup.findOne((node) => node instanceof Konva.Text && node.getAttr && (
+        node.getAttr('pricePart') === 'main' || node.getAttr('priceRole') === 'major'
+      )) ||
+      priceGroup.findOne((node) => node instanceof Konva.Text) ||
+      null;
+    const detected = extractTextNodeStyle(mainText, legacy);
+    if (!detected) return null;
+    const storedSize = Number(page?.settings?.priceStyle?.size);
+    const groupScaleX = Number(typeof priceGroup.scaleX === 'function' ? priceGroup.scaleX() : 1);
+    const basePriceSize = Number(DEFAULT_STYLES.priceStyle?.size || 24);
+    detected.size = Number.isFinite(storedSize) && storedSize > 0
+      ? storedSize
+      : Math.max(1, Math.round((Number.isFinite(groupScaleX) && groupScaleX > 0 ? groupScaleX : 1) * basePriceSize));
+    return detected;
+  }
+
+  const typePredicateMap = {
+    name: (node) => node instanceof Konva.Text && node.getAttr && node.getAttr('isName'),
+    index: (node) => node instanceof Konva.Text && node.getAttr && node.getAttr('isIndex'),
+    package: (node) => node instanceof Konva.Text && node.getAttr && node.getAttr('isCustomPackageInfo'),
+    rating: (node) => node instanceof Konva.Text && node.getAttr && node.getAttr('isRating')
+  };
+  const predicate = typePredicateMap[type];
+  if (!predicate) return null;
+  return extractTextNodeStyle(getFirstPageMatchingNode(page, predicate), legacy);
+}
+
+function resolvePagePanelStyle(page, type) {
+  const styleKey = type + 'Style';
+  const defaultStyle = DEFAULT_STYLES[styleKey] || DEFAULT_STYLES.nameStyle;
+  const detected = detectPageStyleFromCanvas(page, type);
+  if (detected) return normalizeResolvedStyle(detected, defaultStyle);
+  const stored = page && page.settings ? page.settings[styleKey] : null;
+  if (stored) return normalizeResolvedStyle(stored, defaultStyle);
+  return normalizeResolvedStyle(getLegacyStyleForType(page, type), defaultStyle);
+}
+
+function getCurrencyCodeFromText(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (raw.includes('zł') || raw.includes('zl') || raw.includes('pln')) return 'PLN';
+  if (raw.includes('€') || raw.includes('eur') || raw.includes('euro')) return 'EUR';
+  if (raw.includes('£') || raw.includes('gbp')) return 'GBP';
+  return null;
+}
+
+function detectPageCurrency(page) {
+  const explicit = normalizeCurrencyCode(page?.settings?.currency || 'GBP');
+  const unitNodes = getPageMatchingNodes(page, (node) =>
+    node instanceof Konva.Text &&
+    node.getAttr &&
+    (
+      node.getAttr('pricePart') === 'unit' ||
+      node.getAttr('isPriceUnit') ||
+      node.getAttr('priceRole') === 'unit' ||
+      node.getAttr('workspaceKind') === 'currencySymbol'
+    )
+  );
+  const detected = Array.from(new Set(unitNodes
+    .map((node) => getCurrencyCodeFromText(node.text?.()))
+    .filter(Boolean)));
+  if (detected.length === 1) return detected[0];
+  if (detected.length > 1) return explicit || detected[0];
+  return explicit || 'GBP';
+}
 
 function computeStyle(style) {
   if (style.bold) return 'bold';
@@ -482,6 +731,7 @@ function createPageEditPanel() {
 
     ${makeStyleSection('name', 'Nazwa produktu', 'fa-tag', 14, 30)}
     ${makeStyleSection('index', 'Indeks', 'fa-hashtag', 12, 20)}
+    ${makeStyleSection('package', 'Opak. / info', 'fa-box-open', 12, 20)}
     ${makeStyleSection('price', 'Cena', 'fa-badge-dollar', 16, 30)}
     ${makeStyleSection('rating', 'Ranking', 'fa-ranking-star', 12, 20)}
 
@@ -547,6 +797,7 @@ function createPageEditPanel() {
 }
 
 function applyStyle(obj, style) {
+  const textDecoration = style.underline ? 'underline' : '';
 
   // 🔹 jeśli to GROUP (np. cena)
 if (obj instanceof Konva.Group) {
@@ -556,6 +807,19 @@ if (obj instanceof Konva.Group) {
     // styl TAK, rozmiar NIE
     child.fill(style.color);
     child.fontFamily(style.fontFamily);
+    if (isPriceGroup && typeof child.stroke === 'function') {
+      const rawStrokeFlag = child.getAttr?.('priceStrokeManaged');
+      const hasManagedStrokeFlag = typeof rawStrokeFlag === 'boolean';
+      const hasVisibleStroke = !!child.stroke?.() && Number(child.strokeWidth?.() || 0) > 0;
+      const shouldKeepStroke = hasManagedStrokeFlag
+        ? rawStrokeFlag
+        : (hasVisibleStroke && Math.abs(Number(child.strokeWidth?.() || 0) - 2) > 0.01);
+      if (shouldKeepStroke) {
+        child.stroke(style.color);
+      } else {
+        child.stroke(null);
+      }
+    }
 
     if (isPriceGroup) {
       // tylko główna cena dziedziczy pogrubienie/italic
@@ -566,7 +830,9 @@ if (obj instanceof Konva.Group) {
     }
 
     child.setAttr('underline', style.underline);
+    if (typeof child.textDecoration === 'function') child.textDecoration(textDecoration);
   });
+  if (isPriceGroup && obj.setAttr) obj.setAttr('priceTextColor', style.color);
   return;
 }
 
@@ -579,9 +845,174 @@ if (obj instanceof Konva.Group) {
   obj.fill(style.color);
   obj.fontStyle(computeStyle(style));
   obj.setAttr('underline', style.underline);
+  if (typeof obj.textDecoration === 'function') obj.textDecoration(textDecoration);
+}
+
+function applyStyleToMatchingPageNodes(page, predicate, style) {
+  getPageMatchingNodes(page, predicate).forEach((node) => {
+    applyStyle(node, style);
+  });
+}
+
+function isDirectPriceGroupNode(priceGroup) {
+  if (!(priceGroup instanceof Konva.Group) || !priceGroup.getAttr) return false;
+  const directModuleId = String(priceGroup.getAttr('directModuleId') || '').trim();
+  if (directModuleId) return true;
+  const parent = typeof priceGroup.getParent === 'function' ? priceGroup.getParent() : null;
+  return !!(parent && parent.getAttr && parent.getAttr('isDirectCustomModuleGroup'));
+}
+
+function refreshPriceGroupLayout(priceGroup, page) {
+  if (!(priceGroup instanceof Konva.Group)) return;
+
+  const textNodes = priceGroup.getChildren().filter((node) => node instanceof Konva.Text);
+  const main =
+    textNodes.find((node) => node.getAttr && (
+      node.getAttr('pricePart') === 'main' || node.getAttr('priceRole') === 'major'
+    )) ||
+    textNodes[0] ||
+    null;
+  const dec =
+    textNodes.find((node) => node.getAttr && (
+      node.getAttr('pricePart') === 'dec' || node.getAttr('priceRole') === 'minor'
+    )) ||
+    textNodes[1] ||
+    null;
+  const unit =
+    priceGroup.findOne('.priceUnit') ||
+    textNodes.find((node) => node.getAttr && (
+      node.getAttr('pricePart') === 'unit' ||
+      node.getAttr('isPriceUnit') ||
+      node.getAttr('priceRole') === 'unit' ||
+      node.getAttr('workspaceKind') === 'currencySymbol'
+    )) ||
+    textNodes[2] ||
+    null;
+
+  if (main && dec) {
+    const gap = 4;
+    if (typeof dec.x === 'function') dec.x((main.width?.() || 0) + gap);
+    if (typeof dec.y === 'function') dec.y((main.height?.() || 0) * 0.10);
+    if (unit && typeof unit.x === 'function') unit.x((main.width?.() || 0) + gap);
+    if (unit && typeof unit.y === 'function') unit.y((dec.height?.() || 0) * 1.5);
+  }
+
+  if (isDirectPriceGroupNode(priceGroup)) {
+    try {
+      window.CustomStyleDirectHooks?.bindDirectPriceGroupEditor?.(priceGroup, page);
+    } catch (_e) {}
+  }
+}
+
+function syncLegacyPageSettingsFromStyles(page, styles, changedTypes = null) {
+  if (!page) return;
+  if (!page.settings) page.settings = {};
+  if (!changedTypes || changedTypes.name) {
+    page.settings.nameSize = styles.nameStyle.size;
+    page.settings.nameColor = styles.nameStyle.color;
+  }
+  if (!changedTypes || changedTypes.index) {
+    page.settings.indexSize = styles.indexStyle.size;
+    page.settings.indexColor = styles.indexStyle.color;
+  }
+  if (!changedTypes || changedTypes.package) {
+    page.settings.packageSize = styles.packageStyle.size;
+    page.settings.packageColor = styles.packageStyle.color;
+  }
+  if (!changedTypes || changedTypes.price) {
+    page.settings.priceSize = styles.priceStyle.size;
+    page.settings.priceColor = styles.priceStyle.color;
+  }
+  if (!changedTypes || changedTypes.rating) {
+    page.settings.ratingSize = styles.ratingStyle.size;
+    page.settings.ratingColor = styles.ratingStyle.color;
+  }
+}
+
+function applyPageEditStylesToPage(page, styles, selectedCurrency, options = {}) {
+  if (!page || page.isCover) return;
+  if (!page.settings) page.settings = {};
+  const changedTypes = options.changedTypes || {
+    name: true,
+    index: true,
+    package: true,
+    price: true,
+    rating: true
+  };
+
+  if (changedTypes.name) page.settings.nameStyle = normalizeResolvedStyle(styles.nameStyle, DEFAULT_STYLES.nameStyle);
+  if (changedTypes.index) page.settings.indexStyle = normalizeResolvedStyle(styles.indexStyle, DEFAULT_STYLES.indexStyle);
+  if (changedTypes.package) page.settings.packageStyle = normalizeResolvedStyle(styles.packageStyle, DEFAULT_STYLES.packageStyle);
+  if (changedTypes.price) page.settings.priceStyle = normalizeResolvedStyle(styles.priceStyle, DEFAULT_STYLES.priceStyle);
+  if (changedTypes.rating) page.settings.ratingStyle = normalizeResolvedStyle(styles.ratingStyle, DEFAULT_STYLES.ratingStyle);
+  syncLegacyPageSettingsFromStyles(page, styles, changedTypes);
+  page.settings.currency = normalizeCurrencyCode(selectedCurrency);
+
+  if (changedTypes.name) {
+    applyStyleToMatchingPageNodes(page, (node) =>
+      node instanceof Konva.Text &&
+      node.getAttr &&
+      node.getAttr('isName'),
+    page.settings.nameStyle);
+  }
+
+  if (changedTypes.index) {
+    applyStyleToMatchingPageNodes(page, (node) =>
+      node instanceof Konva.Text &&
+      node.getAttr &&
+      node.getAttr('isIndex'),
+    page.settings.indexStyle);
+  }
+
+  if (changedTypes.package) {
+    applyStyleToMatchingPageNodes(page, (node) =>
+      node instanceof Konva.Text &&
+      node.getAttr &&
+      node.getAttr('isCustomPackageInfo'),
+    page.settings.packageStyle);
+  }
+
+  getPageMatchingNodes(page, (node) =>
+    node instanceof Konva.Group &&
+    node.getAttr &&
+    node.getAttr('isPriceGroup')
+  ).forEach((priceGroup) => {
+    if (changedTypes.price) {
+      applyStyle(priceGroup, page.settings.priceStyle);
+      applyPriceScale(priceGroup, page.settings.priceStyle.size);
+    }
+    updatePriceCurrency(priceGroup, selectedCurrency);
+    refreshPriceGroupLayout(priceGroup, page);
+  });
+
+  if (changedTypes.rating) {
+    applyStyleToMatchingPageNodes(page, (node) =>
+      node instanceof Konva.Text &&
+      node.getAttr &&
+      node.getAttr('isRating'),
+    page.settings.ratingStyle);
+  }
+
+  updateDirectCustomModuleCurrency(page, selectedCurrency);
+  page.layer.batchDraw();
+  page.transformerLayer?.batchDraw?.();
+  if (typeof window.dispatchCanvasModified === 'function') {
+    window.dispatchCanvasModified(page.stage, { historyMode: 'immediate', historySource: 'page-edit-apply' });
+  } else {
+    window.dispatchEvent?.(new CustomEvent('canvasModified', {
+      detail: {
+        stage: page.stage,
+        historyMode: 'immediate',
+        historySource: 'page-edit-apply'
+      }
+    }));
+  }
 }
 
 window.openPageEdit = function(page) {
+  try {
+    window.closeBackgroundSidePanel?.({ restorePageEditor: false, resetToolbarState: true });
+  } catch (_e) {}
   if (pageEditPanel && pageEditPanel.classList?.contains('imgfx-side-panel')) {
     window.destroyPageEditPanel?.();
   }
@@ -603,6 +1034,7 @@ window.openPageEdit = function(page) {
   const applyScopeBox = document.getElementById('applyScopeBox');
   const applyScopeLabel = document.getElementById('applyScopeLabel');
   const applyScopeHint = document.getElementById('applyScopeHint');
+  const loadedStyles = {};
 
   const updateApplyScopeUI = () => {
     const isAll = applyToAllCheckbox.checked;
@@ -620,7 +1052,8 @@ window.openPageEdit = function(page) {
   };
 
   const loadStyle = (type) => {
-    const s = page.settings[type + 'Style'] || DEFAULT_STYLES[type + 'Style'];
+    const s = resolvePagePanelStyle(page, type);
+    loadedStyles[type] = normalizeResolvedStyle(s, DEFAULT_STYLES[type + 'Style'] || DEFAULT_STYLES.nameStyle);
     document.getElementById(type + 'Size').value = s.size;
     document.getElementById(type + 'Font').value = s.fontFamily;
     document.getElementById(type + 'Color').value = s.color;
@@ -633,8 +1066,8 @@ window.openPageEdit = function(page) {
     });
   };
 
-  ['name', 'index', 'price', 'rating'].forEach(loadStyle);
-  const normalizedCurrency = String(page.settings?.currency || 'GBP').trim().toUpperCase();
+  ['name', 'index', 'package', 'price', 'rating'].forEach(loadStyle);
+  const normalizedCurrency = detectPageCurrency(page);
   currencySelect.value = ['PLN', 'EUR', 'GBP'].includes(normalizedCurrency) ? normalizedCurrency : 'GBP';
   applyToAllCheckbox.checked = false;
   updateApplyScopeUI();
@@ -654,7 +1087,7 @@ window.openPageEdit = function(page) {
 
   applyToAllCheckbox.addEventListener('change', updateApplyScopeUI);
 
-  document.getElementById('applyPageEditBtn').onclick = () => {
+document.getElementById('applyPageEditBtn').onclick = () => {
     const applyToAll = applyToAllCheckbox.checked;
     const targetPages = applyToAll ? pages : [page];
     const selectedCurrency = currencySelect.value;
@@ -677,6 +1110,15 @@ window.openPageEdit = function(page) {
         italic: document.getElementById('indexItalic').checked,
         underline: document.getElementById('indexUnderline').checked
       },
+
+      packageStyle: {
+        size: parseInt(document.getElementById('packageSize').value),
+        fontFamily: document.getElementById('packageFont').value,
+        color: document.getElementById('packageColor').value,
+        bold: document.getElementById('packageBold').checked,
+        italic: document.getElementById('packageItalic').checked,
+        underline: document.getElementById('packageUnderline').checked
+      },
     
       priceStyle: {
         size: parseInt(document.getElementById('priceSize').value),
@@ -697,46 +1139,18 @@ window.openPageEdit = function(page) {
       },
 };
 
+    const changedTypes = {
+      name: !areResolvedStylesEqual(loadedStyles.name, newStyles.nameStyle),
+      index: !areResolvedStylesEqual(loadedStyles.index, newStyles.indexStyle),
+      package: !areResolvedStylesEqual(loadedStyles.package, newStyles.packageStyle),
+      price: !areResolvedStylesEqual(loadedStyles.price, newStyles.priceStyle),
+      rating: !areResolvedStylesEqual(loadedStyles.rating, newStyles.ratingStyle)
+    };
 
-targetPages.forEach(p => {
-  if (p.isCover) return;
-  if (!p.settings) p.settings = {};
 
-  Object.assign(p.settings, newStyles);
-  p.settings.currency = selectedCurrency;
-
-  p.layer.getChildren().forEach(obj => {
-
-  // === TEKSTY — stylizacja dla wszystkich typów tekstów ===
-
-  const isName = obj.getAttr('isName');
-  const isIndex = obj.getAttr('isIndex');
-  const isPrice = obj.getAttr('isPrice');
-  const isRating = obj.getAttr('isRating');
-
-  if (isName) {
-    applyStyle(obj, p.settings.nameStyle);
-  }
-
-  if (isIndex) {
-    applyStyle(obj, p.settings.indexStyle);
-  }
-
-if (isPrice) {
-  applyStyle(obj, p.settings.priceStyle);
-  updatePriceCurrency(obj, selectedCurrency);
-  applyPriceScale(obj, p.settings.priceStyle.size);
-}
-
-  if (isRating) {
-    applyStyle(obj, p.settings.ratingStyle);
-  }
-
-});
-
-p.layer.batchDraw();
-
-});
+    targetPages.forEach(p => {
+      applyPageEditStylesToPage(p, newStyles, selectedCurrency, { changedTypes });
+    });
 
 
       
@@ -766,10 +1180,6 @@ p.layer.batchDraw();
         };
         reader.readAsDataURL(bannerInput.files[0]);
       }
-      
-           // === Zamykamy panel po zapisie zmian strony ===
-      
-      closePanel();
     };
 
     // === Anuluj zmiany (nie dotykamy pudełek) ===
@@ -882,23 +1292,114 @@ function applyPriceScale(priceGroup, priceSize) {
   priceGroup.scaleY(scale);
 }
 
+function getCurrencySymbolByCode(currency) {
+  const normalized = normalizeCurrencyCode(currency);
+  if (normalized === 'EUR') return '€';
+  if (normalized === 'GBP') return '£';
+  return 'zł';
+}
+
+function fitCurrencyTextNodeToContent(node) {
+  if (!(node instanceof Konva.Text)) return;
+  const text = String(node.text?.() || '');
+  if (!text) return;
+  const measured = typeof node.measureSize === 'function' ? node.measureSize(text) : null;
+  const padding = Math.max(0, Number(node.padding?.() || 0));
+  const strokeWidth = Math.max(0, Number(node.strokeWidth?.() || 0));
+  const minWidth = Math.max(12, Math.ceil(Number(measured?.width || 0) + padding * 2 + strokeWidth + 2));
+  if (typeof node.width !== 'function') return;
+  const currentWidth = Number(node.width() || 0);
+  if (!Number.isFinite(currentWidth) || currentWidth < minWidth) {
+    node.width(minWidth);
+  }
+}
+
 function updatePriceCurrency(priceGroup, currency) {
   if (!(priceGroup instanceof Konva.Group)) return;
 
-  const unit = priceGroup.findOne('.priceUnit');
+  const unit =
+    priceGroup.findOne('.priceUnit') ||
+    (priceGroup.find((node) => {
+      if (!(node instanceof Konva.Text)) return false;
+      if (!node.getAttr) return false;
+      return (
+        node.getAttr('pricePart') === 'unit' ||
+        node.getAttr('isPriceUnit') ||
+        node.getAttr('priceRole') === 'unit' ||
+        node.getAttr('workspaceKind') === 'currencySymbol'
+      );
+    })[0] || null);
   if (!unit) return;
 
-  const text = unit.text(); // np. "€ / KG"
-  const parts = text.split(' '); 
-  if (parts.length < 2) return;
+  const symbol = getCurrencySymbolByCode(currency);
+  const text = String(unit.text?.() || '').trim();
+  if (!text) {
+    unit.text(symbol);
+    fitCurrencyTextNodeToContent(unit);
+    return;
+  }
+  if (!text.includes('/')) {
+    unit.text(symbol);
+    fitCurrencyTextNodeToContent(unit);
+    return;
+  }
+  const slashIndex = text.indexOf('/');
+  const unitPart = slashIndex >= 0 ? text.slice(slashIndex).trim() : '';
+  unit.text(unitPart ? `${symbol} ${unitPart}` : symbol);
+  fitCurrencyTextNodeToContent(unit);
+}
 
-  const unitPart = parts.slice(1).join(' '); // "/ KG"
+function updateCatalogEntryCurrencyForSlot(page, slotIndex, currencyCode, currencySymbol) {
+  if (!Number.isFinite(slotIndex) || slotIndex < 0) return;
+  if (!Array.isArray(page?.products) || !page.products[slotIndex]) return;
+  page.products[slotIndex].PRICE_CURRENCY_SYMBOL = currencySymbol;
+  page.products[slotIndex].PRICE_CURRENCY_CODE = currencyCode;
+}
 
-  let symbol = 'zł';
-  if (currency === 'EUR') symbol = '€';
-  if (currency === 'GBP') symbol = '£';
+function resolveSlotIndexFromNode(node) {
+  let current = node;
+  while (current) {
+    const slotIndex = Number(current.getAttr?.('slotIndex'));
+    if (Number.isFinite(slotIndex) && slotIndex >= 0) return slotIndex;
+    current = typeof current.getParent === 'function' ? current.getParent() : null;
+  }
+  return null;
+}
 
-  unit.text(`${symbol} ${unitPart}`);
+function updateDirectCustomModuleCurrency(page, currency) {
+  if (!page || !page.layer || typeof page.layer.find !== 'function') return;
+
+  const normalizedCurrency = normalizeCurrencyCode(currency);
+  const nextSymbol = getCurrencySymbolByCode(normalizedCurrency);
+  const directPriceGroups = page.layer.find((node) => {
+    if (!(node instanceof Konva.Group)) return false;
+    if (!node.getAttr || !node.getAttr('isPriceGroup')) return false;
+    const directModuleId = String(node.getAttr('directModuleId') || '').trim();
+    if (directModuleId) return true;
+    const parent = typeof node.getParent === 'function' ? node.getParent() : null;
+    return !!(parent && parent.getAttr && parent.getAttr('isDirectCustomModuleGroup'));
+  });
+
+  directPriceGroups.forEach((priceGroup) => {
+    updatePriceCurrency(priceGroup, normalizedCurrency);
+    refreshPriceGroupLayout(priceGroup, page);
+    const slotIndex = resolveSlotIndexFromNode(priceGroup);
+    updateCatalogEntryCurrencyForSlot(page, slotIndex, normalizedCurrency, nextSymbol);
+  });
+
+  const standaloneCurrencyNodes = page.layer.find((node) => {
+    if (!(node instanceof Konva.Text)) return false;
+    if (!node.getAttr || node.getAttr('workspaceKind') !== 'currencySymbol') return false;
+    const parent = typeof node.getParent === 'function' ? node.getParent() : null;
+    return !(parent && parent.getAttr && parent.getAttr('isPriceGroup'));
+  });
+
+  standaloneCurrencyNodes.forEach((node) => {
+    node.text(nextSymbol);
+    fitCurrencyTextNodeToContent(node);
+    const slotIndex = resolveSlotIndexFromNode(node);
+    updateCatalogEntryCurrencyForSlot(page, slotIndex, normalizedCurrency, nextSymbol);
+  });
 }
 
 

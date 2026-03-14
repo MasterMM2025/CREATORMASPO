@@ -363,6 +363,7 @@
   let activeAssetKind = "gradient";
   const imageElementCache = new Map();
   let importedBackgroundAsset = null;
+  window.__PROJECT_BACKGROUND_DEFAULT = window.__PROJECT_BACKGROUND_DEFAULT || null;
   let previewState = {
     page: null,
     originalFill: null,
@@ -617,6 +618,49 @@
     page.settings.backgroundImageSrc = bg.getAttr("backgroundImageSrc") || null;
   }
 
+  function cloneBackgroundDefaultPayload(payload) {
+    if (!payload || typeof payload !== "object") return null;
+    try {
+      return JSON.parse(JSON.stringify(payload));
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  function setProjectBackgroundDefault(payload) {
+    window.__PROJECT_BACKGROUND_DEFAULT = cloneBackgroundDefaultPayload(payload);
+  }
+
+  function syncProjectBackgroundDefaultFromPage(page) {
+    if (!page || !page.settings) return;
+    const kind = String(page.settings.backgroundKind || "color");
+    const opacityRaw = Number(page.settings.pageOpacity);
+    const opacity = Number.isFinite(opacityRaw) ? Math.max(0, Math.min(1, opacityRaw)) : 1;
+    if (kind === "gradient" && page.settings.backgroundGradient) {
+      setProjectBackgroundDefault({
+        kind: "gradient",
+        fill: page.settings.pageBgColor || "#ffffff",
+        opacity,
+        gradient: normalizeGradientPreset(page.settings.backgroundGradient)
+      });
+      return;
+    }
+    if (kind === "image" && page.settings.backgroundImageSrc) {
+      setProjectBackgroundDefault({
+        kind: "image",
+        fill: page.settings.pageBgColor || "#ffffff",
+        opacity,
+        imageSrc: String(page.settings.backgroundImageSrc || "")
+      });
+      return;
+    }
+    setProjectBackgroundDefault({
+      kind: "color",
+      fill: page.settings.pageBgColor || "#ffffff",
+      opacity
+    });
+  }
+
   function redrawPage(page) {
     if (!page) return;
     try { page.layer?.batchDraw?.(); } catch (_e) {}
@@ -726,10 +770,14 @@
           for (const page of pages) {
             await applyImageToPage(page, imageAsset.originalSrc);
           }
+          const sourcePage = getActivePage() || pages[0] || null;
+          if (sourcePage) syncProjectBackgroundDefaultFromPage(sourcePage);
           return;
         }
         const preset = getPresetById(activePresetId);
         pages.forEach((page) => applyGradientToPage(page, preset));
+        const sourcePage = getActivePage() || pages[0] || null;
+        if (sourcePage) syncProjectBackgroundDefaultFromPage(sourcePage);
       });
     }
 
@@ -777,6 +825,31 @@
   window.applySavedBackgroundGradient = function(page, gradientPreset) {
     if (!page || !gradientPreset) return;
     applyGradientToPage(page, gradientPreset);
+  };
+
+  window.applyProjectDefaultBackgroundToPage = async function(page) {
+    const payload = cloneBackgroundDefaultPayload(window.__PROJECT_BACKGROUND_DEFAULT);
+    if (!page || !payload) return false;
+    if (payload.kind === "image" && payload.imageSrc) {
+      return !!(await applyImageToPage(page, payload.imageSrc));
+    }
+    if (payload.kind === "gradient" && payload.gradient) {
+      applyGradientToPage(page, payload.gradient);
+      return true;
+    }
+    const bg = getPageBg(page);
+    if (!bg) return false;
+    clearImageFromBackgroundNode(bg);
+    clearGradientFromBackgroundNode(bg);
+    const fill = String(payload.fill || "#ffffff");
+    bg.fillPriority("color");
+    bg.fill(fill);
+    bg.opacity(Number.isFinite(Number(payload.opacity)) ? Number(payload.opacity) : 1);
+    bg.setAttr("backgroundFill", fill);
+    bg.setAttr("backgroundKind", "color");
+    syncPageSettings(page, bg);
+    redrawPage(page);
+    return true;
   };
 
   window.__TLO_GRADIENT_PRESETS = PRESETS;

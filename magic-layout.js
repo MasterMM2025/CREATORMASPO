@@ -3,6 +3,116 @@
   const BACKDROP_ID = "magicLayoutBackdrop";
   const STYLE_ID = "magicLayoutStyles";
   const MAX_ROWS = 6;
+  const CUSTOM_STYLES_STORAGE_KEY = "styl_wlasny_custom_styles_v1";
+  const CUSTOM_STYLES_REMOTE_PATH = "styles/styles.json";
+  const LAST_SELECTED_MODULE_STYLE_STORAGE_KEY = "styl_wlasny_last_module_layout_style_v1";
+  const CUSTOM_STYLES_BUCKET = "gs://pdf-creator-f7a8b.firebasestorage.app";
+  const LOCKED_SYSTEM_STYLE_IDS = new Set(["styl-numer-1", "styl-numer-2", "styl-numer-3"]);
+
+  let customStylesSyncPromise = null;
+
+  function normalizeCustomStyleList(list) {
+    return (Array.isArray(list) ? list : []).filter((item) => {
+      const id = String(item?.id || "").trim();
+      const label = String(item?.label || "").trim();
+      if (LOCKED_SYSTEM_STYLE_IDS.has(id)) return false;
+      return !!id && !!label && item?.config && typeof item.config === "object";
+    });
+  }
+
+  function loadCustomStylesFromLocalStorage() {
+    try {
+      const raw = localStorage.getItem(CUSTOM_STYLES_STORAGE_KEY);
+      return normalizeCustomStyleList(JSON.parse(raw || "[]"));
+    } catch (_err) {
+      return [];
+    }
+  }
+
+  function saveCustomStylesToLocalStorage(list) {
+    try {
+      localStorage.setItem(CUSTOM_STYLES_STORAGE_KEY, JSON.stringify(normalizeCustomStyleList(list)));
+    } catch (_err) {}
+  }
+
+  function mergeCustomStyleLists(primary, secondary) {
+    const merged = [];
+    const seen = new Map();
+    [...normalizeCustomStyleList(secondary), ...normalizeCustomStyleList(primary)].forEach((item) => {
+      const id = String(item?.id || "").trim();
+      if (!id) return;
+      const copy = JSON.parse(JSON.stringify(item));
+      if (seen.has(id)) {
+        merged[seen.get(id)] = copy;
+        return;
+      }
+      seen.set(id, merged.length);
+      merged.push(copy);
+    });
+    return merged;
+  }
+
+  function registerCustomStyleDefinitions(list) {
+    if (typeof window.registerStylWlasnyModuleLayoutStyle !== "function") return;
+    normalizeCustomStyleList(list).forEach((styleDef) => {
+      try {
+        window.registerStylWlasnyModuleLayoutStyle(styleDef);
+      } catch (_err) {}
+    });
+  }
+
+  async function loadCustomStylesFromRemoteStorage() {
+    const api = window.firebaseStorageExports || await import("https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js");
+    const refFn = api?.ref;
+    const getDownloadURLFn = api?.getDownloadURL;
+    const getStorageFn = api?.getStorage;
+    if (
+      typeof refFn !== "function" ||
+      typeof getDownloadURLFn !== "function"
+    ) {
+      throw new Error("Brak API Firebase Storage.");
+    }
+    const storage = window.firebaseStorage || (typeof getStorageFn === "function"
+      ? getStorageFn(undefined, CUSTOM_STYLES_BUCKET)
+      : null);
+    if (!storage) {
+      throw new Error("Brak połączenia z Firebase Storage.");
+    }
+    const fileRef = refFn(storage, CUSTOM_STYLES_REMOTE_PATH);
+    const url = await getDownloadURLFn(fileRef);
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return normalizeCustomStyleList(await response.json());
+  }
+
+  async function ensureMagicLayoutCustomStylesReady() {
+    if (!customStylesSyncPromise) {
+      customStylesSyncPromise = (async () => {
+        const localStyles = loadCustomStylesFromLocalStorage();
+        if (localStyles.length) {
+          registerCustomStyleDefinitions(localStyles);
+        }
+        try {
+          const remoteStyles = await loadCustomStylesFromRemoteStorage();
+          const merged = mergeCustomStyleLists(remoteStyles, localStyles);
+          saveCustomStylesToLocalStorage(merged);
+          registerCustomStyleDefinitions(merged);
+          return merged;
+        } catch (err) {
+          console.warn("Magic Layout: nie udało się wczytać styles/styles.json:", err);
+          return localStyles;
+        }
+      })();
+    }
+    try {
+      return await customStylesSyncPromise;
+    } catch (err) {
+      customStylesSyncPromise = null;
+      throw err;
+    }
+  }
 
   function ensureStyles() {
     if (document.getElementById(STYLE_ID)) return;
@@ -741,6 +851,45 @@
     return styles;
   }
 
+  function loadRememberedModuleStyleId() {
+    try {
+      return String(localStorage.getItem(LAST_SELECTED_MODULE_STYLE_STORAGE_KEY) || "").trim();
+    } catch (_err) {
+      return "";
+    }
+  }
+
+  function saveRememberedModuleStyleId(styleId) {
+    try {
+      const safeId = String(styleId || "").trim();
+      if (!safeId) return;
+      localStorage.setItem(LAST_SELECTED_MODULE_STYLE_STORAGE_KEY, safeId);
+    } catch (_err) {}
+  }
+
+  function rememberFixedStyleMode(mode) {
+    const safeMode = String(mode || "").trim();
+    if (!safeMode.startsWith("style:")) return;
+    const styleId = String(safeMode.slice(6) || "").trim();
+    if (!styleId) return;
+    saveRememberedModuleStyleId(styleId);
+  }
+
+  function getPreferredMagicLayoutStyleId(page) {
+    const availableIds = new Set(getAvailableModuleStyleOptions().map((item) => String(item?.id || "").trim()).filter(Boolean));
+    const rememberedStyleId = loadRememberedModuleStyleId();
+    if (rememberedStyleId && availableIds.has(rememberedStyleId)) return rememberedStyleId;
+    const currentPageStyles = getCurrentPageStyleIds(page);
+    if (currentPageStyles.length === 1 && availableIds.has(currentPageStyles[0])) {
+      return currentPageStyles[0];
+    }
+    return "default";
+  }
+
+  function getPreferredMagicLayoutStyleMode(page) {
+    return `style:${getPreferredMagicLayoutStyleId(page)}`;
+  }
+
   function getModuleStyleDefinition(styleId) {
     const safeId = String(styleId || "default").trim() || "default";
     const registered = Array.isArray(window.STYL_WLASNY_REGISTRY?.moduleLayouts)
@@ -764,8 +913,35 @@
     ));
   }
 
-  function applyStyleDefaultsToProduct(product, styleId) {
+  function hasInlineModuleLayoutEditorSnapshot(product) {
+    const snapshot = product?.MODULE_LAYOUT_EDITOR_SNAPSHOT;
+    return !!(snapshot && typeof snapshot === "object" && Array.isArray(snapshot.nodes) && snapshot.nodes.length);
+  }
+
+  function getInlineModuleLayoutSnapshotSourceStyleId(product) {
+    return String(
+      product?.MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID ||
+      product?.MODULE_LAYOUT_EDITOR_SOURCE_STYLE_ID ||
+      ""
+    ).trim();
+  }
+
+  function styleHasEditorSnapshot(styleId) {
+    const snapshot = getModuleStyleDefinition(styleId)?.config?.__editorSnapshot;
+    return !!(snapshot && typeof snapshot === "object" && Array.isArray(snapshot.nodes) && snapshot.nodes.length);
+  }
+
+  function shouldRefreshProductInlineSnapshot(product, targetStyleId) {
+    if (!product || !hasInlineModuleLayoutEditorSnapshot(product)) return false;
+    if (!styleHasEditorSnapshot(targetStyleId)) return false;
+    const sourceStyleId = getInlineModuleLayoutSnapshotSourceStyleId(product);
+    return sourceStyleId !== String(targetStyleId || "").trim();
+  }
+
+  function applyStyleDefaultsToProduct(product, styleId, options = {}) {
     if (!product || typeof product !== "object") return product;
+    const currentStyleId = String(product.MODULE_LAYOUT_STYLE_ID || "default").trim() || "default";
+    const forceSnapshotRefresh = !!options.forceSnapshotRefresh;
     const styleDef = getModuleStyleDefinition(styleId);
     const textCfg = (styleDef.config?.text && typeof styleDef.config.text === "object") ? styleDef.config.text : {};
     const noPriceCircle = !!textCfg.noPriceCircle;
@@ -780,6 +956,18 @@
     if (noPriceCircle) {
       next.PRICE_BG_STYLE_ID = "solid";
       next.PRICE_BG_IMAGE_URL = "";
+    }
+    if (next.MODULE_LAYOUT_EDITOR_SNAPSHOT && styleHasEditorSnapshot(styleDef.id)) {
+      const currentSourceStyleId = getInlineModuleLayoutSnapshotSourceStyleId(product);
+      if (currentStyleId !== styleDef.id) {
+        next.MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID = currentSourceStyleId && currentSourceStyleId !== styleDef.id
+          ? currentSourceStyleId
+          : currentStyleId;
+      } else if (forceSnapshotRefresh) {
+        next.MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID = currentSourceStyleId && currentSourceStyleId !== styleDef.id
+          ? currentSourceStyleId
+          : "__magic-layout-stale-inline__";
+      }
     }
     return next;
   }
@@ -806,8 +994,9 @@
     if (!select) return;
     const styles = getAvailableModuleStyleOptions();
     select.innerHTML = "";
-    [{ value: "auto-mix", label: "Mix stylow" }]
-      .concat(styles.map((style) => ({ value: `style:${style.id}`, label: style.label })))
+    styles
+      .map((style) => ({ value: `style:${style.id}`, label: style.label }))
+      .concat([{ value: "auto-mix", label: "Mix stylow" }])
       .forEach((item) => {
         const option = document.createElement("option");
         option.value = item.value;
@@ -816,13 +1005,14 @@
       });
   }
 
-  function syncAiStyleModeFromMain() {
+  function syncAiStyleModeFromMain(page = null) {
     const mainSelect = document.getElementById("magicLayoutStyleMode");
     const aiSelect = document.getElementById("magicLayoutAiStyleMode");
     if (!mainSelect || !aiSelect) return;
     const safeValue = String(mainSelect.value || "").trim();
     const allowedValues = new Set(Array.from(aiSelect.options || []).map((option) => String(option.value || "")));
-    aiSelect.value = allowedValues.has(safeValue) ? safeValue : "auto-mix";
+    const fallbackValue = getPreferredMagicLayoutStyleMode(page);
+    aiSelect.value = allowedValues.has(safeValue) ? safeValue : (allowedValues.has(fallbackValue) ? fallbackValue : "style:default");
   }
 
   function syncMainStyleModeFromAi() {
@@ -830,6 +1020,7 @@
     const aiSelect = document.getElementById("magicLayoutAiStyleMode");
     if (!mainSelect || !aiSelect) return;
     if (mainSelect.value !== aiSelect.value) mainSelect.value = aiSelect.value;
+    rememberFixedStyleMode(aiSelect.value);
   }
 
   function getSelectedStyleMode() {
@@ -889,15 +1080,18 @@
         const pool = next.mixedStyleIds.filter((id) => id !== currentStyle);
         styleId = pickRandomItem(pool.length ? pool : next.mixedStyleIds) || currentStyle;
       }
-      if (!styleId || styleId === currentStyle) return product;
+      const needsSnapshotRefresh = shouldRefreshProductInlineSnapshot(product, styleId);
+      if (!styleId || (styleId === currentStyle && !needsSnapshotRefresh)) return product;
       changed = true;
-      return applyStyleDefaultsToProduct(product, styleId);
+      return applyStyleDefaultsToProduct(product, styleId, {
+        forceSnapshotRefresh: needsSnapshotRefresh
+      });
     });
 
     if (!changed) return false;
     const normalizedChangedSlots = updatedProducts.reduce((acc, product, index) => {
       if (!product || typeof product !== "object") return acc;
-      if (String(product.MODULE_LAYOUT_STYLE_ID || "default") !== String(products[index]?.MODULE_LAYOUT_STYLE_ID || "default")) {
+      if (product !== products[index]) {
         acc.push(index);
       }
       return acc;
@@ -1239,6 +1433,37 @@
     if (nextRect) module.rect = nextRect;
   }
 
+  function measureRowModules(row, layer) {
+    return row.map((module) => {
+      const rect = getNodesRect(module?.nodes, layer) || module?.rect || { x: 0, y: 0, width: 1, height: 1 };
+      if (module) module.rect = rect;
+      return rect;
+    });
+  }
+
+  function fitRowModulesToBounds(row, layer, maxWidth, maxHeight, gapX) {
+    if (!Array.isArray(row) || !row.length) return measureRowModules(row, layer);
+    const safeMaxWidth = Math.max(1, Number(maxWidth) || 1);
+    const safeMaxHeight = Math.max(1, Number(maxHeight) || 1);
+    const safeGapX = Math.max(0, Number(gapX) || 0);
+
+    let rects = measureRowModules(row, layer);
+    for (let pass = 0; pass < 4; pass += 1) {
+      const contentWidth = rects.reduce((acc, rect) => acc + Math.max(1, Number(rect?.width) || 1), 0);
+      const rowWidth = contentWidth + Math.max(0, row.length - 1) * safeGapX;
+      const rowHeight = rects.reduce((acc, rect) => Math.max(acc, Math.max(1, Number(rect?.height) || 1)), 0);
+      const widthFactor = row.length > 0
+        ? (safeMaxWidth - Math.max(0, row.length - 1) * safeGapX) / Math.max(1, contentWidth)
+        : 1;
+      const heightFactor = safeMaxHeight / Math.max(1, rowHeight);
+      const fitFactor = Math.min(1, widthFactor, heightFactor);
+      if (fitFactor >= 0.999 || (!Number.isFinite(rowWidth) && !Number.isFinite(rowHeight))) break;
+      row.forEach((module) => scaleModule(module, Math.max(0.12, fitFactor), layer));
+      rects = measureRowModules(row, layer);
+    }
+    return rects;
+  }
+
   function getRecommendedRows(count) {
     if (count <= 0) return [0];
     if (count <= 3) return [count];
@@ -1301,8 +1526,9 @@
     document.getElementById("magicLayoutMarginMode").value = "auto";
     document.getElementById("magicLayoutAlign").value = "center";
     document.getElementById("magicLayoutScale").value = "fit";
-    document.getElementById("magicLayoutStyleMode").value = "auto-mix";
-    syncAiStyleModeFromMain();
+    const defaultStyleMode = getPreferredMagicLayoutStyleMode(context.page);
+    document.getElementById("magicLayoutStyleMode").value = defaultStyleMode;
+    syncAiStyleModeFromMain(context.page);
     fillRowInputs(context.modules.length);
     showError("");
     const applyBtn = backdrop.querySelector("[data-action='apply']");
@@ -1474,27 +1700,65 @@
     if (plan.error) return plan;
 
     const { modules, rowData, effectiveMarginX, usableWidth, startY } = plan;
+    const pageWidth = Number(context?.pageWidth || context?.page?.stage?.width?.() || 0);
+    const pageHeight = Number(context?.pageHeight || context?.page?.stage?.height?.() || 0);
+    const rightLimit = Math.max(effectiveMarginX, pageWidth - effectiveMarginX);
+    const bottomLimit = Math.max(0, pageHeight);
 
     let currentY = startY;
     rowData.forEach((entry) => {
-      const scaledWidths = entry.row.map((item, index) => item.rect.width * entry.moduleScales[index]);
-      const rowWidth = scaledWidths.reduce((acc, width) => acc + width, 0) + Math.max(0, entry.row.length - 1) * options.gapX;
-      let currentX = effectiveMarginX;
-      const rowAlign = Array.isArray(options.rowAlignModes) ? (options.rowAlignModes[entry.rowIndex] || options.align) : options.align;
-      if (rowAlign === "center") currentX += Math.max(0, (usableWidth - rowWidth) / 2);
-      if (rowAlign === "right") currentX += Math.max(0, usableWidth - rowWidth);
-
-      const rowHeight = entry.row.reduce((acc, item, index) => Math.max(acc, item.rect.height * entry.moduleScales[index]), 0);
+      const plannedRowHeight = entry.row.reduce((acc, item, index) => Math.max(acc, item.rect.height * entry.moduleScales[index]), 0);
       entry.row.forEach((module, index) => {
         const moduleScale = entry.moduleScales[index] || 1;
         if (Math.abs(moduleScale - 1) > 0.001) {
           scaleModule(module, moduleScale, context.page.layer);
         }
+      });
+
+      const measuredRects = fitRowModulesToBounds(
+        entry.row,
+        context.page.layer,
+        usableWidth,
+        plannedRowHeight,
+        options.gapX
+      );
+      const rowWidth = measuredRects.reduce((acc, rect) => acc + Math.max(1, Number(rect?.width) || 1), 0) + Math.max(0, entry.row.length - 1) * options.gapX;
+      const rowHeight = measuredRects.reduce((acc, rect) => Math.max(acc, Math.max(1, Number(rect?.height) || 1)), 0);
+
+      let currentX = effectiveMarginX;
+      const rowAlign = Array.isArray(options.rowAlignModes) ? (options.rowAlignModes[entry.rowIndex] || options.align) : options.align;
+      if (rowAlign === "center") currentX += Math.max(0, (usableWidth - rowWidth) / 2);
+      if (rowAlign === "right") currentX += Math.max(0, usableWidth - rowWidth);
+
+      entry.row.forEach((module, index) => {
         const moduleRect = getNodesRect(module.nodes, context.page.layer);
         if (moduleRect) module.rect = moduleRect;
         const targetY = currentY + Math.max(0, (rowHeight - module.rect.height) / 2);
         moveModule(module, currentX, targetY, context.page.layer);
-        currentX += (scaledWidths[index] || module.rect.width) + options.gapX;
+
+        const finalRect = getNodesRect(module.nodes, context.page.layer);
+        if (finalRect) {
+          module.rect = finalRect;
+          const overflowRight = (finalRect.x + finalRect.width) - rightLimit;
+          const overflowBottom = (finalRect.y + finalRect.height) - bottomLimit;
+          if (overflowRight > 0 || overflowBottom > 0) {
+            const widthFactor = overflowRight > 0
+              ? Math.max(0.12, (Math.max(1, rightLimit - finalRect.x)) / Math.max(1, finalRect.width))
+              : 1;
+            const heightFactor = overflowBottom > 0
+              ? Math.max(0.12, (Math.max(1, bottomLimit - finalRect.y)) / Math.max(1, finalRect.height))
+              : 1;
+            const fitFactor = Math.min(1, widthFactor, heightFactor);
+            if (fitFactor < 0.999) {
+              scaleModule(module, fitFactor, context.page.layer);
+              moveModule(module, currentX, targetY, context.page.layer);
+              const correctedRect = getNodesRect(module.nodes, context.page.layer);
+              if (correctedRect) module.rect = correctedRect;
+            }
+          }
+        }
+
+        currentX += Math.max(1, Number(module.rect?.width) || 1) + options.gapX;
       });
 
       currentY += rowHeight + options.gapY;
@@ -1676,6 +1940,24 @@
     return uniqueRowsVariant([Math.ceil(left / 2), middle, Math.floor(left / 2)].filter((v) => v > 0));
   }
 
+  function buildAllRowPartitions(count, maxRows = MAX_ROWS) {
+    const out = new Map();
+    const maxRowSize = Math.max(1, Math.min(count, 8));
+    const walk = (left, acc) => {
+      if (left === 0) {
+        const normalized = uniqueRowsVariant(acc);
+        if (normalized.length && normalized.length <= maxRows) out.set(normalized.join("-"), normalized);
+        return;
+      }
+      if (acc.length >= maxRows) return;
+      for (let size = 1; size <= Math.min(left, maxRowSize); size += 1) {
+        walk(left - size, acc.concat(size));
+      }
+    };
+    walk(count, []);
+    return Array.from(out.values());
+  }
+
   function getRandomRowVariants(count) {
     const variants = new Map();
     const push = (rows) => {
@@ -1721,6 +2003,7 @@
     push(buildReverseLadderRows(count));
     push(buildEdgeHeavyRows(count));
     push(buildCenterDenseRows(count));
+    buildAllRowPartitions(count).forEach((rows) => push(rows));
 
     if (count > 3) {
       push([1, ...getRecommendedRows(count - 1)]);
@@ -1933,6 +2216,63 @@
         marginY: randomInt(baseMargin + 6, baseMargin + 18)
       }
     ];
+  }
+
+  function getGeneratedProfiles(context) {
+    const shortSide = Math.min(context.pageWidth, context.pageHeight);
+    const compact = Math.max(14, Math.round(shortSide * 0.035));
+    const standard = Math.max(22, Math.round(shortSide * 0.06));
+    const airy = Math.max(32, Math.round(shortSide * 0.09));
+    const spacious = Math.max(44, Math.round(shortSide * 0.13));
+    const isSingle = context.modules.length === 1;
+    const alignModes = ["left", "center", "right"];
+    const verticalModes = isSingle ? ["top", "center", "bottom"] : ["center", "top", "bottom"];
+    const gapPresets = [
+      { name: "micro", gapX: isSingle ? 0 : 10, gapY: isSingle ? 0 : 12 },
+      { name: "tight", gapX: isSingle ? 0 : 16, gapY: isSingle ? 0 : 18 },
+      { name: "medium", gapX: isSingle ? 0 : 24, gapY: isSingle ? 0 : 28 },
+      { name: "airy", gapX: isSingle ? 0 : 34, gapY: isSingle ? 0 : 38 }
+    ];
+    const marginPresets = [
+      { name: "compact", marginX: compact, marginY: compact },
+      { name: "standard", marginX: standard, marginY: standard },
+      { name: "airy", marginX: airy, marginY: airy },
+      { name: "spacious", marginX: spacious, marginY: spacious }
+    ];
+    const scaleBiases = isSingle
+      ? [0.46, 0.58, 0.72, 0.88, 1.02]
+      : [0.62, 0.76, 0.9, 1, 1.08];
+    const profiles = [];
+    const seen = new Set();
+
+    alignModes.forEach((align) => {
+      verticalModes.forEach((verticalMode) => {
+        gapPresets.forEach((gap) => {
+          marginPresets.forEach((margin) => {
+            scaleBiases.forEach((scaleBias) => {
+              const flavor = `generated-${context.modules.length}-${align}-${verticalMode}-${gap.name}-${margin.name}-${Math.round(scaleBias * 100)}`;
+              if (seen.has(flavor)) return;
+              seen.add(flavor);
+              profiles.push({
+                flavor,
+                align,
+                verticalMode,
+                marginMode: "auto",
+                scaleMode: "fit",
+                orderStrategy: "preserve",
+                gapX: gap.gapX,
+                gapY: gap.gapY,
+                marginX: margin.marginX,
+                marginY: margin.marginY,
+                scaleBias
+              });
+            });
+          });
+        });
+      });
+    });
+
+    return profiles;
   }
 
   function getSingleProductProfiles(context) {
@@ -2261,22 +2601,27 @@
   function buildRandomPresets(context, rounds = 1) {
     const presets = [];
     const seen = new Set();
+    const maxPresets = context.modules.length <= 2 ? 2600 : (context.modules.length <= 4 ? 3600 : 3200);
 
     for (let round = 0; round < Math.max(1, rounds); round += 1) {
       const rowsVariants = getRandomRowVariants(context.modules.length);
       const profiles = context.modules.length === 1
-        ? getSingleProductProfiles(context)
+        ? getSingleProductProfiles(context).concat(getGeneratedProfiles(context))
         : (context.modules.length === 2
-          ? getTwoProductProfiles(context)
-          : (context.modules.length === 4 ? getFourProductProfiles(context).concat(getRandomProfiles(context)) : getRandomProfiles(context)));
+          ? getTwoProductProfiles(context).concat(getGeneratedProfiles(context))
+          : (context.modules.length === 4
+            ? getFourProductProfiles(context).concat(getRandomProfiles(context), getGeneratedProfiles(context))
+            : getRandomProfiles(context).concat(getGeneratedProfiles(context))));
       const orderStrategies = getOrderStrategies(context);
       const verticalModes = getVerticalModes(context);
       shuffle(rowsVariants).forEach((rows) => {
         shuffle(profiles).forEach((profile) => {
+          if (presets.length >= maxPresets) return;
           if (context.modules.length === 1 && rows.join("-") !== "1") return;
           if (Array.isArray(profile.fixedRows) && profile.fixedRows.join("-") !== rows.join("-")) return;
           shuffle(orderStrategies).forEach((orderStrategy) => {
             shuffle(verticalModes).forEach((verticalMode) => {
+              if (presets.length >= maxPresets) return;
               const options = {
                 gapX: profile.gapX,
                 gapY: profile.gapY,
@@ -2693,11 +3038,14 @@
     return `${Math.round(Number(page?.stage?.width?.() || 0))} x ${Math.round(Number(page?.stage?.height?.() || 0))}`;
   }
 
-  function openMagicLayoutForPage(page) {
+  async function openMagicLayoutForPage(page) {
     if (!page || !page.layer || !page.stage) {
       alert("Brak aktywnej strony do ulozenia.");
       return false;
     }
+    try {
+      await ensureMagicLayoutCustomStylesReady();
+    } catch (_err) {}
     const modules = buildModulesFromPage(page);
     if (!modules.length) {
       alert("Brak produktow do automatycznego ulozenia na tej stronie.");

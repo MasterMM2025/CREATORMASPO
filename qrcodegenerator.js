@@ -7,12 +7,16 @@
   if (window.qrGeneratorLoaded) return;
   window.qrGeneratorLoaded = true;
 
+  const QR_LOGO_URL = "https://firebasestorage.googleapis.com/v0/b/pdf-creator-f7a8b.firebasestorage.app/o/szablony%20maspo%2Fmaspo%20-%20czarne%20logo%20(1).png?alt=media&token=0b9b8f84-08c4-4381-ba34-72b6744afcbb";
+
   let qrModal = null;
   let pendingQRUrl = null;
   let addMode = false;
 
   let transformer = null;
   let activeNode = null;
+  let qrLogoImagePromise = null;
+  let previewRenderSeq = 0;
 
   // ================= INIT =================
   function init() {
@@ -24,6 +28,100 @@
 
   document.addEventListener("DOMContentLoaded", init);
   window.addEventListener("excelImported", () => setTimeout(init, 200));
+
+  function loadQrLogoImage() {
+    if (qrLogoImagePromise) return qrLogoImagePromise;
+    qrLogoImagePromise = new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = QR_LOGO_URL;
+    });
+    return qrLogoImagePromise;
+  }
+
+  function drawRoundedRect(ctx, x, y, width, height, radius) {
+    const safeRadius = Math.max(0, Math.min(radius, width / 2, height / 2));
+    ctx.beginPath();
+    ctx.moveTo(x + safeRadius, y);
+    ctx.arcTo(x + width, y, x + width, y + height, safeRadius);
+    ctx.arcTo(x + width, y + height, x, y + height, safeRadius);
+    ctx.arcTo(x, y + height, x, y, safeRadius);
+    ctx.arcTo(x, y, x + width, y, safeRadius);
+    ctx.closePath();
+  }
+
+  function renderQrWithLogo(text, size, cb) {
+    const div = document.createElement("div");
+    new QRCode(div, {
+      text,
+      width: size,
+      height: size,
+      correctLevel: QRCode.CorrectLevel.H
+    });
+
+    setTimeout(async () => {
+      const sourceCanvas = div.querySelector("canvas");
+      if (!sourceCanvas) {
+        cb(null);
+        return;
+      }
+
+      const outCanvas = document.createElement("canvas");
+      outCanvas.width = size;
+      outCanvas.height = size;
+      const ctx = outCanvas.getContext("2d");
+      if (!ctx) {
+        cb(null);
+        return;
+      }
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, size, size);
+      ctx.drawImage(sourceCanvas, 0, 0, size, size);
+
+      const logo = await loadQrLogoImage();
+      if (logo) {
+        const badgeSize = Math.round(size * 0.34);
+        const logoPadding = Math.max(4, Math.round(badgeSize * 0.08));
+        const logoBox = badgeSize - (logoPadding * 2);
+        const badgeX = Math.round((size - badgeSize) / 2);
+        const badgeY = Math.round((size - badgeSize) / 2);
+
+        ctx.save();
+        ctx.shadowColor = "rgba(15,23,42,0.18)";
+        ctx.shadowBlur = Math.max(4, Math.round(size * 0.02));
+        ctx.shadowOffsetY = Math.max(2, Math.round(size * 0.01));
+        drawRoundedRect(ctx, badgeX, badgeY, badgeSize, badgeSize, Math.round(badgeSize * 0.22));
+        ctx.fillStyle = "#ffffff";
+        ctx.fill();
+        ctx.restore();
+
+        const logoWidth = Number(logo.naturalWidth || logo.width || 1);
+        const logoHeight = Number(logo.naturalHeight || logo.height || 1);
+        const scale = Math.min(logoBox / logoWidth, logoBox / logoHeight);
+        const drawWidth = Math.max(1, Math.round(logoWidth * scale));
+        const drawHeight = Math.max(1, Math.round(logoHeight * scale));
+        const logoX = Math.round(badgeX + ((badgeSize - drawWidth) / 2));
+        const logoY = Math.round(badgeY + ((badgeSize - drawHeight) / 2));
+        ctx.drawImage(logo, logoX, logoY, drawWidth, drawHeight);
+      }
+
+      let dataUrl = null;
+      try {
+        dataUrl = outCanvas.toDataURL("image/png");
+      } catch (_err) {
+        try {
+          dataUrl = sourceCanvas.toDataURL("image/png");
+        } catch (_fallbackErr) {
+          dataUrl = null;
+        }
+      }
+
+      cb(dataUrl);
+    }, 30);
+  }
 
   // ================= MODAL =================
   function openQRModal() {
@@ -68,6 +166,10 @@
         Generuj i wstaw
       </button>
 
+      <div style="margin-top:10px;text-align:center;font-size:12px;color:rgba(245,247,251,.72);">
+        QR zostanie wygenerowany z logo MASPO na środku.
+      </div>
+
       <button id="closeQR"
         style="margin-top:8px;width:100%;
                padding:13px 16px;border-radius:14px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.05);color:#f5f7fb;font-weight:700;cursor:pointer;">
@@ -103,29 +205,33 @@
     container.innerHTML = "";
     if (!text) return;
 
-    const div = document.createElement("div");
-    new QRCode(div, {
-      text,
-      width: 110,
-      height: 110,
-      correctLevel: QRCode.CorrectLevel.M
-    });
+    const renderId = ++previewRenderSeq;
+    container.innerHTML = `<div style="font-size:12px;color:rgba(245,247,251,.72);">Generowanie podglądu...</div>`;
 
-    container.appendChild(div);
+    renderQrWithLogo(text, 110, (dataUrl) => {
+      if (renderId !== previewRenderSeq) return;
+      container.innerHTML = "";
+      if (!dataUrl) {
+        container.innerHTML = `<div style="font-size:12px;color:#fecaca;">Nie udało się wygenerować podglądu QR.</div>`;
+        return;
+      }
+      const img = document.createElement("img");
+      img.src = dataUrl;
+      img.alt = "Podgląd QR";
+      img.style.cssText = "display:block;width:110px;height:110px;border-radius:10px;background:#fff;";
+      container.appendChild(img);
+    });
   }
 
   // ================= GENERATE =================
   function generateQR(text, cb) {
-    const div = document.createElement("div");
-    new QRCode(div, {
-      text,
-      width: 400,
-      height: 400,
-      correctLevel: QRCode.CorrectLevel.M
+    renderQrWithLogo(text, 400, (dataUrl) => {
+      if (!dataUrl) {
+        alert("Nie udało się wygenerować QR code.");
+        return;
+      }
+      cb(dataUrl);
     });
-
-    const canvas = div.querySelector("canvas");
-    cb(canvas.toDataURL("image/png"));
   }
 
   // ================= ADD MODE =================
