@@ -99,6 +99,7 @@
           autosaveEnabled: true,
           restoreInProgress: false
         };
+    history.pendingSnapshotPromise = history.pendingSnapshotPromise || Promise.resolve();
 
     const updateButtons = () => {
       if (typeof window.updateProjectHistoryButtons === 'function') {
@@ -223,26 +224,30 @@
     }
 
     async function snapshotNow(source, force) {
-      try {
-        if (window.__projectLoadInProgress) return;
-        if (history.isApplying || history.restoreInProgress) return;
-        const state = await maybeCall(config.snapshotFn);
-        const entry = buildEntry(state, source || 'change');
-        if (!entry) return;
+      history.pendingSnapshotPromise = history.pendingSnapshotPromise.then(async () => {
+        try {
+          if (window.__projectLoadInProgress) return;
+          if (history.isApplying || history.restoreInProgress) return;
+          const state = await maybeCall(config.snapshotFn);
+          const entry = buildEntry(state, source || 'change');
+          if (!entry) return;
 
-        if (!force && history.currentHash && entry.hash === history.currentHash) return;
+          if (!force && history.currentHash && entry.hash === history.currentHash) return;
 
-        if (history.current) {
-          history.undo.push(history.current);
-          history.undo = trim(history.undo, history.limit);
-        }
+          if (history.current) {
+            history.undo.push(history.current);
+            history.undo = trim(history.undo, history.limit);
+          }
 
-        history.current = entry;
-        history.currentHash = entry.hash;
-        history.redo = [];
-        updateButtons();
-        await persistAutosaveSoon();
-      } catch (_e) {}
+          history.current = entry;
+          history.currentHash = entry.hash;
+          history.redo = [];
+          updateButtons();
+          await persistAutosaveSoon();
+        } catch (_e) {}
+      });
+
+      return await history.pendingSnapshotPromise;
     }
 
     function scheduleSnapshot(source) {
@@ -256,6 +261,7 @@
     }
 
     async function resetHistory(state, meta) {
+      await history.pendingSnapshotPromise;
       if (history.debounceTimer) {
         clearTimeout(history.debounceTimer);
         history.debounceTimer = null;
@@ -286,6 +292,7 @@
     }
 
     async function undo() {
+      await history.pendingSnapshotPromise;
       if (!history.undo.length || history.isApplying || history.restoreInProgress) return;
       const prev = history.undo[history.undo.length - 1];
       const currentBefore = history.current;
@@ -301,6 +308,7 @@
     }
 
     async function redo() {
+      await history.pendingSnapshotPromise;
       if (!history.redo.length || history.isApplying || history.restoreInProgress) return;
       const next = history.redo[history.redo.length - 1];
       const currentBefore = history.current;

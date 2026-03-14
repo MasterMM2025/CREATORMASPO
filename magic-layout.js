@@ -931,6 +931,24 @@
     return !!(snapshot && typeof snapshot === "object" && Array.isArray(snapshot.nodes) && snapshot.nodes.length);
   }
 
+  function styleHasDirectLayoutConfig(styleId) {
+    const config = getModuleStyleDefinition(styleId)?.config;
+    const singleDirect = config?.singleDirect;
+    const familyDirect = config?.familyDirect;
+    return !!(
+      (singleDirect && typeof singleDirect === "object") ||
+      (familyDirect && typeof familyDirect === "object")
+    );
+  }
+
+  function shouldDropInlineSnapshotForStyleChange(product, targetStyleId) {
+    if (!product || !hasInlineModuleLayoutEditorSnapshot(product)) return false;
+    const nextStyleId = String(targetStyleId || "").trim();
+    if (!nextStyleId) return false;
+    if (styleHasEditorSnapshot(nextStyleId)) return false;
+    return styleHasDirectLayoutConfig(nextStyleId);
+  }
+
   function shouldRefreshProductInlineSnapshot(product, targetStyleId) {
     if (!product || !hasInlineModuleLayoutEditorSnapshot(product)) return false;
     if (!styleHasEditorSnapshot(targetStyleId)) return false;
@@ -956,6 +974,11 @@
     if (noPriceCircle) {
       next.PRICE_BG_STYLE_ID = "solid";
       next.PRICE_BG_IMAGE_URL = "";
+    }
+    if (currentStyleId !== styleDef.id && shouldDropInlineSnapshotForStyleChange(product, styleDef.id)) {
+      delete next.MODULE_LAYOUT_EDITOR_SNAPSHOT;
+      delete next.MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID;
+      delete next.MODULE_LAYOUT_EDITOR_SOURCE_STYLE_ID;
     }
     if (next.MODULE_LAYOUT_EDITOR_SNAPSHOT && styleHasEditorSnapshot(styleDef.id)) {
       const currentSourceStyleId = getInlineModuleLayoutSnapshotSourceStyleId(product);
@@ -1933,6 +1956,28 @@
     return uniqueRowsVariant([2, ...getRecommendedRows(count - 4), 2]);
   }
 
+  function buildTwinColumnRows(count) {
+    if (count <= 0) return [0];
+    if (count <= 2) return [count];
+    const rowCount = Math.min(MAX_ROWS, Math.max(1, Math.ceil(count / 2)));
+    const rows = Array(rowCount).fill(1);
+    let remaining = count - rowCount;
+
+    for (let i = 0; i < rowCount && remaining > 0; i += 1) {
+      rows[i] += 1;
+      remaining -= 1;
+    }
+
+    let cursor = 0;
+    while (remaining > 0) {
+      rows[cursor % rowCount] += 1;
+      remaining -= 1;
+      cursor += 2;
+    }
+
+    return uniqueRowsVariant(rows);
+  }
+
   function buildCenterDenseRows(count) {
     if (count <= 4) return getRecommendedRows(count);
     const middle = Math.min(4, Math.max(2, Math.ceil(count / 2)));
@@ -2214,6 +2259,76 @@
         gapY: randomInt(32, 46),
         marginX: randomInt(baseMargin + 2, baseMargin + 14),
         marginY: randomInt(baseMargin + 6, baseMargin + 18)
+      },
+      {
+        flavor: "editorial-sweep",
+        align: "center",
+        marginMode: "auto",
+        scaleMode: "fit",
+        gapX: randomInt(12, 20),
+        gapY: randomInt(34, 52),
+        marginX: randomInt(Math.max(14, baseMargin - 6), baseMargin + 8),
+        marginY: randomInt(baseMargin + 8, baseMargin + 22)
+      },
+      {
+        flavor: "stagger-left-air",
+        align: "left",
+        marginMode: "auto",
+        scaleMode: "fit",
+        gapX: randomInt(14, 24),
+        gapY: randomInt(28, 44),
+        marginX: randomInt(16, baseMargin + 6),
+        marginY: randomInt(baseMargin + 2, baseMargin + 16)
+      },
+      {
+        flavor: "stagger-right-air",
+        align: "right",
+        marginMode: "auto",
+        scaleMode: "fit",
+        gapX: randomInt(14, 24),
+        gapY: randomInt(28, 44),
+        marginX: randomInt(16, baseMargin + 6),
+        marginY: randomInt(baseMargin + 2, baseMargin + 16)
+      },
+      {
+        flavor: "gallery-runway",
+        align: "center",
+        marginMode: "auto",
+        scaleMode: "fit",
+        gapX: randomInt(18, 26),
+        gapY: randomInt(16, 26),
+        marginX: randomInt(baseMargin, baseMargin + 12),
+        marginY: randomInt(12, baseMargin)
+      },
+      {
+        flavor: "minimal-premium",
+        align: "center",
+        marginMode: "auto",
+        scaleMode: "fit",
+        gapX: randomInt(34, 50),
+        gapY: randomInt(24, 36),
+        marginX: randomInt(baseMargin + 10, baseMargin + 24),
+        marginY: randomInt(baseMargin + 12, baseMargin + 24)
+      },
+      {
+        flavor: "cinematic-left",
+        align: "left",
+        marginMode: "auto",
+        scaleMode: "fit",
+        gapX: randomInt(10, 18),
+        gapY: randomInt(20, 34),
+        marginX: randomInt(14, baseMargin + 2),
+        marginY: randomInt(baseMargin, baseMargin + 12)
+      },
+      {
+        flavor: "cinematic-right",
+        align: "right",
+        marginMode: "auto",
+        scaleMode: "fit",
+        gapX: randomInt(10, 18),
+        gapY: randomInt(20, 34),
+        marginX: randomInt(14, baseMargin + 2),
+        marginY: randomInt(baseMargin, baseMargin + 12)
       }
     ];
   }
@@ -2418,6 +2533,231 @@
     return profiles;
   }
 
+  function getThreeProductProfiles(context) {
+    const shortSide = Math.min(context.pageWidth, context.pageHeight);
+    const compact = Math.max(18, Math.round(shortSide * 0.05));
+    const standard = Math.max(28, Math.round(shortSide * 0.08));
+    const airy = Math.max(42, Math.round(shortSide * 0.12));
+    const heavy = Math.max(58, Math.round(shortSide * 0.16));
+    const profiles = [];
+    const addProfile = (profile) => profiles.push({
+      marginMode: "auto",
+      scaleMode: "fit",
+      align: "center",
+      verticalMode: "center",
+      gapX: 18,
+      gapY: 20,
+      scaleBias: 1,
+      ...profile
+    });
+
+    [
+      { flavor: "three-row-balanced", fixedRows: [3], verticalMode: "top", gapX: 16, gapY: 0, marginX: standard, marginY: compact, moduleScaleBiases: [0.94, 0.94, 0.94] },
+      { flavor: "three-row-center-hero", fixedRows: [3], verticalMode: "top", gapX: 14, gapY: 0, marginX: compact, marginY: compact, moduleScaleBiases: [0.82, 1.18, 0.82] },
+      { flavor: "three-row-left-hero", fixedRows: [3], align: "left", verticalMode: "center", gapX: 14, gapY: 0, marginX: compact, marginY: standard, moduleScaleBiases: [1.16, 0.88, 0.7] },
+      { flavor: "three-row-right-hero", fixedRows: [3], align: "right", verticalMode: "center", gapX: 14, gapY: 0, marginX: compact, marginY: standard, moduleScaleBiases: [0.7, 0.88, 1.16] },
+      { flavor: "three-top-hero", fixedRows: [1, 2], verticalMode: "top", gapX: 18, gapY: 20, marginX: compact, marginY: standard, rowScaleBiases: [1.18, 0.74], rowAlignModes: ["center", "center"], orderStrategy: "hero-first" },
+      { flavor: "three-bottom-hero", fixedRows: [2, 1], verticalMode: "bottom", gapX: 18, gapY: 20, marginX: compact, marginY: standard, rowScaleBiases: [0.74, 1.18], rowAlignModes: ["center", "center"], orderStrategy: "hero-last" },
+      { flavor: "three-zigzag-top", fixedRows: [1, 2], verticalMode: "top", gapX: 16, gapY: 18, marginX: standard, marginY: standard, rowScaleBiases: [1.04, 0.82], rowAlignModes: ["left", "right"] },
+      { flavor: "three-zigzag-bottom", fixedRows: [2, 1], verticalMode: "bottom", gapX: 16, gapY: 18, marginX: standard, marginY: standard, rowScaleBiases: [0.82, 1.04], rowAlignModes: ["left", "right"] },
+      { flavor: "three-column-center", fixedRows: [1, 1, 1], gapX: 0, gapY: 14, marginX: standard, marginY: heavy, rowScaleBiases: [1.18, 0.92, 0.72], rowAlignModes: ["center", "center", "center"] },
+      { flavor: "three-column-left", fixedRows: [1, 1, 1], verticalMode: "top", gapX: 0, gapY: 12, marginX: compact, marginY: heavy, rowScaleBiases: [1.12, 0.88, 0.68], rowAlignModes: ["left", "left", "left"] },
+      { flavor: "three-column-right", fixedRows: [1, 1, 1], verticalMode: "bottom", gapX: 0, gapY: 12, marginX: compact, marginY: heavy, rowScaleBiases: [1.12, 0.88, 0.68], rowAlignModes: ["right", "right", "right"] },
+      { flavor: "three-pyramid", fixedRows: [1, 1, 1], gapX: 0, gapY: 16, marginX: airy, marginY: heavy, rowScaleBiases: [0.84, 1.18, 0.78], rowAlignModes: ["center", "left", "right"] }
+    ].forEach(addProfile);
+
+    return profiles;
+  }
+
+  function getFiveProductProfiles(context) {
+    const shortSide = Math.min(context.pageWidth, context.pageHeight);
+    const compact = Math.max(18, Math.round(shortSide * 0.05));
+    const standard = Math.max(28, Math.round(shortSide * 0.08));
+    const airy = Math.max(44, Math.round(shortSide * 0.12));
+    const heavy = Math.max(60, Math.round(shortSide * 0.165));
+    const profiles = [];
+    const addProfile = (profile) => profiles.push({
+      marginMode: "auto",
+      scaleMode: "fit",
+      align: "center",
+      verticalMode: "center",
+      gapX: 18,
+      gapY: 20,
+      scaleBias: 1,
+      ...profile
+    });
+
+    [
+      { flavor: "five-balanced-32", fixedRows: [3, 2], gapX: 16, gapY: 18, marginX: standard, marginY: standard, rowScaleBiases: [0.98, 0.92], rowAlignModes: ["center", "center"] },
+      { flavor: "five-balanced-23", fixedRows: [2, 3], gapX: 16, gapY: 18, marginX: standard, marginY: standard, rowScaleBiases: [0.92, 0.98], rowAlignModes: ["center", "center"] },
+      { flavor: "five-bridge", fixedRows: [2, 1, 2], gapX: 16, gapY: 16, marginX: compact, marginY: standard, rowScaleBiases: [0.82, 1.16, 0.82], rowAlignModes: ["center", "center", "center"] },
+      { flavor: "five-hero-center", fixedRows: [1, 3, 1], gapX: 18, gapY: 20, marginX: compact, marginY: standard, rowScaleBiases: [0.72, 1.16, 0.72], rowAlignModes: ["center", "center", "center"], orderStrategy: "hero-first" },
+      { flavor: "five-left-cascade", fixedRows: [1, 2, 2], gapX: 16, gapY: 18, marginX: compact, marginY: airy, rowScaleBiases: [1.12, 0.84, 0.84], rowAlignModes: ["left", "left", "center"] },
+      { flavor: "five-right-cascade", fixedRows: [2, 2, 1], gapX: 16, gapY: 18, marginX: compact, marginY: airy, rowScaleBiases: [0.84, 0.84, 1.12], rowAlignModes: ["center", "right", "right"] },
+      { flavor: "five-totem-top", fixedRows: [1, 1, 3], verticalMode: "top", gapX: 14, gapY: 14, marginX: compact, marginY: heavy, rowScaleBiases: [1.16, 0.92, 0.72], rowAlignModes: ["center", "left", "center"] },
+      { flavor: "five-totem-bottom", fixedRows: [3, 1, 1], verticalMode: "bottom", gapX: 14, gapY: 14, marginX: compact, marginY: heavy, rowScaleBiases: [0.72, 0.92, 1.16], rowAlignModes: ["center", "right", "center"] },
+      { flavor: "five-band-top", fixedRows: [5], verticalMode: "top", gapX: 10, gapY: 0, marginX: compact, marginY: compact, moduleScaleBiases: [1.1, 0.96, 0.84, 0.72, 0.6], orderStrategy: "hero-first" },
+      { flavor: "five-band-bottom", fixedRows: [5], verticalMode: "bottom", gapX: 10, gapY: 0, marginX: compact, marginY: compact, moduleScaleBiases: [0.6, 0.72, 0.84, 0.96, 1.1], orderStrategy: "hero-last" },
+      { flavor: "five-column", fixedRows: [1, 1, 1, 1, 1], gapX: 0, gapY: 10, marginX: standard, marginY: heavy + 8, rowScaleBiases: [1.18, 1.0, 0.86, 0.72, 0.58], rowAlignModes: ["center", "center", "center", "center", "center"] },
+      { flavor: "five-runway", fixedRows: [2, 1, 2], verticalMode: "center", gapX: 20, gapY: 22, marginX: airy, marginY: standard, moduleScaleBiases: [0.92, 0.92, 1.18, 0.92, 0.92], rowAlignModes: ["center", "center", "center"] }
+    ].forEach(addProfile);
+
+    return profiles;
+  }
+
+  function getSixProductProfiles(context) {
+    const shortSide = Math.min(context.pageWidth, context.pageHeight);
+    const compact = Math.max(18, Math.round(shortSide * 0.05));
+    const standard = Math.max(28, Math.round(shortSide * 0.08));
+    const airy = Math.max(44, Math.round(shortSide * 0.12));
+    const heavy = Math.max(62, Math.round(shortSide * 0.17));
+    const profiles = [];
+    const addProfile = (profile) => profiles.push({
+      marginMode: "auto",
+      scaleMode: "fit",
+      align: "center",
+      verticalMode: "center",
+      gapX: 18,
+      gapY: 20,
+      scaleBias: 1,
+      ...profile
+    });
+
+    [
+      { flavor: "six-grid-33", fixedRows: [3, 3], gapX: 14, gapY: 16, marginX: standard, marginY: standard, rowScaleBiases: [0.96, 0.96], rowAlignModes: ["center", "center"] },
+      { flavor: "six-grid-33-zigzag", fixedRows: [3, 3], gapX: 16, gapY: 18, marginX: standard, marginY: standard, rowScaleBiases: [1.02, 0.86], rowAlignModes: ["left", "right"] },
+      { flavor: "six-grid-222", fixedRows: [2, 2, 2], gapX: 16, gapY: 16, marginX: compact, marginY: standard, rowScaleBiases: [0.94, 0.94, 0.94], rowAlignModes: ["center", "center", "center"] },
+      { flavor: "six-grid-222-left", fixedRows: [2, 2, 2], verticalMode: "top", gapX: 16, gapY: 16, marginX: compact, marginY: standard, rowScaleBiases: [1.04, 0.9, 0.76], rowAlignModes: ["left", "left", "left"] },
+      { flavor: "six-grid-222-right", fixedRows: [2, 2, 2], verticalMode: "bottom", gapX: 16, gapY: 16, marginX: compact, marginY: standard, rowScaleBiases: [1.04, 0.9, 0.76], rowAlignModes: ["right", "right", "right"] },
+      { flavor: "six-band-top", fixedRows: [4, 2], verticalMode: "top", gapX: 12, gapY: 18, marginX: compact, marginY: compact, rowScaleBiases: [0.84, 1.04], rowAlignModes: ["center", "center"] },
+      { flavor: "six-band-bottom", fixedRows: [2, 4], verticalMode: "bottom", gapX: 12, gapY: 18, marginX: compact, marginY: compact, rowScaleBiases: [1.04, 0.84], rowAlignModes: ["center", "center"] },
+      { flavor: "six-cross", fixedRows: [1, 4, 1], gapX: 16, gapY: 16, marginX: airy, marginY: standard, rowScaleBiases: [0.72, 1.08, 0.72], rowAlignModes: ["center", "center", "center"] },
+      { flavor: "six-runway", fixedRows: [1, 2, 2, 1], gapX: 18, gapY: 14, marginX: standard, marginY: airy, rowScaleBiases: [0.78, 0.92, 0.92, 0.78], rowAlignModes: ["center", "left", "right", "center"] },
+      { flavor: "six-cascade-left", fixedRows: [3, 2, 1], verticalMode: "top", gapX: 16, gapY: 16, marginX: compact, marginY: standard, rowScaleBiases: [0.78, 0.96, 1.18], rowAlignModes: ["center", "left", "left"] },
+      { flavor: "six-cascade-right", fixedRows: [1, 2, 3], verticalMode: "bottom", gapX: 16, gapY: 16, marginX: compact, marginY: standard, rowScaleBiases: [1.18, 0.96, 0.78], rowAlignModes: ["right", "right", "center"] },
+      { flavor: "six-column", fixedRows: [1, 1, 1, 1, 1, 1], gapX: 0, gapY: 8, marginX: standard, marginY: heavy + 10, rowScaleBiases: [1.2, 1.04, 0.9, 0.78, 0.66, 0.54], rowAlignModes: ["center", "center", "center", "center", "center", "center"] }
+    ].forEach(addProfile);
+
+    return profiles;
+  }
+
+  function getLargeCatalogProfiles(context) {
+    const shortSide = Math.min(context.pageWidth, context.pageHeight);
+    const compact = Math.max(16, Math.round(shortSide * 0.042));
+    const standard = Math.max(24, Math.round(shortSide * 0.072));
+    const airy = Math.max(34, Math.round(shortSide * 0.098));
+    const rows = buildTwinColumnRows(context.modules.length);
+    const rowCount = Math.max(1, rows.length);
+    const centerAlignModes = rows.map(() => "center");
+    const snakeAlignModes = rows.map((_, index) => (index % 2 === 0 ? "left" : "right"));
+    const leftAlignModes = rows.map(() => "left");
+    const rightAlignModes = rows.map(() => "right");
+    const topHeavyBiases = rows.map((_, index) => Math.max(0.76, 1.1 - (index * 0.06)));
+    const bottomHeavyBiases = rows.map((_, index) => Math.max(0.76, 0.8 + (index * 0.06)));
+    const balancedBiases = rows.map((_, index) => (index % 2 === 0 ? 1.02 : 0.96));
+    const airyBiases = rows.map((_, index) => (index % 2 === 0 ? 0.96 : 1.02));
+    const profiles = [];
+    const addProfile = (profile) => profiles.push({
+      fixedRows: rows,
+      marginMode: "auto",
+      scaleMode: "fit",
+      align: "center",
+      verticalMode: "top",
+      gapX: 18,
+      gapY: 18,
+      marginX: standard,
+      marginY: compact,
+      scaleBias: 1,
+      ...profile
+    });
+
+    addProfile({
+      flavor: `large-catalog-twin-balanced-${context.modules.length}`,
+      rowAlignModes: centerAlignModes,
+      rowScaleBiases: balancedBiases
+    });
+    addProfile({
+      flavor: `large-catalog-twin-airy-${context.modules.length}`,
+      gapX: 22,
+      gapY: 24,
+      marginX: airy,
+      marginY: standard,
+      rowAlignModes: centerAlignModes,
+      rowScaleBiases: airyBiases
+    });
+    addProfile({
+      flavor: `large-catalog-twin-tight-${context.modules.length}`,
+      gapX: 12,
+      gapY: 14,
+      marginX: compact,
+      marginY: compact,
+      rowAlignModes: centerAlignModes,
+      rowScaleBiases: rows.map(() => 0.94)
+    });
+    addProfile({
+      flavor: `large-catalog-twin-left-${context.modules.length}`,
+      align: "left",
+      marginX: compact,
+      marginY: standard,
+      rowAlignModes: leftAlignModes,
+      rowScaleBiases: topHeavyBiases
+    });
+    addProfile({
+      flavor: `large-catalog-twin-right-${context.modules.length}`,
+      align: "right",
+      marginX: compact,
+      marginY: standard,
+      rowAlignModes: rightAlignModes,
+      rowScaleBiases: topHeavyBiases
+    });
+    addProfile({
+      flavor: `large-catalog-twin-snake-${context.modules.length}`,
+      gapX: 16,
+      gapY: 18,
+      marginX: standard,
+      marginY: standard,
+      rowAlignModes: snakeAlignModes,
+      rowScaleBiases: balancedBiases
+    });
+    addProfile({
+      flavor: `large-catalog-twin-tophero-${context.modules.length}`,
+      gapX: 16,
+      gapY: 18,
+      marginX: compact,
+      marginY: compact,
+      rowAlignModes: centerAlignModes,
+      rowScaleBiases: topHeavyBiases
+    });
+    addProfile({
+      flavor: `large-catalog-twin-bottomhero-${context.modules.length}`,
+      verticalMode: "bottom",
+      gapX: 16,
+      gapY: 18,
+      marginX: compact,
+      marginY: compact,
+      rowAlignModes: centerAlignModes,
+      rowScaleBiases: bottomHeavyBiases
+    });
+
+    if (rowCount >= 4) {
+      addProfile({
+        flavor: `large-catalog-twin-premium-${context.modules.length}`,
+        gapX: 24,
+        gapY: 26,
+        marginX: airy,
+        marginY: airy,
+        rowAlignModes: centerAlignModes,
+        rowScaleBiases: rows.map((_, index) => {
+          const center = (rowCount - 1) / 2;
+          const distance = Math.abs(index - center);
+          return Math.max(0.82, 1.08 - (distance * 0.08));
+        })
+      });
+    }
+
+    return profiles;
+  }
+
   function getFixedStyleFourProductProfiles(context, styleId) {
     if (!styleId) return [];
     const shortSide = Math.min(context.pageWidth, context.pageHeight);
@@ -2598,6 +2938,76 @@
     return profiles;
   }
 
+  function getPresetProfilesForContext(context) {
+    const count = Number(context?.modules?.length || 0);
+    if (count === 1) {
+      return getSingleProductProfiles(context).concat(getGeneratedProfiles(context));
+    }
+    if (count === 2) {
+      return getTwoProductProfiles(context).concat(getGeneratedProfiles(context));
+    }
+    if (count === 3) {
+      return getThreeProductProfiles(context).concat(getRandomProfiles(context), getGeneratedProfiles(context));
+    }
+    if (count === 4) {
+      return getFourProductProfiles(context).concat(getRandomProfiles(context), getGeneratedProfiles(context));
+    }
+    if (count === 5) {
+      return getFiveProductProfiles(context).concat(getRandomProfiles(context), getGeneratedProfiles(context));
+    }
+    if (count === 6) {
+      return getSixProductProfiles(context).concat(getRandomProfiles(context), getGeneratedProfiles(context));
+    }
+    if (count >= 7) {
+      return getLargeCatalogProfiles(context).concat(getRandomProfiles(context), getGeneratedProfiles(context));
+    }
+    return getRandomProfiles(context).concat(getGeneratedProfiles(context));
+  }
+
+  function buildProfileBasedSeedPresets(context, profiles, prefix) {
+    const presets = [];
+    const seen = new Set();
+    const verticalModes = getVerticalModes(context);
+    const rowVariants = getRandomRowVariants(context.modules.length);
+
+    profiles.forEach((profile, profileIndex) => {
+      const candidateRows = Array.isArray(profile.fixedRows) && profile.fixedRows.length
+        ? [uniqueRowsVariant(profile.fixedRows)]
+        : rowVariants;
+
+      candidateRows.forEach((rows, rowsIndex) => {
+        if (!rows.length || rows.reduce((acc, value) => acc + value, 0) !== context.modules.length) return;
+
+        getOrderStrategies(context).forEach((orderStrategy, orderIndex) => {
+          (profile.verticalMode ? [profile.verticalMode] : verticalModes).forEach((verticalMode, verticalIndex) => {
+            const options = {
+              gapX: profile.gapX,
+              gapY: profile.gapY,
+              marginX: profile.marginX,
+              marginY: profile.marginY,
+              marginMode: profile.marginMode,
+              align: profile.align,
+              scaleMode: profile.scaleMode,
+              orderStrategy: profile.orderStrategy || orderStrategy,
+              verticalMode,
+              styleMode: "keep",
+              scaleBias: profile.scaleBias,
+              rowAlignModes: profile.rowAlignModes,
+              rowScaleBiases: profile.rowScaleBiases,
+              moduleScaleBiases: profile.moduleScaleBiases
+            };
+            const signature = getPresetSignature(rows, options, `${prefix}:${profileIndex}:${rowsIndex}:${orderIndex}:${verticalIndex}:${profile.flavor}`);
+            if (seen.has(signature)) return;
+            seen.add(signature);
+            presets.push({ rows, options, signature, flavor: profile.flavor });
+          });
+        });
+      });
+    });
+
+    return presets;
+  }
+
   function buildRandomPresets(context, rounds = 1) {
     const presets = [];
     const seen = new Set();
@@ -2605,13 +3015,7 @@
 
     for (let round = 0; round < Math.max(1, rounds); round += 1) {
       const rowsVariants = getRandomRowVariants(context.modules.length);
-      const profiles = context.modules.length === 1
-        ? getSingleProductProfiles(context).concat(getGeneratedProfiles(context))
-        : (context.modules.length === 2
-          ? getTwoProductProfiles(context).concat(getGeneratedProfiles(context))
-          : (context.modules.length === 4
-            ? getFourProductProfiles(context).concat(getRandomProfiles(context), getGeneratedProfiles(context))
-            : getRandomProfiles(context).concat(getGeneratedProfiles(context))));
+      const profiles = getPresetProfilesForContext(context);
       const orderStrategies = getOrderStrategies(context);
       const verticalModes = getVerticalModes(context);
       shuffle(rowsVariants).forEach((rows) => {
@@ -2792,49 +3196,44 @@
       return presets;
     }
 
+    if (context.modules.length === 3) {
+      return buildProfileBasedSeedPresets(
+        context,
+        getThreeProductProfiles(context).concat(getRandomProfiles(context)),
+        "ai-three"
+      );
+    }
+
     if (context.modules.length === 4) {
-      const presets = [];
-      const seen = new Set();
-      const profiles = getFourProductProfiles(context).concat(getRandomProfiles(context));
-      const verticalModes = getVerticalModes(context);
-      const rowVariants = getRandomRowVariants(context.modules.length);
+      return buildProfileBasedSeedPresets(
+        context,
+        getFourProductProfiles(context).concat(getRandomProfiles(context)),
+        "ai-four"
+      );
+    }
 
-      profiles.forEach((profile, profileIndex) => {
-        const candidateRows = Array.isArray(profile.fixedRows) && profile.fixedRows.length
-          ? [uniqueRowsVariant(profile.fixedRows)]
-          : rowVariants;
+    if (context.modules.length === 5) {
+      return buildProfileBasedSeedPresets(
+        context,
+        getFiveProductProfiles(context).concat(getRandomProfiles(context)),
+        "ai-five"
+      );
+    }
 
-        candidateRows.forEach((rows, rowsIndex) => {
-          if (!rows.length || rows.reduce((acc, value) => acc + value, 0) !== context.modules.length) return;
+    if (context.modules.length === 6) {
+      return buildProfileBasedSeedPresets(
+        context,
+        getSixProductProfiles(context).concat(getRandomProfiles(context)),
+        "ai-six"
+      );
+    }
 
-          getOrderStrategies(context).forEach((orderStrategy, orderIndex) => {
-            (profile.verticalMode ? [profile.verticalMode] : verticalModes).forEach((verticalMode, verticalIndex) => {
-              const options = {
-                gapX: profile.gapX,
-                gapY: profile.gapY,
-                marginX: profile.marginX,
-                marginY: profile.marginY,
-                marginMode: profile.marginMode,
-                align: profile.align,
-                scaleMode: profile.scaleMode,
-                orderStrategy: profile.orderStrategy || orderStrategy,
-                verticalMode,
-                styleMode: "keep",
-                scaleBias: profile.scaleBias,
-                rowAlignModes: profile.rowAlignModes,
-                rowScaleBiases: profile.rowScaleBiases,
-                moduleScaleBiases: profile.moduleScaleBiases
-              };
-              const signature = getPresetSignature(rows, options, `ai-four:${profileIndex}:${rowsIndex}:${orderIndex}:${verticalIndex}:${profile.flavor}`);
-              if (seen.has(signature)) return;
-              seen.add(signature);
-              presets.push({ rows, options, signature, flavor: profile.flavor });
-            });
-          });
-        });
-      });
-
-      return presets;
+    if (context.modules.length >= 7) {
+      return buildProfileBasedSeedPresets(
+        context,
+        getLargeCatalogProfiles(context).concat(getRandomProfiles(context)),
+        "ai-large-catalog"
+      );
     }
 
     const recommendedRows = getRecommendedRows(context.modules.length);
@@ -2843,14 +3242,23 @@
       recommendedRows.slice().reverse(),
       buildCenterHeroRows(context.modules.length),
       buildWaveRows(context.modules.length),
-      buildCenterDenseRows(context.modules.length)
+      buildCenterDenseRows(context.modules.length),
+      buildPyramidRows(context.modules.length),
+      buildHeroTopRows(context.modules.length),
+      buildHeroBottomRows(context.modules.length),
+      buildEdgeHeavyRows(context.modules.length)
     ];
     const profiles = [
       { gapX: 24, gapY: 28, marginX: 36, marginY: 34, marginMode: "auto", align: "center", scaleMode: "fit", flavor: "ai-smart" },
       { gapX: 18, gapY: 24, marginX: 28, marginY: 28, marginMode: "auto", align: "center", scaleMode: "fit", flavor: "ai-tight" },
       { gapX: 28, gapY: 34, marginX: 42, marginY: 40, marginMode: "auto", align: "center", scaleMode: "fit", flavor: "ai-airy" },
       { gapX: 22, gapY: 30, marginX: 34, marginY: 32, marginMode: "auto", align: "left", scaleMode: "fit", flavor: "ai-left" },
-      { gapX: 22, gapY: 30, marginX: 34, marginY: 32, marginMode: "auto", align: "right", scaleMode: "fit", flavor: "ai-right" }
+      { gapX: 22, gapY: 30, marginX: 34, marginY: 32, marginMode: "auto", align: "right", scaleMode: "fit", flavor: "ai-right" },
+      { gapX: 16, gapY: 20, marginX: 24, marginY: 26, marginMode: "auto", align: "center", scaleMode: "fit", flavor: "ai-compact" },
+      { gapX: 30, gapY: 38, marginX: 46, marginY: 44, marginMode: "auto", align: "center", scaleMode: "fit", flavor: "ai-gallery" },
+      { gapX: 14, gapY: 32, marginX: 22, marginY: 36, marginMode: "auto", align: "left", scaleMode: "fit", flavor: "ai-editorial-left" },
+      { gapX: 14, gapY: 32, marginX: 22, marginY: 36, marginMode: "auto", align: "right", scaleMode: "fit", flavor: "ai-editorial-right" },
+      { gapX: 20, gapY: 18, marginX: 38, marginY: 20, marginMode: "auto", align: "center", scaleMode: "fit", flavor: "ai-runway" }
     ];
     const presets = [];
     const seen = new Set();

@@ -289,6 +289,7 @@
       currentHash: null,
       isApplying: false,
       debounceTimer: null,
+      pendingSnapshotPromise: Promise.resolve(),
       pendingApplyPromise: Promise.resolve(),
       lastAutosaveAt: 0,
       lastArchiveHash: null,

@@ -2080,12 +2080,17 @@ async function restoreSavedObjectsForPage(page, pagePayload) {
         }
 
         if (obj.type === "box") {
+            const isProductBox = !!obj.isBox && !obj.isShape && !obj.isPreset;
             const box = new Konva.Rect({
                 x: obj.x,
                 y: obj.y,
                 width: obj.width,
                 height: obj.height,
+                scaleX: obj.scaleX || 1,
+                scaleY: obj.scaleY || 1,
+                rotation: obj.rotation || 0,
                 fill: obj.fill !== undefined ? obj.fill : "#ffffff",
+                opacity: obj.opacity ?? 1,
                 stroke: obj.stroke || "rgba(0,0,0,0.06)",
                 strokeWidth: obj.strokeWidth ?? 1,
                 cornerRadius: obj.cornerRadius ?? 10,
@@ -2093,20 +2098,35 @@ async function restoreSavedObjectsForPage(page, pagePayload) {
                 shadowBlur: obj.shadowBlur ?? 30,
                 shadowOffset: { x: obj.shadowOffsetX ?? 0, y: obj.shadowOffsetY ?? 12 },
                 shadowOpacity: obj.shadowOpacity ?? 0.8,
-                draggable: true,
+                draggable: obj.draggable !== false,
                 visible: obj.visible !== false,
-                listening: obj.listening !== false
+                listening: obj.listening !== false,
+                dash: Array.isArray(obj.dash) ? obj.dash : undefined,
+                lineCap: obj.lineCap || undefined,
+                lineJoin: obj.lineJoin || undefined,
+                name: obj.name || ""
             });
 
-            box.setAttr("isBox", true);
-            box.setAttr("slotIndex", obj.slotIndex ?? null);
-            box.setAttr("isShape", !!obj.isShape);
-            box.setAttr("isPreset", !!obj.isPreset);
-            if (obj.selectable !== undefined) box.setAttr("selectable", obj.selectable);
-            box.setAttr("isHiddenByCatalogStyle", !!obj.isHiddenByCatalogStyle);
+            if (obj.shadowEnabled === false && typeof box.shadowEnabled === "function") {
+                box.shadowEnabled(false);
+            }
+            if (obj.shadowForStrokeEnabled !== undefined && typeof box.shadowForStrokeEnabled === "function") {
+                box.shadowForStrokeEnabled(!!obj.shadowForStrokeEnabled);
+            }
+            if (obj.strokeScaleEnabled !== undefined && typeof box.strokeScaleEnabled === "function") {
+                box.strokeScaleEnabled(!!obj.strokeScaleEnabled);
+            }
 
-            box.scaleX(obj.scaleX || 1);
-            box.scaleY(obj.scaleY || 1);
+            if (isProductBox) {
+                box.setAttr("isBox", true);
+                box.setAttr("slotIndex", obj.slotIndex ?? null);
+                box.setAttr("isHiddenByCatalogStyle", !!obj.isHiddenByCatalogStyle);
+            } else {
+                box.setAttr("isShape", !!obj.isShape || !!String(obj.shapeType || "").trim());
+                box.setAttr("isPreset", !!obj.isPreset);
+                if (obj.shapeType) box.setAttr("shapeType", String(obj.shapeType));
+            }
+            if (obj.selectable !== undefined) box.setAttr("selectable", obj.selectable);
 
             layer.add(box);
             continue;
@@ -2437,6 +2457,7 @@ function collectProjectData() {
                 node.getAttr("isPriceHitArea")
             ));
             if (isHelperNode) return;
+            if (node instanceof Konva.Label) return;
 
             // MODUŁY STYL-WLASNY (direct) – zapis rekurencyjny grupy z dziećmi
             if (node instanceof Konva.Group && node.getAttr && node.getAttr("isDirectCustomModuleGroup")) {
@@ -2658,22 +2679,34 @@ function collectProjectData() {
                         height: node.height(),
                         scaleX: node.scaleX(),
                         scaleY: node.scaleY(),
+                        rotation: node.rotation ? node.rotation() : 0,
+                        opacity: node.opacity ? node.opacity() : 1,
                         fill: node.fill(),
                         stroke: node.stroke(),
                         strokeWidth: node.strokeWidth(),
                         cornerRadius: node.cornerRadius(),
+                        dash: node.dash ? cloneStyleValue(node.dash()) : [],
+                        lineCap: node.lineCap ? node.lineCap() : undefined,
+                        lineJoin: node.lineJoin ? node.lineJoin() : undefined,
                         shadowColor: node.shadowColor(),
                         shadowBlur: node.shadowBlur(),
                         shadowOffsetX: node.shadowOffsetX(),
                         shadowOffsetY: node.shadowOffsetY(),
                         shadowOpacity: node.shadowOpacity(),
+                        shadowEnabled: node.shadowEnabled ? node.shadowEnabled() : undefined,
+                        shadowForStrokeEnabled: node.shadowForStrokeEnabled ? node.shadowForStrokeEnabled() : undefined,
+                        draggable: node.draggable ? node.draggable() : true,
                         slotIndex: node.getAttr("slotIndex") ?? null,
+                        isBox: !!node.getAttr("isBox"),
                         isShape: !!node.getAttr("isShape"),
                         isPreset: !!node.getAttr("isPreset"),
+                        shapeType: String(node.getAttr("shapeType") || ""),
+                        name: node.name ? node.name() : "",
                         visible: typeof node.visible === "function" ? node.visible() : true,
                         listening: typeof node.listening === "function" ? node.listening() : true,
                         selectable: node.getAttr("selectable"),
-                        isHiddenByCatalogStyle: !!node.getAttr("isHiddenByCatalogStyle")
+                        isHiddenByCatalogStyle: !!node.getAttr("isHiddenByCatalogStyle"),
+                        strokeScaleEnabled: node.strokeScaleEnabled ? node.strokeScaleEnabled() : undefined
                     });
                 }
             }
@@ -4129,6 +4162,75 @@ async function loadSavedProjects(listEl) {
 // ====================================================================
 // 6. WCZYTYWANIE PROJEKTU – zdjęcia + boxy działają idealnie
 // ====================================================================
+function pickViewportAnchorPageIndex(pagesList) {
+    const list = Array.isArray(pagesList) ? pagesList.filter((page) => !!page?.container) : [];
+    if (!list.length) return -1;
+    const activeIndex = list.findIndex((page) => page && page.stage === document.activeStage);
+    if (activeIndex >= 0) return activeIndex;
+
+    const viewportAnchor = 148;
+    let bestIndex = 0;
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    list.forEach((page, index) => {
+        const rect = page.container?.getBoundingClientRect?.();
+        if (!rect) return;
+        const offscreenPenalty = rect.bottom < 0
+            ? Math.abs(rect.bottom) + 2000
+            : rect.top > window.innerHeight
+                ? Math.abs(rect.top - window.innerHeight) + 2000
+                : 0;
+        const score = Math.abs(rect.top - viewportAnchor) + offscreenPenalty;
+        if (score < bestScore) {
+            bestScore = score;
+            bestIndex = index;
+        }
+    });
+
+    return bestIndex;
+}
+
+function captureProjectViewportState() {
+    const list = Array.isArray(window.pages) ? window.pages : [];
+    const pageIndex = pickViewportAnchorPageIndex(list);
+    if (pageIndex < 0) return null;
+    const page = list[pageIndex];
+    const rect = page?.container?.getBoundingClientRect?.();
+    if (!rect) return null;
+    const absoluteTop = window.scrollY + rect.top;
+    return {
+        pageIndex,
+        offsetWithinPage: window.scrollY - absoluteTop
+    };
+}
+
+function restoreProjectViewportState(state) {
+    if (!state) return;
+    const pageIndex = Number(state.pageIndex);
+    if (!Number.isInteger(pageIndex)) return;
+    const offsetWithinPage = Number(state.offsetWithinPage) || 0;
+
+    const applyRestore = () => {
+        const list = Array.isArray(window.pages) ? window.pages : [];
+        if (!list.length) return;
+        const safeIndex = Math.max(0, Math.min(pageIndex, list.length - 1));
+        const page = list[safeIndex];
+        const rect = page?.container?.getBoundingClientRect?.();
+        if (!page?.container || !rect) return;
+        const absoluteTop = window.scrollY + rect.top;
+        const targetTop = Math.max(0, absoluteTop + offsetWithinPage);
+        document.activeStage = page.stage || document.activeStage;
+        window.scrollTo({
+            top: targetTop,
+            behavior: "auto"
+        });
+    };
+
+    [0, 80, 220, 420].forEach((delay) => {
+        window.setTimeout(applyRestore, delay);
+    });
+}
+
 async function loadProjectFromData(data, opts = {}) {
     if (!data || !data.pages) return showAppToast("Nieprawidłowy plik projektu!", "error");
     const loadSource = String((opts && opts.source) || "").trim().toLowerCase();
@@ -4141,6 +4243,7 @@ async function loadProjectFromData(data, opts = {}) {
     const pageEditRestoreState = isHistoryReplayLoad && typeof window.getPageEditPanelRestoreState === "function"
         ? window.getPageEditPanelRestoreState()
         : null;
+    const viewportRestoreState = isHistoryReplayLoad ? captureProjectViewportState() : null;
     if (window.__projectLoadMutex) {
         try { await window.__projectLoadMutex; } catch (_e) {}
     }
@@ -4308,6 +4411,10 @@ async function loadProjectFromData(data, opts = {}) {
 
         if (pageEditRestoreState && typeof window.restorePageEditPanelState === "function") {
             try { window.restorePageEditPanelState(pageEditRestoreState); } catch (_e) {}
+        }
+
+        if (isHistoryReplayLoad) {
+            restoreProjectViewportState(viewportRestoreState);
         }
 
         refreshPdfButtonState();

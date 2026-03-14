@@ -9,7 +9,7 @@ const ELEMENTS_LIBRARY_TABS = [
   { folder: "PHOTO PNG/BANNERS", label: "BANER" },
   { folder: "PHOTO PNG/FOOD", label: "FOOD" },
   { folder: "PHOTO PNG/COUNTRY", label: "COUNTRY" },
-  { folder: "PHOTO PNG/MASPO", label: "MASPO" }
+  { folder: "szablony maspo", label: "MASPO" }
 ];
 const ELEMENTS_FOLDER_ALIASES = new Map([
   ["BANER", "PHOTO PNG/BANNERS"],
@@ -17,7 +17,7 @@ const ELEMENTS_FOLDER_ALIASES = new Map([
   ["BANNERS", "PHOTO PNG/BANNERS"],
   ["FOOD", "PHOTO PNG/FOOD"],
   ["COUNTRY", "PHOTO PNG/COUNTRY"],
-  ["MASPO", "PHOTO PNG/MASPO"]
+  ["MASPO", "szablony maspo"]
 ]);
 const ELEMENTS_THUMB_MAX_EDGE = 100;
 const ELEMENTS_EDITOR_MAX_EDGE = 560;

@@ -2292,7 +2292,9 @@ window.getPreferredWrapModeForTextNode = getPreferredWrapModeForTextNode;
 function createRotationLabel(layer) {
     const label = new Konva.Label({
         opacity: 0,
-        visible: false
+        visible: false,
+        name: "rotationHelperLabel",
+        isFxHelper: true
     });
     const tag = new Konva.Tag({
         fill: "black",
@@ -2314,7 +2316,9 @@ function createRotationLabel(layer) {
 function createTransformSizeLabel(layer) {
     const label = new Konva.Label({
         opacity: 0,
-        visible: false
+        visible: false,
+        name: "transformSizeHelperLabel",
+        isFxHelper: true
     });
     const tag = new Konva.Tag({
         fill: "#111827",

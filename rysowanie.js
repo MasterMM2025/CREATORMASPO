@@ -59,22 +59,40 @@
     return pages.find(p => p.stage === document.activeStage) || pages[0];
   }
 
-  function emitCanvasModified(page) {
+  function emitCanvasModified(page, meta = {}) {
     if (!page || !page.stage) return;
     try {
-      window.dispatchEvent(new CustomEvent("canvasModified", { detail: page.stage }));
+      const detail = {
+        historyMode: "immediate",
+        historySource: "shape-change",
+        ...(meta && typeof meta === "object" ? meta : {})
+      };
+      if (typeof window.dispatchCanvasModified === "function") {
+        window.dispatchCanvasModified(page.stage, detail);
+        return;
+      }
+      window.dispatchEvent(new CustomEvent("canvasModified", {
+        detail: {
+          ...detail,
+          stage: page.stage
+        }
+      }));
     } catch (_e) {}
   }
 
   function bindShapeHistory(node, page) {
     if (!node || !page || node._shapeHistoryBound) return;
     node._shapeHistoryBound = true;
-    node.on("dragend.shapeHistory transformend.shapeHistory", () => emitCanvasModified(page));
+    node.on("dragend.shapeHistory transformend.shapeHistory", () => {
+      emitCanvasModified(page, { historySource: "shape-transform" });
+    });
     if (node instanceof Konva.Group && node.getChildren) {
       node.getChildren().forEach((ch) => {
         if (!ch || ch._shapeHistoryBound) return;
         ch._shapeHistoryBound = true;
-        ch.on("dragend.shapeHistory transformend.shapeHistory", () => emitCanvasModified(page));
+        ch.on("dragend.shapeHistory transformend.shapeHistory", () => {
+          emitCanvasModified(page, { historySource: "shape-transform" });
+        });
       });
     }
   }
@@ -539,6 +557,7 @@
     layer.batchDraw();
     page.transformerLayer.batchDraw();
     bindShapeHistory(node, page);
+    emitCanvasModified(page, { historySource: "shape-add" });
 
     page.selectedNodes = [node];
     page.transformer.nodes([node]);
@@ -550,10 +569,8 @@
       page.transformerLayer.batchDraw?.();
     }
     document.activeStage = stage;
-    if (window.showFloatingButtons) window.showFloatingButtons();
-
-    updatePanelFromSelection();
-    emitCanvasModified(page);
+    try { if (window.showFloatingButtons) window.showFloatingButtons(); } catch (_e) {}
+    try { updatePanelFromSelection(); } catch (_e) {}
   }
 
   function addPreset(type, pos) {
@@ -774,6 +791,7 @@
     layer.batchDraw();
     page.transformerLayer.batchDraw();
     bindShapeHistory(group, page);
+    emitCanvasModified(page, { historySource: "shape-preset-add" });
 
     page.selectedNodes = [group];
     page.transformer.nodes([group]);
@@ -785,9 +803,8 @@
       page.transformerLayer.batchDraw?.();
     }
     document.activeStage = stage;
-    if (window.showFloatingButtons) window.showFloatingButtons();
-    updatePanelFromSelection();
-    emitCanvasModified(page);
+    try { if (window.showFloatingButtons) window.showFloatingButtons(); } catch (_e) {}
+    try { updatePanelFromSelection(); } catch (_e) {}
   }
 
   function addFrame(type, pos) {
@@ -873,6 +890,7 @@
     layer.batchDraw();
     page.transformerLayer.batchDraw();
     bindShapeHistory(group, page);
+    emitCanvasModified(page, { historySource: "shape-frame-add" });
 
     page.selectedNodes = [group];
     page.transformer.nodes([group]);
@@ -884,9 +902,8 @@
       page.transformerLayer.batchDraw?.();
     }
     document.activeStage = stage;
-    if (window.showFloatingButtons) window.showFloatingButtons();
-    updatePanelFromSelection();
-    emitCanvasModified(page);
+    try { if (window.showFloatingButtons) window.showFloatingButtons(); } catch (_e) {}
+    try { updatePanelFromSelection(); } catch (_e) {}
   }
 
   function getSelectedShapes() {
@@ -912,7 +929,7 @@
     showShapeTools(shapes);
   }
 
-  function applyFill(color) {
+  function applyFill(color, options = {}) {
     const shapes = getSelectedShapes();
     if (!shapes.length) return;
     shapes.forEach(s => {
@@ -927,10 +944,12 @@
     });
     const page = getActivePage();
     page?.layer.batchDraw();
-    emitCanvasModified(page);
+    if (options.recordHistory !== false) {
+      emitCanvasModified(page, { historySource: options.historySource || "shape-fill" });
+    }
   }
 
-  function applyStroke(color) {
+  function applyStroke(color, options = {}) {
     const shapes = getSelectedShapes();
     if (!shapes.length) return;
     shapes.forEach(s => {
@@ -940,10 +959,12 @@
     });
     const page = getActivePage();
     page?.layer.batchDraw();
-    emitCanvasModified(page);
+    if (options.recordHistory !== false) {
+      emitCanvasModified(page, { historySource: options.historySource || "shape-stroke" });
+    }
   }
 
-  function applyStrokeWidth(w) {
+  function applyStrokeWidth(w, options = {}) {
     const shapes = getSelectedShapes();
     if (!shapes.length) return;
     shapes.forEach(s => {
@@ -953,10 +974,12 @@
     });
     const page = getActivePage();
     page?.layer.batchDraw();
-    emitCanvasModified(page);
+    if (options.recordHistory !== false) {
+      emitCanvasModified(page, { historySource: options.historySource || "shape-stroke-width" });
+    }
   }
 
-  function applyRadius(r) {
+  function applyRadius(r, options = {}) {
     const shapes = getSelectedShapes();
     if (!shapes.length) return;
     shapes.forEach(s => {
@@ -966,10 +989,12 @@
     });
     const page = getActivePage();
     page?.layer.batchDraw();
-    emitCanvasModified(page);
+    if (options.recordHistory !== false) {
+      emitCanvasModified(page, { historySource: options.historySource || "shape-radius" });
+    }
   }
 
-  function applyOpacity(val) {
+  function applyOpacity(val, options = {}) {
     const shapes = getSelectedShapes();
     if (!shapes.length) return;
     shapes.forEach(s => {
@@ -977,10 +1002,12 @@
     });
     const page = getActivePage();
     page?.layer.batchDraw();
-    emitCanvasModified(page);
+    if (options.recordHistory !== false) {
+      emitCanvasModified(page, { historySource: options.historySource || "shape-opacity" });
+    }
   }
 
-  function applyDash(style) {
+  function applyDash(style, options = {}) {
     const shapes = getSelectedShapes();
     if (!shapes.length) return;
     const dash = style === "dash" ? [10, 6] : style === "dot" ? [2, 6] : [];
@@ -991,10 +1018,12 @@
     });
     const page = getActivePage();
     page?.layer.batchDraw();
-    emitCanvasModified(page);
+    if (options.recordHistory !== false) {
+      emitCanvasModified(page, { historySource: options.historySource || "shape-dash" });
+    }
   }
 
-  function applyShadow(enabled, blur) {
+  function applyShadow(enabled, blur, options = {}) {
     const shapes = getSelectedShapes();
     if (!shapes.length) return;
     const safeBlur = enabled ? Math.max(1, Number(blur) || DEFAULT_SHAPE_SHADOW_BLUR) : 0;
@@ -1018,7 +1047,9 @@
     });
     const page = getActivePage();
     page?.layer.batchDraw();
-    emitCanvasModified(page);
+    if (options.recordHistory !== false) {
+      emitCanvasModified(page, { historySource: options.historySource || "shape-shadow" });
+    }
   }
 
   function showShapeTools(shapes) {
@@ -1142,11 +1173,16 @@
       document.head.appendChild(st);
     }
 
-    document.getElementById("shapeFillQuick")?.addEventListener("input", (e) => applyFill(e.target.value));
-    document.getElementById("shapeStrokeQuick")?.addEventListener("input", (e) => applyStroke(e.target.value));
-    document.getElementById("shapeStrokeWidthQuick")?.addEventListener("input", (e) => applyStrokeWidth(parseInt(e.target.value, 10)));
-    document.getElementById("shapeRadiusQuick")?.addEventListener("input", (e) => applyRadius(parseInt(e.target.value, 10)));
-    document.getElementById("shapeOpacityQuick")?.addEventListener("input", (e) => applyOpacity(parseInt(e.target.value, 10) / 100));
+    document.getElementById("shapeFillQuick")?.addEventListener("input", (e) => applyFill(e.target.value, { recordHistory: false }));
+    document.getElementById("shapeFillQuick")?.addEventListener("change", (e) => applyFill(e.target.value));
+    document.getElementById("shapeStrokeQuick")?.addEventListener("input", (e) => applyStroke(e.target.value, { recordHistory: false }));
+    document.getElementById("shapeStrokeQuick")?.addEventListener("change", (e) => applyStroke(e.target.value));
+    document.getElementById("shapeStrokeWidthQuick")?.addEventListener("input", (e) => applyStrokeWidth(parseInt(e.target.value, 10), { recordHistory: false }));
+    document.getElementById("shapeStrokeWidthQuick")?.addEventListener("change", (e) => applyStrokeWidth(parseInt(e.target.value, 10)));
+    document.getElementById("shapeRadiusQuick")?.addEventListener("input", (e) => applyRadius(parseInt(e.target.value, 10), { recordHistory: false }));
+    document.getElementById("shapeRadiusQuick")?.addEventListener("change", (e) => applyRadius(parseInt(e.target.value, 10)));
+    document.getElementById("shapeOpacityQuick")?.addEventListener("input", (e) => applyOpacity(parseInt(e.target.value, 10) / 100, { recordHistory: false }));
+    document.getElementById("shapeOpacityQuick")?.addEventListener("change", (e) => applyOpacity(parseInt(e.target.value, 10) / 100));
     document.getElementById("shapeDashQuick")?.addEventListener("change", (e) => applyDash(e.target.value));
     document.getElementById("shapeShadowToggle")?.addEventListener("change", (e) => {
       const blurInput = document.getElementById("shapeShadowBlur");
@@ -1158,6 +1194,12 @@
       applyShadow(e.target.checked, blur);
     });
     document.getElementById("shapeShadowBlur")?.addEventListener("input", (e) => {
+      const shadowToggle = document.getElementById("shapeShadowToggle");
+      const blur = parseInt(e.target.value, 10);
+      const enabled = !!(shadowToggle?.checked);
+      applyShadow(enabled, blur, { recordHistory: false });
+    });
+    document.getElementById("shapeShadowBlur")?.addEventListener("change", (e) => {
       const shadowToggle = document.getElementById("shapeShadowToggle");
       const blur = parseInt(e.target.value, 10);
       const enabled = !!(shadowToggle?.checked);
