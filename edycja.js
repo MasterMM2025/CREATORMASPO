@@ -1444,11 +1444,19 @@ function updateCatalogEntryCurrencyForSlot(page, slotIndex, currencyCode, curren
   page.products[slotIndex].PRICE_CURRENCY_CODE = currencyCode;
 }
 
+function readPageEditSlotAttrIndex(node, attrName) {
+  if (!node || typeof node.getAttr !== 'function') return null;
+  const raw = node.getAttr(attrName);
+  if (raw === null || raw === undefined || raw === '') return null;
+  const slotIndex = Number(raw);
+  return Number.isFinite(slotIndex) && slotIndex >= 0 ? slotIndex : null;
+}
+
 function resolveSlotIndexFromNode(node) {
   let current = node;
   while (current) {
-    const slotIndex = Number(current.getAttr?.('slotIndex'));
-    if (Number.isFinite(slotIndex) && slotIndex >= 0) return slotIndex;
+    const slotIndex = readPageEditSlotAttrIndex(current, 'slotIndex');
+    if (Number.isFinite(slotIndex)) return slotIndex;
     current = typeof current.getParent === 'function' ? current.getParent() : null;
   }
   return null;
@@ -1457,10 +1465,10 @@ function resolveSlotIndexFromNode(node) {
 function resolveDirectSlotIndexFromNode(node) {
   let current = node;
   while (current) {
-    const slotIndex = Number(current.getAttr?.('slotIndex'));
-    if (Number.isFinite(slotIndex) && slotIndex >= 0) return slotIndex;
-    const preservedSlotIndex = Number(current.getAttr?.('preservedSlotIndex'));
-    if (Number.isFinite(preservedSlotIndex) && preservedSlotIndex >= 0) return preservedSlotIndex;
+    const slotIndex = readPageEditSlotAttrIndex(current, 'slotIndex');
+    if (Number.isFinite(slotIndex)) return slotIndex;
+    const preservedSlotIndex = readPageEditSlotAttrIndex(current, 'preservedSlotIndex');
+    if (Number.isFinite(preservedSlotIndex)) return preservedSlotIndex;
     current = typeof current.getParent === 'function' ? current.getParent() : null;
   }
   return null;

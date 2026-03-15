@@ -2329,7 +2329,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const targetSlot = Number(slotIndex);
     return page.layer.find((n) => {
       if (!n || !n.getAttr) return false;
-      if (Number(n.getAttr("slotIndex")) !== targetSlot) return false;
+      if (readDirectSlotAttrIndex(n, "slotIndex") !== targetSlot) return false;
       return !!(n.getAttr("directModuleId") || isManagedDirectSlotNode(n));
     });
   }
@@ -2342,6 +2342,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     node.moveTo(group);
     if (typeof node.absolutePosition === "function") node.absolutePosition(abs);
     else if (typeof node.setAbsolutePosition === "function") node.setAbsolutePosition(abs);
+  }
+
+  function readDirectSlotAttrIndex(node, attrName) {
+    if (!node || typeof node.getAttr !== "function") return null;
+    const raw = node.getAttr(attrName);
+    if (raw === null || raw === undefined || raw === "") return null;
+    const slotIndex = Number(raw);
+    return Number.isFinite(slotIndex) && slotIndex >= 0 ? slotIndex : null;
   }
 
   async function rebuildDirectModuleLayoutsOnPage(page, options = {}) {
@@ -3556,7 +3564,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const layer = priceGroup.getLayer ? priceGroup.getLayer() : null;
     const parentGroup = priceGroup.getParent ? priceGroup.getParent() : null;
     const directModuleId = String(priceGroup.getAttr?.("directModuleId") || "");
-    const slotIndex = Number(priceGroup.getAttr?.("slotIndex"));
+    const slotIndex = readDirectSlotAttrIndex(priceGroup, "slotIndex");
     const rectBgSibling = layer && typeof layer.findOne === "function"
       ? layer.findOne((n) => {
           if (!n || !n.getAttr) return false;
@@ -3564,7 +3572,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           if (n === priceGroup) return false;
           if (n.getParent && n.getParent() !== parentGroup) return false;
           if (String(n.getAttr("directModuleId") || "") !== directModuleId) return false;
-          if (Number(n.getAttr("slotIndex")) !== slotIndex) return false;
+          if (readDirectSlotAttrIndex(n, "slotIndex") !== slotIndex) return false;
           return true;
         })
       : null;
@@ -3583,7 +3591,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         if (n.getAttr("isPageBg")) return false;
         if (n.getAttr("isBox")) return false;
         if (String(n.getAttr("directModuleId") || "") !== directModuleId) return false;
-        if (Number(n.getAttr("slotIndex")) !== slotIndex) return false;
+        if (readDirectSlotAttrIndex(n, "slotIndex") !== slotIndex) return false;
         if (n.getParent && n.getParent() !== parentGroup) return false;
         return true;
       });
@@ -6333,10 +6341,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         }
         if (page.layer && typeof page.layer.find === "function") {
           page.layer.find((n) => n && n.getAttr).forEach((n) => {
-            const si = Number(n.getAttr("slotIndex"));
-            const psi = Number(n.getAttr("preservedSlotIndex"));
-            if (Number.isFinite(si) && si >= 0) slots.add(si);
-            if (Number.isFinite(psi) && psi >= 0) slots.add(psi);
+            const si = readDirectSlotAttrIndex(n, "slotIndex");
+            const psi = readDirectSlotAttrIndex(n, "preservedSlotIndex");
+            if (Number.isFinite(si)) slots.add(si);
+            if (Number.isFinite(psi)) slots.add(psi);
           });
         }
         return slots;
@@ -7226,10 +7234,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         let cur = node;
         while (cur) {
           if (cur.getAttr) {
-            const si = Number(cur.getAttr("slotIndex"));
-            if (Number.isFinite(si) && si >= 0) return si;
-            const psi = Number(cur.getAttr("preservedSlotIndex"));
-            if (Number.isFinite(psi) && psi >= 0) return psi;
+            const si = readDirectSlotAttrIndex(cur, "slotIndex");
+            if (Number.isFinite(si)) return si;
+            const psi = readDirectSlotAttrIndex(cur, "preservedSlotIndex");
+            if (Number.isFinite(psi)) return psi;
           }
           cur = cur.getParent ? cur.getParent() : null;
         }
@@ -8507,10 +8515,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       page.slotObjects.forEach((o, i) => { if (o) occupiedSlots.add(i); });
       if (page.layer && typeof page.layer.find === "function") {
         page.layer.find((n) => n && n.getAttr).forEach((n) => {
-          const si = Number(n.getAttr("slotIndex"));
-          const psi = Number(n.getAttr("preservedSlotIndex"));
-          if (Number.isFinite(si) && si >= 0) occupiedSlots.add(si);
-          if (Number.isFinite(psi) && psi >= 0) occupiedSlots.add(psi);
+          const si = readDirectSlotAttrIndex(n, "slotIndex");
+          const psi = readDirectSlotAttrIndex(n, "preservedSlotIndex");
+          if (Number.isFinite(si)) occupiedSlots.add(si);
+          if (Number.isFinite(psi)) occupiedSlots.add(psi);
         });
       }
       let slotIndex = page.products.length;

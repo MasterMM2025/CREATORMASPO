@@ -11,6 +11,10 @@
   const WORKSPACE_STAGE_ID = "newStyleWorkspaceStage";
   const WORKSPACE_HINT_ID = "newStyleWorkspaceHint";
   const WORKSPACE_SELECTED_ID = "newStyleWorkspaceSelected";
+  const WORKSPACE_ZOOM_VALUE_ID = "newStyleWorkspaceZoomValue";
+  const WORKSPACE_ZOOM_OUT_ID = "newStyleWorkspaceZoomOut";
+  const WORKSPACE_ZOOM_RESET_ID = "newStyleWorkspaceZoomReset";
+  const WORKSPACE_ZOOM_IN_ID = "newStyleWorkspaceZoomIn";
   const SELECTED_CANVAS_ID = "newStyleCanvasProduct";
   const STYLE_NAME_ID = "newStyleStyleName";
   const STYLE_LOAD_SELECT_ID = "newStyleLoadSelect";
@@ -27,6 +31,7 @@
   const TEXT_FONT_ID = "newStyleTextFont";
   const TEXT_COLOR_ID = "newStyleTextColor";
   const TEXT_SIZE_ID = "newStyleTextSize";
+  const BADGE_COLOR_ID = "newStyleBadgeColor";
   const DIVIDER_COLOR_ID = "newStyleDividerColor";
   const CURRENCY_SELECT_ID = "newStyleCurrencySelect";
   const BUILDER_NOTE_ID = "newStyleBuilderNote";
@@ -46,6 +51,11 @@
   const MAX_VISIBLE_PRODUCTS = 250;
   const MODULE_BASE_WIDTH = 500;
   const MODULE_BASE_HEIGHT = 362;
+  const DEFAULT_TRANSFORMER_ANCHORS = ["middle-left", "middle-right", "top-left", "top-right", "bottom-left", "bottom-right"];
+  const LINE_TRANSFORMER_ANCHORS = ["top-center", "bottom-center", "middle-left", "middle-right"];
+  const LINE_BOX_TRANSFORMER_ANCHORS = ["top-left", "top-right", "bottom-left", "bottom-right"];
+  const DEFAULT_TRANSFORMER_PADDING = 0;
+  const LINE_TRANSFORMER_PADDING = 18;
   let firebaseStorageApiPromise = null;
   const workspaceBadgeImageCache = new Map();
 
@@ -75,6 +85,7 @@
       resizeRaf: 0,
       resizeBound: false,
       viewportInitialized: false,
+      zoom: 1,
       clipboard: null,
       textEditorCleanup: null
     }
@@ -98,6 +109,20 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  function toStaticArray(collection) {
+    if (!collection) return [];
+    if (Array.isArray(collection)) return collection.slice();
+    if (typeof collection.toArray === "function") return collection.toArray();
+    if (typeof collection[Symbol.iterator] === "function") return Array.from(collection);
+    const length = Number(collection.length || 0);
+    if (!(length > 0)) return [];
+    const out = [];
+    for (let index = 0; index < length; index += 1) {
+      if (collection[index]) out.push(collection[index]);
+    }
+    return out;
   }
 
   function scientificToPlain(raw) {
@@ -318,6 +343,74 @@
 
   function getFontOptionsHtml() {
     return getFontCandidates().map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
+  }
+
+  function getSidebarIconSvg(name = "spark") {
+    const icons = {
+      badge: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.4 4.8 5.3.8-3.8 3.7.9 5.3-4.8-2.5-4.8 2.5.9-5.3-3.8-3.7 5.3-.8L12 3z"/></svg>',
+      library: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h6l2 2h10v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2"/></svg>',
+      download: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10"/><path d="M8 10l4 4 4-4"/><path d="M5 19h14"/></svg>',
+      font: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12"/><path d="M12 6v12"/><path d="M8 18h8"/></svg>',
+      palette: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a8 8 0 1 0 0 16h1.2a2 2 0 0 0 0-4H12a2 2 0 0 1 0-4h4a4 4 0 0 0 0-8h-4z"/><path d="M7.5 10.5h.01"/><path d="M9.5 7.5h.01"/><path d="M14.5 7.5h.01"/></svg>',
+      line: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18L19 6"/></svg>',
+      currency: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6.5a4 4 0 0 0-6.5 3.1c0 4.4 7 2.3 7 6.1A4 4 0 0 1 9 18.5"/><path d="M12 4v16"/></svg>',
+      edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20l4.5-1 9.8-9.8a1.8 1.8 0 0 0 0-2.5l-1-1a1.8 1.8 0 0 0-2.5 0L5 15.5 4 20z"/><path d="M13.5 7.5l3 3"/></svg>',
+      apply: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7L12 3z"/><path d="M19 16l.9 2.1L22 19l-2.1.9L19 22l-.9-2.1L16 19l2.1-.9L19 16z"/></svg>',
+      image: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 13l2.5-2.5 2.5 2.5 2-2 3 3"/><path d="M9 9h.01"/></svg>',
+      text: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M12 7v10"/><path d="M8 17h8"/></svg>',
+      hash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4L6 20"/><path d="M16 4l-2 16"/><path d="M4 9h16"/><path d="M3 15h16"/></svg>',
+      pack: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8l8-4 8 4-8 4-8-4z"/><path d="M4 8v8l8 4 8-4V8"/></svg>',
+      price: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l8-8h7a1 1 0 0 1 1 1v7l-8 8-8-8z"/><path d="M15 9h.01"/></svg>',
+      flag: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 20V4"/><path d="M6 5h10l-2.5 3L16 11H6"/></svg>',
+      rect: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="7" width="16" height="10" rx="2"/></svg>',
+      circle: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/></svg>',
+      barcode: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14"/><path d="M8 5v14"/><path d="M11 5v14"/><path d="M15 5v14"/><path d="M18 5v14"/></svg>',
+      spark: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8L12 3z"/></svg>'
+    };
+    return icons[String(name || "").trim()] || icons.spark;
+  }
+
+  function getSidebarToolButtonHtml(options = {}) {
+    const label = String(options.label || "").trim() || "Akcja";
+    const tool = String(options.tool || "").trim();
+    const id = String(options.id || "").trim();
+    const className = String(options.className || "").trim();
+    const icon = String(options.icon || "spark").trim();
+    const attrs = String(options.attrs || "").trim();
+    const dataToolAttr = tool ? ` data-tool="${escapeHtml(tool)}"` : "";
+    const idAttr = id ? ` id="${escapeHtml(id)}"` : "";
+    const classAttr = `new-style-tool-btn new-style-tool-btn--sidebar${className ? ` ${className}` : ""}`;
+    return `
+      <button type="button" class="${classAttr}"${idAttr}${dataToolAttr}${attrs ? ` ${attrs}` : ""}>
+        <span class="new-style-tool-btn__icon" aria-hidden="true">${getSidebarIconSvg(icon)}</span>
+        <span class="new-style-tool-btn__label">${escapeHtml(label)}</span>
+      </button>
+    `;
+  }
+
+  function getTextFormatButtonHtml(format, shortLabel, title) {
+    return `
+      <button
+        type="button"
+        class="new-style-tool-btn new-style-format-btn"
+        data-text-format="${escapeHtml(format)}"
+        title="${escapeHtml(title || shortLabel)}"
+        aria-label="${escapeHtml(title || shortLabel)}"
+      >
+        <span class="new-style-format-btn__label">${escapeHtml(shortLabel)}</span>
+      </button>
+    `;
+  }
+
+  function getSidebarInsertButtonsHtml(items = []) {
+    return (Array.isArray(items) ? items : [])
+      .map((item) => getSidebarToolButtonHtml({
+        tool: item.tool,
+        label: item.label,
+        icon: item.icon,
+        className: "new-style-tool-btn--tile"
+      }))
+      .join("");
   }
 
   function setSaveStatus(message, tone = "default") {
@@ -586,9 +679,16 @@
       .filter((item) => item && item.id && item.label);
   }
 
+  function getBuiltInPriceBadgeStyles() {
+    return [
+      { id: "solid", label: "Kolo (domyslny)", path: "", url: "", builtinShape: "circle" },
+      { id: "solid-rect", label: "Prostokat", path: "", url: "", builtinShape: "rect" }
+    ];
+  }
+
   function getPriceBadgeStyleOptions() {
-    const out = [{ id: "solid", label: "Kolor koła (domyślny)", path: "", url: "" }];
-    const seen = new Set(["solid"]);
+    const out = getBuiltInPriceBadgeStyles();
+    const seen = new Set(out.map((item) => item.id));
     [...getRegisteredPriceBadgeStyles(), ...getDynamicPriceBadgeStyles()].forEach((styleDef) => {
       if (seen.has(styleDef.id)) return;
       seen.add(styleDef.id);
@@ -743,6 +843,12 @@
     return String(safe.url || "").trim() || String(buildStorageMediaUrl(safe.path) || "").trim();
   }
 
+  function getBadgeBuiltInShape(styleDef) {
+    const builtinShape = String(styleDef?.builtinShape || "").trim();
+    if (builtinShape === "circle" || builtinShape === "rect") return builtinShape;
+    return styleUsesCircularBadge(styleDef) ? "circle" : "rect";
+  }
+
   function loadWorkspaceBadgeImage(url) {
     const src = String(url || "").trim();
     if (!src) return Promise.resolve(null);
@@ -840,6 +946,7 @@
     if (!badgeNodes.length) return false;
     await Promise.all(badgeNodes.map((node) => applyBadgeStyleToGroup(node, styleMeta)));
     ws.layer.batchDraw();
+    syncBadgeColorControlFromWorkspace();
     return true;
   }
 
@@ -849,8 +956,9 @@
     const label = String(styleDef?.label || id).trim();
     const active = id === selectedId ? " is-active" : "";
     const previewUrl = getBadgePreviewCardUrl(styleDef);
-    const media = id === "solid"
-      ? `<div class="new-style-badge-card__solid"></div>`
+    const isBuiltInSolid = !previewUrl;
+    const media = isBuiltInSolid
+      ? `<div class="new-style-badge-card__solid${getBadgeBuiltInShape(styleDef) === "rect" ? " new-style-badge-card__solid--rect" : ""}"></div>`
       : (previewUrl
         ? `<img class="new-style-badge-card__img" src="${escapeHtml(previewUrl)}" alt="${escapeHtml(label)}" loading="lazy">`
         : `<div class="new-style-badge-card__solid"></div>`);
@@ -888,7 +996,7 @@
     const selectedId = getSelectedPriceBadgeStyleId(tab);
     const selectedMeta = getPriceBadgeStyleMeta(selectedId);
     const libraryOptions = [
-      { id: "solid", label: "Kolor koła (domyślny)", path: "", url: "" },
+      ...getBuiltInPriceBadgeStyles(),
       ...getDynamicPriceBadgeStyles()
     ];
     if (selectedMeta?.id && !libraryOptions.some((item) => item.id === selectedMeta.id)) {
@@ -1069,17 +1177,41 @@
     const availableH = Math.max(MODULE_BASE_HEIGHT, Math.round(rect.height || MODULE_BASE_HEIGHT));
     const width = MODULE_BASE_WIDTH;
     const height = MODULE_BASE_HEIGHT;
-    const offsetX = Math.max(0, Math.round((availableW - width) / 2));
-    const offsetY = Math.max(0, Math.round((availableH - height) / 2));
+    const zoom = Math.max(0.5, Math.min(2.4, Number(getWorkspace().zoom || 1) || 1));
+    const scaledWidth = Math.round(width * zoom);
+    const scaledHeight = Math.round(height * zoom);
+    const offsetX = Math.max(0, Math.round((availableW - scaledWidth) / 2));
+    const offsetY = Math.max(0, Math.round((availableH - scaledHeight) / 2));
     host.style.width = `${width}px`;
     host.style.height = `${height}px`;
     host.style.left = `${offsetX}px`;
     host.style.top = `${offsetY}px`;
+    host.style.transformOrigin = "top left";
+    host.style.transform = `scale(${zoom})`;
     host.setAttribute("data-workspace-size", `BAZA ${MODULE_BASE_WIDTH}x${MODULE_BASE_HEIGHT}`);
     return {
       width,
       height
     };
+  }
+
+  function getWorkspaceZoom() {
+    return Math.max(0.5, Math.min(2.4, Number(getWorkspace().zoom || 1) || 1));
+  }
+
+  function updateWorkspaceZoomUi() {
+    const label = document.getElementById(WORKSPACE_ZOOM_VALUE_ID);
+    if (!label) return;
+    label.textContent = `${Math.round(getWorkspaceZoom() * 100)}%`;
+  }
+
+  function setWorkspaceZoom(nextZoom) {
+    const ws = getWorkspace();
+    ws.zoom = Math.max(0.5, Math.min(2.4, Number(nextZoom) || 1));
+    getWorkspaceSize();
+    if (ws.stage) ws.stage.batchDraw();
+    updateWorkspaceZoomUi();
+    return ws.zoom;
   }
 
   function centerWorkspaceViewport(force = false) {
@@ -1107,13 +1239,33 @@
     nextWorkspaceLoadStamp();
   }
 
+  function syncTransformerForSelectedNode(node) {
+    const ws = getWorkspace();
+    const transformer = ws?.transformer;
+    if (!transformer || !window.Konva) return;
+    const isRawLine = node instanceof window.Konva.Line;
+    const isLineBox = isWorkspaceLineBox(node);
+    transformer.keepRatio(!(isRawLine || isLineBox));
+    transformer.rotateEnabled(true);
+    transformer.enabledAnchors(
+      isRawLine
+        ? LINE_TRANSFORMER_ANCHORS
+        : (isLineBox ? LINE_BOX_TRANSFORMER_ANCHORS : DEFAULT_TRANSFORMER_ANCHORS)
+    );
+    transformer.centeredScaling(false);
+    transformer.padding(isRawLine ? LINE_TRANSFORMER_PADDING : DEFAULT_TRANSFORMER_PADDING);
+  }
+
   function selectWorkspaceNode(node) {
     const ws = getWorkspace();
     if (!ws.transformer || !ws.layer) return;
     ws.selectedNode = node || null;
+    syncTransformerForSelectedNode(node || null);
     ws.transformer.nodes(node ? [node] : []);
+    try { ws.transformer.forceUpdate?.(); } catch (_err) {}
     setWorkspaceSelectedLabel(node ? (node.getAttr("workspaceLabel") || node.getClassName() || "element") : "brak");
     syncTextStyleControlsFromNode(node || null);
+    syncBadgeColorControlFromWorkspace(node || null);
     ws.layer.batchDraw();
   }
 
@@ -1149,15 +1301,75 @@
     const transformer = new window.Konva.Transformer({
       rotateEnabled: true,
       keepRatio: true,
-      enabledAnchors: ["middle-left", "middle-right", "top-left", "top-right", "bottom-left", "bottom-right"],
+      rotationSnaps: [0, 90, 180, 270],
+      rotationSnapTolerance: 8,
+      enabledAnchors: DEFAULT_TRANSFORMER_ANCHORS,
       borderStroke: "#22d3ee",
       anchorStroke: "#22d3ee",
       anchorFill: "#ffffff",
       anchorSize: 8,
       boundBoxFunc: (oldBox, newBox) => {
-        const safeWidth = Math.max(16, Number(newBox?.width || 0));
-        const safeHeight = Math.max(16, Number(newBox?.height || 0));
-        return { ...newBox, width: safeWidth, height: safeHeight };
+        const stageW = Number(getWorkspace().stage?.width?.() || MODULE_BASE_WIDTH);
+        const stageH = Number(getWorkspace().stage?.height?.() || MODULE_BASE_HEIGHT);
+        const selectedNode = getWorkspace().selectedNode;
+        const isLine = !!(window.Konva && selectedNode instanceof window.Konva.Line);
+        const activeAnchor = String(transformer.getActiveAnchor?.() || "");
+        const isLineVerticalResize = activeAnchor === "top-center" || activeAnchor === "bottom-center";
+        const isLineHorizontalResize = activeAnchor === "middle-left" || activeAnchor === "middle-right";
+        const isLineResizeAnchor = isLineVerticalResize || isLineHorizontalResize;
+        if (isLine && isLineResizeAnchor) {
+          let nextX = Number.isFinite(Number(newBox?.x)) ? Number(newBox.x) : Number(oldBox?.x || 0);
+          let nextY = Number.isFinite(Number(newBox?.y)) ? Number(newBox.y) : Number(oldBox?.y || 0);
+          let nextWidth = Math.max(4, Number(newBox?.width || oldBox?.width || 4));
+          let nextHeight = Math.max(4, Number(newBox?.height || oldBox?.height || 4));
+
+          if (isLineHorizontalResize) nextY = Number(oldBox?.y || nextY);
+          if (isLineVerticalResize) nextX = Number(oldBox?.x || nextX);
+
+          nextX = Math.min(Math.max(0, nextX), Math.max(0, stageW - Math.max(4, nextWidth)));
+          nextY = Math.min(Math.max(0, nextY), Math.max(0, stageH - Math.max(4, nextHeight)));
+          if (nextX + nextWidth > stageW) {
+            nextWidth = Math.max(4, stageW - nextX);
+          }
+          if (nextY + nextHeight > stageH) {
+            nextHeight = Math.max(4, stageH - nextY);
+          }
+
+          return {
+            ...oldBox,
+            x: nextX,
+            y: nextY,
+            width: nextWidth,
+            height: nextHeight
+          };
+        }
+        const nextBox = {
+          ...newBox,
+          x: Number.isFinite(Number(newBox?.x)) ? Number(newBox.x) : Number(oldBox?.x || 0),
+          y: Number.isFinite(Number(newBox?.y)) ? Number(newBox.y) : Number(oldBox?.y || 0),
+          width: Math.max(16, Number(newBox?.width || 0)),
+          height: Math.max(16, Number(newBox?.height || 0))
+        };
+
+        if (nextBox.x < 0) {
+          nextBox.width = Math.max(16, nextBox.width + nextBox.x);
+          nextBox.x = 0;
+        }
+        if (nextBox.y < 0) {
+          nextBox.height = Math.max(16, nextBox.height + nextBox.y);
+          nextBox.y = 0;
+        }
+        if (nextBox.x + nextBox.width > stageW) {
+          nextBox.width = Math.max(16, stageW - nextBox.x);
+        }
+        if (nextBox.y + nextBox.height > stageH) {
+          nextBox.height = Math.max(16, stageH - nextBox.y);
+        }
+
+        nextBox.x = Math.min(Math.max(0, nextBox.x), Math.max(0, stageW - 16));
+        nextBox.y = Math.min(Math.max(0, nextBox.y), Math.max(0, stageH - 16));
+
+        return nextBox;
       }
     });
 
@@ -1208,6 +1420,7 @@
     }
 
     setWorkspaceSelectedLabel("brak");
+    updateWorkspaceZoomUi();
     requestAnimationFrame(() => centerWorkspaceViewport(true));
     return state.workspace;
   }
@@ -1661,32 +1874,94 @@
     return styleUsesCircularBadge(styleMeta) ? "circle" : "rect";
   }
 
+  function getSelectedBadgeColor() {
+    const input = document.getElementById(BADGE_COLOR_ID);
+    return String(input?.value || "#d71920").trim() || "#d71920";
+  }
+
+  function syncBadgeColorControlFromWorkspace(node = null) {
+    const input = document.getElementById(BADGE_COLOR_ID);
+    if (!input) return;
+    const badgeNode = node && isBadgeWorkspaceKind(node?.getAttr?.("workspaceKind"))
+      ? node
+      : getWorkspaceBadgeNode();
+    if (!badgeNode) return;
+    const shapeNode = getBadgeShapeNode(badgeNode);
+    const color = String(shapeNode?.getAttr?.("workspaceSolidFill") || shapeNode?.fill?.() || "").trim();
+    if (/^#([0-9a-f]{6})$/i.test(color)) input.value = color;
+  }
+
+  async function applyBadgeColorToWorkspace() {
+    const badgeNodes = [findWorkspaceNodeByKind("badgeRect"), findWorkspaceNodeByKind("badgeCircle")].filter(Boolean);
+    if (!badgeNodes.length) return false;
+    const nextColor = getSelectedBadgeColor();
+    await Promise.all(badgeNodes.map(async (badgeNode) => {
+      const shapeNode = getBadgeShapeNode(badgeNode);
+      if (!shapeNode) return;
+      try { shapeNode.setAttr("workspaceSolidFill", nextColor); } catch (_err) {}
+      const styleMeta = getPriceBadgeStyleMeta(String(shapeNode.getAttr?.("priceBadgeStyleId") || getSelectedPriceBadgeStyleId(String(state.activeBuilderTab || BUILDER_TAB_PRODUCT))));
+      await applyBadgeStyleToGroup(badgeNode, styleMeta);
+    }));
+    const ws = getWorkspace();
+    if (ws?.layer) ws.layer.batchDraw();
+    syncBadgeColorControlFromWorkspace();
+    return true;
+  }
+
+  function replaceWorkspaceBadgeShape(nextShape = "circle") {
+    const currentBadge = getWorkspaceBadgeNode();
+    if (!currentBadge) return false;
+    const currentRect = getNodeStageRect(currentBadge);
+    try { currentBadge.destroy(); } catch (_err) {}
+    addBadgeNode(nextShape === "rect" ? "rect" : "circle");
+    const nextBadge = getWorkspaceBadgeNode();
+    const shapeNode = getBadgeShapeNode(nextBadge);
+    if (!nextBadge || !shapeNode) return false;
+
+    if (currentRect) {
+      if (nextShape === "rect" && shapeNode instanceof window.Konva.Rect) {
+        nextBadge.x(Number(currentRect.x || 0));
+        nextBadge.y(Number(currentRect.y || 0));
+        shapeNode.x(0);
+        shapeNode.y(0);
+        shapeNode.width(Math.max(150, Number(currentRect.width || 150)));
+        shapeNode.height(Math.max(74, Number(currentRect.height || 74)));
+      } else if (nextShape === "circle" && shapeNode instanceof window.Konva.Circle) {
+        const radius = Math.max(42, Math.max(Number(currentRect.width || 84), Number(currentRect.height || 84)) / 2);
+        nextBadge.x(Number(currentRect.x || 0) + Number(currentRect.width || 0) / 2 - radius);
+        nextBadge.y(Number(currentRect.y || 0) + Number(currentRect.height || 0) / 2 - radius);
+        shapeNode.x(radius);
+        shapeNode.y(radius);
+        shapeNode.radius(radius);
+      }
+    }
+    selectWorkspaceNode(nextBadge);
+    return true;
+  }
+
+  function ensureWorkspaceBadgeMatchesStyle(tab = BUILDER_TAB_PRODUCT) {
+    const badgeNode = getWorkspaceBadgeNode();
+    if (!badgeNode) return false;
+    const targetShape = getPreferredBadgeShapeForStyle(getPriceBadgeStyleMeta(getSelectedPriceBadgeStyleId(tab)));
+    const currentKind = String(badgeNode.getAttr?.("workspaceKind") || "").trim();
+    if ((targetShape === "circle" && currentKind === "badgeCircle") || (targetShape === "rect" && currentKind === "badgeRect")) {
+      return false;
+    }
+    return replaceWorkspaceBadgeShape(targetShape);
+  }
+
   function ensureBadgeSelectionVisibleInWorkspace(tab = BUILDER_TAB_PRODUCT) {
     const ws = ensureWorkspaceEditor();
     if (!ws?.layer) return false;
     const hasBadge = !!findWorkspaceNodeByKind("badgeRect") || !!findWorkspaceNodeByKind("badgeCircle");
-    const hasPriceGroup = !!findWorkspaceNodeByKind("priceGroup");
-    if (hasBadge && hasPriceGroup) return false;
+    if (hasBadge) return false;
 
     const styleMeta = getPriceBadgeStyleMeta(getSelectedPriceBadgeStyleId(tab));
-    const addedBadge = !hasBadge;
-    const addedPriceGroup = !hasPriceGroup;
     if (!hasBadge) {
       addBadgeNode(getPreferredBadgeShapeForStyle(styleMeta));
     }
-    if (!hasPriceGroup) {
-      addPriceGroupNode();
-    }
     const badgeNode = getWorkspaceBadgeNode();
-    const priceGroup = findWorkspaceNodeByKind("priceGroup");
     if (badgeNode) {
-      if (priceGroup && addedBadge && !addedPriceGroup) {
-        try { priceGroup.setAttr("badgeAutoLayout", true); } catch (_err) {}
-        fitBadgeNodeAroundPriceGroup(badgeNode, priceGroup);
-        captureBadgePriceLayoutState(badgeNode);
-      } else {
-        syncPriceGroupToBadgeNode(badgeNode, { forceDefaultOffset: true });
-      }
       selectWorkspaceNode(badgeNode);
     }
     return true;
@@ -1824,6 +2099,199 @@
     group.setAttr("priceUnitRatio", Number(ratios.unit.toFixed(4)));
   }
 
+  function getLineAbsoluteEndpoints(node) {
+    if (!window.Konva || !(node instanceof window.Konva.Line)) return null;
+    const points = Array.isArray(node.points?.()) ? node.points() : [];
+    if (points.length < 4) return null;
+    const transform = typeof node.getAbsoluteTransform === "function"
+      ? node.getAbsoluteTransform().copy()
+      : null;
+    if (!transform) return null;
+    const start = transform.point({
+      x: Number(points[0] || 0),
+      y: Number(points[1] || 0)
+    });
+    const end = transform.point({
+      x: Number(points[points.length - 2] || 0),
+      y: Number(points[points.length - 1] || 0)
+    });
+    return {
+      start: {
+        x: Number(start?.x || 0),
+        y: Number(start?.y || 0)
+      },
+      end: {
+        x: Number(end?.x || 0),
+        y: Number(end?.y || 0)
+      }
+    };
+  }
+
+  function isFiniteLinePoint(point) {
+    return !!point &&
+      Number.isFinite(Number(point.x)) &&
+      Number.isFinite(Number(point.y));
+  }
+
+  function getCanonicalLineEndpoints(startPoint, endPoint) {
+    const start = {
+      x: Number(startPoint?.x || 0),
+      y: Number(startPoint?.y || 0)
+    };
+    const end = {
+      x: Number(endPoint?.x || 0),
+      y: Number(endPoint?.y || 0)
+    };
+    const dx = Number(end.x || 0) - Number(start.x || 0);
+    const dy = Number(end.y || 0) - Number(start.y || 0);
+    const isVerticalDominant = Math.abs(dy) >= Math.abs(dx);
+    const shouldSwap = isVerticalDominant
+      ? (end.y < start.y || (Math.abs(end.y - start.y) < 0.001 && end.x < start.x))
+      : (end.x < start.x || (Math.abs(end.x - start.x) < 0.001 && end.y < start.y));
+    return shouldSwap
+      ? { start: end, end: start }
+      : { start, end };
+  }
+
+  function isWorkspaceLineBox(node) {
+    return !!(window.Konva &&
+      node instanceof window.Konva.Group &&
+      String(node.getAttr?.("workspaceKind") || "").trim() === "lineBox");
+  }
+
+  function getWorkspaceLineBoxParts(node) {
+    if (!isWorkspaceLineBox(node)) return { frame: null, line: null };
+    const children = toStaticArray(typeof node.getChildren === "function" ? node.getChildren() : []);
+    const frame = children.find((child) => String(child?.getAttr?.("workspaceRole") || "").trim() === "frame") || null;
+    const line = children.find((child) => String(child?.getAttr?.("workspaceRole") || "").trim() === "line") || null;
+    return { frame, line };
+  }
+
+  function layoutWorkspaceLineBox(node, options = {}) {
+    const parts = getWorkspaceLineBoxParts(node);
+    if (!parts.frame || !parts.line) return false;
+    const frameWidth = Math.max(48, Number(options.width || parts.frame.width?.() || 220));
+    const frameHeight = Math.max(28, Number(options.height || parts.frame.height?.() || 48));
+    const preferredInset = Number(node.getAttr?.("workspaceLineInset") || 18);
+    const inset = Math.min(Math.max(12, preferredInset), Math.max(12, (frameWidth / 2) - 6));
+    const strokeWidth = Math.max(1, Number(node.getAttr?.("workspaceLineStrokeWidth") || parts.line.strokeWidth?.() || 4));
+    parts.frame.width(frameWidth);
+    parts.frame.height(frameHeight);
+    parts.line.strokeWidth(strokeWidth);
+    parts.line.points([
+      Number(inset.toFixed(4)),
+      Number((frameHeight / 2).toFixed(4)),
+      Number((frameWidth - inset).toFixed(4)),
+      Number((frameHeight / 2).toFixed(4))
+    ]);
+    return true;
+  }
+
+  function normalizeLineAfterTransform(node, options = {}) {
+    if (!window.Konva || !(node instanceof window.Konva.Line)) return false;
+    const current = getLineAbsoluteEndpoints(node);
+    if (!current) {
+      node.scaleX(1);
+      node.scaleY(1);
+      return false;
+    }
+
+    const anchor = String(options.anchor || "");
+    const startSnapshot = options.startSnapshot && typeof options.startSnapshot === "object"
+      ? options.startSnapshot
+      : null;
+    const lockStart = anchor === "bottom-center" || anchor === "middle-right";
+    const lockEnd = anchor === "top-center" || anchor === "middle-left";
+    const hasSnapshotStart = isFiniteLinePoint(startSnapshot?.start);
+    const hasSnapshotEnd = isFiniteLinePoint(startSnapshot?.end);
+
+    let fixed = null;
+    if (lockStart && hasSnapshotStart) {
+      fixed = {
+        x: Number(startSnapshot.start.x || 0),
+        y: Number(startSnapshot.start.y || 0)
+      };
+    } else if (lockEnd && hasSnapshotEnd) {
+      fixed = {
+        x: Number(startSnapshot.end.x || 0),
+        y: Number(startSnapshot.end.y || 0)
+      };
+    } else {
+      fixed = {
+        x: Number(current.start?.x || 0),
+        y: Number(current.start?.y || 0)
+      };
+    }
+
+    const currentStart = {
+      x: Number(current.start?.x || 0),
+      y: Number(current.start?.y || 0)
+    };
+    const currentEnd = {
+      x: Number(current.end?.x || 0),
+      y: Number(current.end?.y || 0)
+    };
+
+    const distanceToFixed = (point) => Math.hypot(
+      Number(point?.x || 0) - Number(fixed?.x || 0),
+      Number(point?.y || 0) - Number(fixed?.y || 0)
+    );
+
+    let moving = distanceToFixed(currentStart) > distanceToFixed(currentEnd)
+      ? currentStart
+      : currentEnd;
+
+    const fallbackMoving = lockEnd && hasSnapshotStart
+      ? {
+        x: Number(startSnapshot.start.x || 0),
+        y: Number(startSnapshot.start.y || 0)
+      }
+      : (lockStart && hasSnapshotEnd
+        ? {
+          x: Number(startSnapshot.end.x || 0),
+          y: Number(startSnapshot.end.y || 0)
+        }
+        : currentEnd);
+
+    let dx = Number(moving.x || 0) - Number(fixed.x || 0);
+    let dy = Number(moving.y || 0) - Number(fixed.y || 0);
+    let nextLength = Math.hypot(dx, dy);
+    if (!(nextLength > 0)) {
+      moving = fallbackMoving;
+      dx = Number(moving.x || 0) - Number(fixed.x || 0);
+      dy = Number(moving.y || 0) - Number(fixed.y || 0);
+      nextLength = Math.hypot(dx, dy);
+    }
+    if (!(nextLength > 0)) {
+      dx = 0;
+      dy = 24;
+    } else if (nextLength < 2) {
+      const factor = 2 / nextLength;
+      dx *= factor;
+      dy *= factor;
+    }
+
+    const rawStart = {
+      x: Number(fixed.x || 0),
+      y: Number(fixed.y || 0)
+    };
+    const rawEnd = {
+      x: Number(fixed.x || 0) + dx,
+      y: Number(fixed.y || 0) + dy
+    };
+    const canonical = getCanonicalLineEndpoints(rawStart, rawEnd);
+    const nextDx = Number(canonical.end.x || 0) - Number(canonical.start.x || 0);
+    const nextDy = Number(canonical.end.y || 0) - Number(canonical.start.y || 0);
+
+    node.x(Number(canonical.start.x || 0));
+    node.y(Number(canonical.start.y || 0));
+    node.rotation(0);
+    node.points([0, 0, Number(nextDx.toFixed(4)), Number(nextDy.toFixed(4))]);
+    node.scaleX(1);
+    node.scaleY(1);
+    return true;
+  }
+
   function normalizeScalableNode(node) {
     if (!node || typeof node.scaleX !== "function" || typeof node.scaleY !== "function") return;
     const sx = Number(node.scaleX() || 1);
@@ -1841,12 +2309,18 @@
     }
 
     if (node instanceof window.Konva.Line) {
-      const points = Array.isArray(node.points?.()) ? node.points() : [];
-      const nextPoints = [];
-      for (let index = 0; index < points.length; index += 2) {
-        nextPoints.push(Number(points[index] || 0) * sx, Number(points[index + 1] || 0) * sy);
-      }
-      node.points(nextPoints);
+      normalizeLineAfterTransform(node);
+      return;
+    }
+
+    if (isWorkspaceLineBox(node)) {
+      const parts = getWorkspaceLineBoxParts(node);
+      const frameWidth = Math.max(48, Number(parts.frame?.width?.() || 220) * sx);
+      const frameHeight = Math.max(28, Number(parts.frame?.height?.() || 48) * sy);
+      layoutWorkspaceLineBox(node, {
+        width: frameWidth,
+        height: frameHeight
+      });
       node.scaleX(1);
       node.scaleY(1);
       return;
@@ -2208,12 +2682,38 @@
     if (typeof node.draggable === "function") node.draggable(true);
     if (typeof node.on === "function") {
       node.on("transformstart", () => {
+        if (node instanceof window.Konva.Line) {
+          const endpoints = getLineAbsoluteEndpoints(node);
+          try { node.setAttr("workspaceLineTransformStart", endpoints || null); } catch (_err) {}
+        }
+        try {
+          node.setAttr("workspaceTransformAnchor", String(ws.transformer?.getActiveAnchor?.() || ""));
+        } catch (_err) {}
         const kind = String(node.getAttr?.("workspaceKind") || "").trim();
         if (kind === "priceGroup") {
           try { node.setAttr("badgeAutoLayout", false); } catch (_err) {}
           return;
         }
         if (isBadgeWorkspaceKind(kind)) captureBadgePriceLayoutState(node);
+      });
+      node.on("transform", () => {
+        if (!(node instanceof window.Konva.Line)) return;
+        if (node.getAttr?.("workspaceLineLiveNormalizing")) return;
+        const transformAnchor = String(node.getAttr?.("workspaceTransformAnchor") || ws.transformer?.getActiveAnchor?.() || "");
+        if (!transformAnchor || transformAnchor === "rotater") return;
+        const startSnapshot = node.getAttr?.("workspaceLineTransformStart");
+        try { node.setAttr("workspaceLineLiveNormalizing", true); } catch (_err) {}
+        try {
+          if (normalizeLineAfterTransform(node, {
+            anchor: transformAnchor,
+            startSnapshot
+          })) {
+            try { ws.transformer.forceUpdate?.(); } catch (_err) {}
+            ws.layer.batchDraw();
+          }
+        } finally {
+          try { node.setAttr("workspaceLineLiveNormalizing", false); } catch (_err) {}
+        }
       });
       node.on("dragstart", () => {
         const kind = String(node.getAttr?.("workspaceKind") || "").trim();
@@ -2238,7 +2738,29 @@
         }
       });
       node.on("transformend", () => {
+        const transformAnchor = String(node.getAttr?.("workspaceTransformAnchor") || "");
+        if (node instanceof window.Konva.Line && transformAnchor === "rotater") {
+          node.scaleX(1);
+          node.scaleY(1);
+          try { node.setAttr("workspaceTransformAnchor", ""); } catch (_err) {}
+          try { node.setAttr("workspaceLineTransformStart", null); } catch (_err) {}
+          ws.layer.batchDraw();
+          return;
+        }
+        if (node instanceof window.Konva.Line) {
+          const startSnapshot = node.getAttr?.("workspaceLineTransformStart");
+          normalizeLineAfterTransform(node, {
+            anchor: transformAnchor,
+            startSnapshot
+          });
+          try { node.setAttr("workspaceTransformAnchor", ""); } catch (_err) {}
+          try { node.setAttr("workspaceLineTransformStart", null); } catch (_err) {}
+          ws.layer.batchDraw();
+          return;
+        }
         normalizeScalableNode(node);
+        try { node.setAttr("workspaceTransformAnchor", ""); } catch (_err) {}
+        try { node.setAttr("workspaceLineTransformStart", null); } catch (_err) {}
         const kind = String(node.getAttr?.("workspaceKind") || "").trim();
         if (isBadgeWorkspaceKind(kind)) {
           void refreshBadgeNodeAfterGeometryChange(node, { syncPrice: true, useStoredLayout: true });
@@ -2275,7 +2797,7 @@
   function addTextNode() {
     const ws = ensureWorkspaceEditor();
     const stageW = Number(ws?.stage?.width?.() || MODULE_BASE_WIDTH);
-    const nextFontSize = getWorkspaceRequestedTextSize(12);
+    const nextFontSize = Math.min(12, getWorkspaceRequestedTextSize(12));
     const text = new window.Konva.Text({
       x: 40,
       y: 40,
@@ -2291,9 +2813,9 @@
     text.setAttr("workspaceKind", "userText");
     fitTextNodeIntoWorkspace(text, {
       maxWidth: Math.round(stageW * 0.52),
-      preferredWidth: Math.round(stageW * 0.34),
+      preferredWidth: Math.round(stageW * 0.42),
       fontSize: nextFontSize,
-      minFontSize: Math.max(12, Math.min(nextFontSize, 18)),
+      minFontSize: 12,
       wrap: false
     });
     syncWorkspaceTextLayout(text, {
@@ -2326,6 +2848,9 @@
     };
     const value = textByField[field] || "Nowy tekst";
     const isLongName = field === "name";
+    const defaultFill = field === "name" || field === "index" || field === "package"
+      ? "#111111"
+      : "#e5eefb";
     const ws = ensureWorkspaceEditor();
     const stageW = Number(ws?.stage?.width?.() || MODULE_BASE_WIDTH);
     const nextFontSize = (field === "name" || field === "index" || field === "package")
@@ -2337,7 +2862,7 @@
       text: value,
       fontSize: nextFontSize,
       fontFamily: "Arial",
-      fill: "#e5eefb",
+      fill: defaultFill,
       lineHeight: isLongName ? 0.96 : 1,
       draggable: true
     };
@@ -2366,6 +2891,29 @@
     return [];
   }
 
+  function getTextFormatState(node) {
+    const textNode = collectTextNodes(node)[0] || null;
+    const fontStyle = String(textNode?.fontStyle?.() || "").toLowerCase();
+    const textDecoration = String(textNode?.textDecoration?.() || "").toLowerCase();
+    return {
+      hasText: !!textNode,
+      bold: fontStyle.includes("bold"),
+      italic: fontStyle.includes("italic"),
+      underline: textDecoration.includes("underline")
+    };
+  }
+
+  function syncTextFormatButtons(node) {
+    const modal = document.getElementById(MODAL_ID);
+    if (!modal) return;
+    const stateMap = getTextFormatState(node);
+    modal.querySelectorAll("[data-text-format]").forEach((button) => {
+      const format = String(button.getAttribute("data-text-format") || "").trim();
+      button.classList.toggle("is-active", !!stateMap[format]);
+      button.toggleAttribute("disabled", !stateMap.hasText);
+    });
+  }
+
   function syncTextStyleControlsFromNode(node) {
     const fontEl = document.getElementById(TEXT_FONT_ID);
     const colorEl = document.getElementById(TEXT_COLOR_ID);
@@ -2375,6 +2923,7 @@
 
     const textNode = collectTextNodes(node)[0] || null;
     if (!textNode) {
+      syncTextFormatButtons(null);
       if (dividerColorEl && node instanceof window.Konva.Line) {
         const stroke = String(node.stroke?.() || "#9fb6d7");
         if (/^#([0-9a-f]{6})$/i.test(stroke)) dividerColorEl.value = stroke;
@@ -2390,6 +2939,34 @@
     }
     if (/^#([0-9a-f]{6})$/i.test(fill)) colorEl.value = fill;
     sizeEl.value = String(Math.max(6, Math.min(280, size)));
+    syncTextFormatButtons(textNode);
+  }
+
+  function toggleSelectedTextFormatting(format) {
+    const ws = ensureWorkspaceEditor();
+    if (!ws?.selectedNode) return;
+    const targets = collectTextNodes(ws.selectedNode);
+    if (!targets.length) {
+      setSaveStatus("Zaznacz tekst, zeby zmienic jego styl.", "error");
+      return;
+    }
+    const activeState = getTextFormatState(ws.selectedNode);
+    const enable = !activeState[format];
+    targets.forEach((textNode) => {
+      const current = getTextFormatState(textNode);
+      const bold = format === "bold" ? enable : current.bold;
+      const italic = format === "italic" ? enable : current.italic;
+      const underline = format === "underline" ? enable : current.underline;
+      if (typeof textNode.fontStyle === "function") {
+        const nextFontStyle = [italic ? "italic" : "", bold ? "bold" : ""].filter(Boolean).join(" ").trim() || "normal";
+        textNode.fontStyle(nextFontStyle);
+      }
+      if (typeof textNode.textDecoration === "function") {
+        textNode.textDecoration(underline ? "underline" : "");
+      }
+    });
+    ws.layer.batchDraw();
+    syncTextFormatButtons(ws.selectedNode);
   }
 
   function applyTextStyleToSelected() {
@@ -2436,6 +3013,12 @@
     const dividerColorEl = document.getElementById(DIVIDER_COLOR_ID);
     if (!dividerColorEl) return;
     const nextColor = String(dividerColorEl.value || "#9fb6d7").trim() || "#9fb6d7";
+    if (isWorkspaceLineBox(ws.selectedNode)) {
+      const parts = getWorkspaceLineBoxParts(ws.selectedNode);
+      if (typeof parts.line?.stroke === "function") parts.line.stroke(nextColor);
+      ws.layer.batchDraw();
+      return;
+    }
     const isLine = ws.selectedNode instanceof window.Konva.Line;
     if (!isLine) return;
     if (typeof ws.selectedNode.stroke === "function") ws.selectedNode.stroke(nextColor);
@@ -2482,6 +3065,7 @@
 
   function addBadgeNode(shape = "rect") {
     const isCircle = shape === "circle";
+    const badgeFill = getSelectedBadgeColor();
     const group = new window.Konva.Group({
       x: 60,
       y: 60,
@@ -2492,7 +3076,7 @@
         x: 64,
         y: 40,
         radius: 40,
-        fill: "#d71920",
+        fill: badgeFill,
         stroke: "#f8fafc",
         strokeWidth: 2
       })
@@ -2502,7 +3086,7 @@
         width: 150,
         height: 74,
         cornerRadius: 14,
-        fill: "#d71920",
+        fill: badgeFill,
         stroke: "#f8fafc",
         strokeWidth: 2
       });
@@ -2563,7 +3147,7 @@
     group.add(unitText);
     group.setAttr("workspaceLabel", "Cena");
     group.setAttr("workspaceKind", "priceGroup");
-    group.setAttr("badgeAutoLayout", !!getWorkspaceBadgeNode());
+    group.setAttr("badgeAutoLayout", false);
     layoutPriceGroup(group, { majorSize: 64, ratios: defaultRatios });
     addWorkspaceNode(group);
   }
@@ -2626,14 +3210,39 @@
   }
 
   function addLineNode() {
-    const line = new window.Konva.Line({
-      points: [40, 40, 300, 160],
-      stroke: "#f8fafc",
-      strokeWidth: 4,
+    const dividerColorEl = document.getElementById(DIVIDER_COLOR_ID);
+    const lineColor = String(dividerColorEl?.value || "#f8fafc").trim() || "#f8fafc";
+    const group = new window.Konva.Group({
+      x: 40,
+      y: 40,
       draggable: true
     });
-    line.setAttr("workspaceLabel", "Linia");
-    addWorkspaceNode(line);
+    const frame = new window.Konva.Rect({
+      x: 0,
+      y: 0,
+      width: 220,
+      height: 52,
+      fill: "#000000",
+      opacity: 0,
+      listening: false
+    });
+    frame.setAttr("workspaceRole", "frame");
+    const line = new window.Konva.Line({
+      points: [18, 26, 202, 26],
+      stroke: lineColor,
+      strokeWidth: 4,
+      lineCap: "round",
+      lineJoin: "round"
+    });
+    line.setAttr("workspaceRole", "line");
+    group.add(frame);
+    group.add(line);
+    group.setAttr("workspaceLabel", "Linia");
+    group.setAttr("workspaceKind", "lineBox");
+    group.setAttr("workspaceLineInset", 18);
+    group.setAttr("workspaceLineStrokeWidth", 4);
+    layoutWorkspaceLineBox(group);
+    addWorkspaceNode(group);
   }
 
   function addImageNodeFromUrl(url, label = "Obraz", kind = "", options = {}) {
@@ -3108,8 +3717,8 @@
     const ws = ensureWorkspaceEditor();
     if (!ws?.layer) return;
     const children = typeof ws.layer.getChildren === "function" ? ws.layer.getChildren() : [];
-    const list = Array.isArray(children) ? children : (typeof children.toArray === "function" ? children.toArray() : []);
-    list.forEach((node) => {
+    const list = toStaticArray(children).filter((node) => node && node !== ws.transformer);
+    list.reverse().forEach((node) => {
       if (!node || node === ws.transformer) return;
       try { node.destroy(); } catch (_err) {}
     });
@@ -3366,8 +3975,7 @@
     const ws = ensureWorkspaceEditor();
     if (!ws?.layer) return;
     const nodes = ws.layer.find((node) => node && node !== ws.transformer && isWorkspacePriceStyleNode(node));
-    const list = Array.isArray(nodes) ? nodes : (typeof nodes?.toArray === "function" ? nodes.toArray() : []);
-    list.forEach((node) => {
+    toStaticArray(nodes).reverse().forEach((node) => {
       try { node.destroy(); } catch (_err) {}
     });
     ws.layer.batchDraw();
@@ -3478,7 +4086,7 @@
         indexNode.x((clampPct(single?.indexPos?.x, 66) / 100) * stageW);
         indexNode.y((clampPct(single?.indexPos?.y, 36) / 100) * stageH);
         if (typeof indexNode.fontFamily === "function") indexNode.fontFamily(String(textCfg.metaFontFamily || "Arial"));
-        if (typeof indexNode.fill === "function") indexNode.fill(String(textCfg.indexColor || "#9ca3af"));
+        if (typeof indexNode.fill === "function") indexNode.fill(String(textCfg.indexColor || "#111111"));
         if (typeof indexNode.fontStyle === "function") indexNode.fontStyle(textCfg.indexItalic ? "italic" : "normal");
       }
     }
@@ -3626,8 +4234,32 @@
     return true;
   }
 
+  async function clearAllStyleBuilderState(options = {}) {
+    activeLoadedStyleId = "";
+    activeLoadedPriceStyleId = "";
+    refreshSavedStylesSelect("");
+    refreshSavedPriceStylesSelect("");
+    setDraftSnapshotForTab(BUILDER_TAB_PRODUCT, null);
+    setDraftSnapshotForTab(BUILDER_TAB_PRICE, null);
+    refreshPriceBadgeSelect(BUILDER_TAB_PRODUCT, "solid");
+    refreshPriceBadgeSelect(BUILDER_TAB_PRICE, "solid");
+
+    const styleNameInput = document.getElementById(STYLE_NAME_ID);
+    if (styleNameInput) styleNameInput.value = "";
+    const priceStyleNameInput = document.getElementById(PRICE_STYLE_NAME_ID);
+    if (priceStyleNameInput) priceStyleNameInput.value = "";
+
+    await resetWorkspaceToBlankState({
+      clearName: true,
+      preserveLoadedProductStyle: false,
+      showStatus: options.showStatus !== false,
+      statusMessage: String(options.statusMessage || "Workspace wyczyszczony. Wszystkie elementy i style zostaly usuniete.")
+    });
+  }
+
   async function seedWorkspaceWithSelectedProduct(product, options = {}) {
     if (!product) return false;
+    setDraftSnapshotForTab(BUILDER_TAB_PRODUCT, null);
     await resetWorkspaceToBlankState({
       clearName: options.clearName !== false,
       showStatus: false
@@ -3857,6 +4489,37 @@
     if (ws.layer) ws.layer.batchDraw();
   }
 
+  function nudgeSelectedNodeBy(deltaX, deltaY) {
+    const ws = ensureWorkspaceEditor();
+    if (!ws || !ws.selectedNode) return false;
+    const node = ws.selectedNode;
+    if (typeof node.x !== "function" || typeof node.y !== "function") return false;
+    const rawX = Number(node.x() || 0) + Number(deltaX || 0);
+    const rawY = Number(node.y() || 0) + Number(deltaY || 0);
+    let nextPos = { x: rawX, y: rawY };
+    const boundFn = typeof node.dragBoundFunc === "function" ? node.dragBoundFunc() : null;
+    if (typeof boundFn === "function") {
+      try {
+        const bounded = boundFn(nextPos);
+        if (bounded && Number.isFinite(Number(bounded.x)) && Number.isFinite(Number(bounded.y))) {
+          nextPos = {
+            x: Number(bounded.x),
+            y: Number(bounded.y)
+          };
+        }
+      } catch (_err) {}
+    }
+    node.x(nextPos.x);
+    node.y(nextPos.y);
+    const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+    if (isBadgeWorkspaceKind(kind)) {
+      try { syncPriceGroupToBadgeNode(node, { useStoredLayout: true }); } catch (_err) {}
+    }
+    try { ws.transformer?.forceUpdate?.(); } catch (_err) {}
+    ws.layer?.batchDraw?.();
+    return true;
+  }
+
   function duplicateSelectedNode() {
     const ws = ensureWorkspaceEditor();
     if (!ws || !ws.selectedNode || typeof ws.selectedNode.clone !== "function") return;
@@ -4016,14 +4679,17 @@
         setSaveStatus("Nie znaleziono stylu do wczytania.", "error");
         return;
       }
+      setDraftSnapshotForTab(BUILDER_TAB_PRODUCT, null);
+      const styleNameInput = document.getElementById(STYLE_NAME_ID);
+      if (styleNameInput) styleNameInput.value = "";
       const ok = await loadStyleToWorkspace(styleDef);
       if (!ok) {
         setSaveStatus("Nie udalo sie wczytac stylu do workspace.", "error");
         return;
       }
       activeLoadedStyleId = styleId;
-      const input = document.getElementById(STYLE_NAME_ID);
-      if (input) input.value = String(styleDef.label || "");
+      refreshSavedStylesSelect(styleId);
+      if (styleNameInput) styleNameInput.value = String(styleDef.label || "");
       setDraftSnapshotForTab(BUILDER_TAB_PRODUCT, styleDef?.config?.__editorSnapshot || buildWorkspaceSnapshot());
       setSaveStatus(`Wczytano styl do edycji: ${String(styleDef.label || styleId)}.`, "default");
       return;
@@ -4040,41 +4706,40 @@
         setSaveStatus("Nie znaleziono stylu ceny do wczytania.", "error");
         return;
       }
+      setDraftSnapshotForTab(BUILDER_TAB_PRICE, null);
+      const priceStyleNameInput = document.getElementById(PRICE_STYLE_NAME_ID);
+      if (priceStyleNameInput) priceStyleNameInput.value = "";
       const ok = await loadPriceStyleToWorkspace(styleDef);
       if (!ok) {
         setSaveStatus("Nie udalo sie wczytac stylu ceny do workspace.", "error");
         return;
       }
       activeLoadedPriceStyleId = styleId;
-      const input = document.getElementById(PRICE_STYLE_NAME_ID);
-      if (input) input.value = String(styleDef.label || "");
+      if (priceStyleNameInput) priceStyleNameInput.value = String(styleDef.label || "");
       refreshSavedPriceStylesSelect(styleId);
       setDraftSnapshotForTab(BUILDER_TAB_PRICE, styleDef.snapshot || buildWorkspaceSnapshot());
       setSaveStatus(`Wczytano styl ceny: ${String(styleDef.label || styleId)}.`, "default");
       return;
     }
     if (action === "clear-style") {
-      if (String(state.activeBuilderTab || "") === BUILDER_TAB_PRICE) {
-        activeLoadedPriceStyleId = "";
-        refreshSavedPriceStylesSelect("");
-        setDraftSnapshotForTab(BUILDER_TAB_PRICE, null);
-        const priceNameInput = document.getElementById(PRICE_STYLE_NAME_ID);
-        if (priceNameInput) priceNameInput.value = "";
-        refreshPriceBadgeSelect(BUILDER_TAB_PRICE, "solid");
-      } else {
-        activeLoadedStyleId = "";
-        refreshSavedStylesSelect("");
-        setDraftSnapshotForTab(BUILDER_TAB_PRODUCT, null);
-        refreshPriceBadgeSelect(BUILDER_TAB_PRODUCT, "solid");
-      }
-      await resetWorkspaceToBlankState({
-        clearName: String(state.activeBuilderTab || "") !== BUILDER_TAB_PRICE,
-        preserveLoadedProductStyle: String(state.activeBuilderTab || "") === BUILDER_TAB_PRICE,
+      await clearAllStyleBuilderState({
         showStatus: true,
         statusMessage: String(state.activeBuilderTab || "") === BUILDER_TAB_PRICE
-          ? "Workspace wyczyszczony. Tworzysz teraz pusty styl ceny."
-          : "Workspace wyczyszczony. Masz pusty obszar roboczy."
+          ? "Workspace wyczyszczony. Usunieto wszystkie elementy i style ceny."
+          : "Workspace wyczyszczony. Usunieto wszystkie elementy i style."
       });
+      return;
+    }
+    if (action === "workspace-zoom-in") {
+      setWorkspaceZoom(getWorkspaceZoom() + 0.15);
+      return;
+    }
+    if (action === "workspace-zoom-out") {
+      setWorkspaceZoom(getWorkspaceZoom() - 0.15);
+      return;
+    }
+    if (action === "workspace-zoom-reset") {
+      setWorkspaceZoom(1);
       return;
     }
     if (action === "save-style") {
@@ -4260,6 +4925,30 @@
       });
       return;
     }
+    if (action === "rotate-snap-0") {
+      mutateSelectedNode((node) => {
+        node.rotation(0);
+      });
+      return;
+    }
+    if (action === "rotate-snap-90") {
+      mutateSelectedNode((node) => {
+        node.rotation(90);
+      });
+      return;
+    }
+    if (action === "rotate-snap-180") {
+      mutateSelectedNode((node) => {
+        node.rotation(180);
+      });
+      return;
+    }
+    if (action === "rotate-snap-270") {
+      mutateSelectedNode((node) => {
+        node.rotation(270);
+      });
+      return;
+    }
     if (action === "bring-front") {
       mutateSelectedNode((node) => node.moveToTop());
       return;
@@ -4373,7 +5062,7 @@
       #${MODAL_ID} .new-style-body {
         min-height: 0;
         display: grid;
-        grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+        grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
         gap: 8px;
         align-items: stretch;
       }
@@ -4389,7 +5078,10 @@
       }
 
       #${MODAL_ID} .new-style-panel--data {
-        grid-template-rows: auto auto auto minmax(160px, 1fr) minmax(120px, 0.72fr);
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        overflow: auto;
       }
 
       #${MODAL_ID} .new-style-panel--builder {
@@ -4435,13 +5127,41 @@
 
       #${MODAL_ID} .new-style-product-list {
         min-height: 0;
-        overflow: auto;
-        display: grid;
-        gap: 8px;
-        padding-right: 2px;
+        flex: 0 1 420px;
+        min-width: min(100%, 280px);
+        max-width: min(420px, 100%);
+      }
+
+      #${MODAL_ID} .new-style-product-browser {
+        min-height: 0;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+      }
+
+      #${MODAL_ID} .new-style-product-browser .new-style-input {
+        flex: 0 1 320px;
+        min-width: min(100%, 240px);
+        max-width: min(320px, 100%);
+      }
+
+      #${MODAL_ID} .new-style-product-select {
+        width: 100%;
+        height: 42px;
+        border: 1px solid rgba(96, 165, 250, 0.22);
+        border-radius: 12px;
+        background: rgba(4, 8, 16, 0.94);
+        color: #dbe7f6;
+        padding: 10px 12px;
+        font-size: 13px;
+        font-weight: 700;
+        box-sizing: border-box;
       }
 
       #${MODAL_ID} .new-style-product-item {
+        flex: 0 0 320px;
+        max-width: min(320px, 100%);
         padding: 11px 12px;
         border-radius: 12px;
         border: 1px solid rgba(148, 163, 184, 0.14);
@@ -4513,30 +5233,241 @@
       }
 
       #${MODAL_ID} .new-style-builder-tabs {
-        display: flex;
-        align-items: center;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
-        overflow-x: auto;
-        padding: 1px 2px 4px 0;
+        overflow: visible;
+        padding: 4px 0 6px;
       }
 
       #${MODAL_ID} .new-style-builder-tab {
-        flex: 0 0 auto;
+        min-width: 0;
         border: 1px solid rgba(148, 163, 184, 0.24);
         border-radius: 999px;
         background: rgba(8, 15, 30, 0.66);
         color: #dbe7f6;
         font-size: 12px;
         font-weight: 800;
-        line-height: 1.15;
+        line-height: 1.2;
         padding: 8px 14px;
         cursor: pointer;
+        text-align: center;
+        white-space: normal;
       }
 
       #${MODAL_ID} .new-style-builder-tab.is-active {
         border-color: rgba(34, 211, 238, 0.7);
         background: rgba(8, 145, 178, 0.18);
         box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.18);
+      }
+
+      #${MODAL_ID} .new-style-sidebar-section {
+        display: grid;
+        gap: 10px;
+        padding: 11px;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, 0.14);
+        background: linear-gradient(180deg, rgba(10, 18, 34, 0.84), rgba(8, 14, 26, 0.96));
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+      }
+
+      #${MODAL_ID} .new-style-sidebar-section-head {
+        display: grid;
+        gap: 4px;
+      }
+
+      #${MODAL_ID} .new-style-sidebar-section-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        font-size: 12px;
+        font-weight: 800;
+        color: #f8fbff;
+      }
+
+      #${MODAL_ID} .new-style-sidebar-section-copy {
+        margin: 0;
+        color: #7f95b4;
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
+      #${MODAL_ID} .new-style-sidebar-icon-chip {
+        width: 26px;
+        height: 26px;
+        flex: 0 0 26px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 9px;
+        color: #67e8f9;
+        border: 1px solid rgba(34, 211, 238, 0.26);
+        background: linear-gradient(180deg, rgba(8, 145, 178, 0.22), rgba(8, 15, 30, 0.4));
+      }
+
+      #${MODAL_ID} .new-style-sidebar-icon-chip svg {
+        width: 14px;
+        height: 14px;
+        display: block;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      #${MODAL_ID} .new-style-sidebar-control-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      #${MODAL_ID} .new-style-sidebar-control {
+        display: grid;
+        gap: 5px;
+      }
+
+      #${MODAL_ID} .new-style-sidebar-control--span2 {
+        grid-column: 1 / -1;
+      }
+
+      #${MODAL_ID} .new-style-sidebar-control-label {
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #7f95b4;
+      }
+
+      #${MODAL_ID} .new-style-sidebar-control .new-style-save-input,
+      #${MODAL_ID} .new-style-sidebar-control .new-style-text-font,
+      #${MODAL_ID} .new-style-sidebar-control .new-style-text-size,
+      #${MODAL_ID} .new-style-sidebar-control .new-style-text-color {
+        width: 100%;
+        min-width: 0;
+        margin: 0;
+        height: 40px;
+        border-radius: 12px;
+      }
+
+      #${MODAL_ID} .new-style-sidebar-control .new-style-text-color {
+        padding: 4px;
+      }
+
+      #${MODAL_ID} .new-style-format-row {
+        display: grid;
+        grid-template-columns: 40px 40px 40px minmax(0, 1fr) minmax(0, 1fr);
+        gap: 8px;
+      }
+
+      #${MODAL_ID} .new-style-format-btn {
+        min-width: 0;
+        min-height: 40px;
+        padding: 0;
+        justify-content: center;
+        text-align: center;
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      #${MODAL_ID} .new-style-format-btn__label {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+      }
+
+      #${MODAL_ID} .new-style-format-btn[data-text-format="italic"] .new-style-format-btn__label {
+        font-style: italic;
+      }
+
+      #${MODAL_ID} .new-style-format-btn[data-text-format="underline"] .new-style-format-btn__label {
+        text-decoration: underline;
+      }
+
+      #${MODAL_ID} .new-style-format-btn.is-active,
+      #${MODAL_ID} .new-style-tool-btn.is-active {
+        border-color: rgba(34, 211, 238, 0.72);
+        background: rgba(8, 145, 178, 0.16);
+        box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.18);
+      }
+
+      #${MODAL_ID} .new-style-format-btn[disabled] {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      #${MODAL_ID} .new-style-tool-btn--sidebar {
+        width: 100%;
+        min-width: 0;
+        min-height: 42px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 10px;
+        padding: 10px 12px;
+        white-space: normal;
+        text-align: left;
+      }
+
+      #${MODAL_ID} .new-style-tool-btn--sidebar .new-style-tool-btn__icon {
+        width: 18px;
+        height: 18px;
+        flex: 0 0 18px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: #67e8f9;
+      }
+
+      #${MODAL_ID} .new-style-tool-btn--sidebar .new-style-tool-btn__icon svg {
+        width: 16px;
+        height: 16px;
+        display: block;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      #${MODAL_ID} .new-style-tool-btn--sidebar .new-style-tool-btn__label {
+        display: block;
+        min-width: 0;
+        line-height: 1.25;
+      }
+
+      #${MODAL_ID} .new-style-tool-btn--mini {
+        justify-content: center;
+        padding-inline: 10px;
+      }
+
+      #${MODAL_ID} .new-style-tool-btn--mini .new-style-tool-btn__icon {
+        width: 16px;
+        height: 16px;
+        flex-basis: 16px;
+      }
+
+      #${MODAL_ID} .new-style-tool-btn--mini .new-style-tool-btn__label {
+        font-size: 10px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      #${MODAL_ID} .new-style-tool-btn--tile {
+        min-height: 54px;
+        align-items: flex-start;
+      }
+
+      #${MODAL_ID} .new-style-side-tool-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      #${MODAL_ID} .new-style-side-tool-grid--actions .new-style-tool-btn--sidebar {
+        min-height: 40px;
       }
 
       #${MODAL_ID} [data-builder-panel][hidden] {
@@ -4546,8 +5477,83 @@
       #${MODAL_ID} .new-style-workspace {
         min-height: 0;
         display: grid;
-        grid-template-rows: auto auto auto auto minmax(0, 1fr) auto auto auto;
-        gap: 4px;
+        grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+        gap: 8px;
+      }
+
+      #${MODAL_ID} .new-style-workspace-main {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 240px;
+        grid-template-rows: minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: stretch;
+      }
+
+      #${MODAL_ID} .new-style-workspace-actions {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      #${MODAL_ID} .new-style-workspace-actions-bar {
+        flex: 1 1 720px;
+        min-width: min(100%, 420px);
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 0.9fr) auto;
+        gap: 8px;
+        align-items: center;
+      }
+
+      #${MODAL_ID} .new-style-workspace-actions-bar .new-style-save-input {
+        width: 100%;
+        min-width: 0;
+      }
+
+      #${MODAL_ID} .new-style-workspace-actions-bar .new-style-tool-btn {
+        min-height: 40px;
+        white-space: nowrap;
+      }
+
+      #${MODAL_ID} .new-style-canvas-action {
+        min-height: 40px;
+        padding-inline: 16px;
+        flex: 0 0 auto;
+      }
+
+      #${MODAL_ID} .new-style-workspace-actions-side {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        flex: 0 1 auto;
+        margin-left: auto;
+      }
+
+      #${MODAL_ID} .new-style-workspace-zoom {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 12px;
+        background: rgba(8, 15, 30, 0.54);
+      }
+
+      #${MODAL_ID} .new-style-workspace-zoom .new-style-tool-btn {
+        min-width: 40px;
+        min-height: 36px;
+        padding-inline: 10px;
+      }
+
+      #${MODAL_ID} .new-style-workspace-zoom-value {
+        min-width: 54px;
+        text-align: center;
+        font-size: 11px;
+        font-weight: 800;
+        color: #dbe7f6;
       }
 
       #${MODAL_ID} .new-style-workspace-tools {
@@ -4559,6 +5565,31 @@
         overflow-y: hidden;
         padding: 1px 2px 4px 0;
         scrollbar-width: thin;
+      }
+
+      #${MODAL_ID} .new-style-workspace-tools--sidebar {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        overflow: visible;
+        padding: 1px 0 2px;
+      }
+
+      #${MODAL_ID} .new-style-workspace-tools--side {
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        align-content: start;
+        padding-top: 8px;
+        grid-column: 2;
+        grid-row: 1;
+      }
+
+      #${MODAL_ID} .new-style-workspace-tools--side .new-style-tool-btn {
+        width: 100%;
+        min-width: 0;
+        text-align: center;
+        white-space: normal;
       }
 
       #${MODAL_ID} .new-style-tool-btn {
@@ -4588,6 +5619,15 @@
         overflow-y: hidden;
         padding: 1px 2px 4px 0;
         scrollbar-width: thin;
+      }
+
+      #${MODAL_ID} .new-style-text-tools--sidebar,
+      #${MODAL_ID} .new-style-save-tools--sidebar {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+        overflow: visible;
+        padding: 1px 0 2px;
       }
 
       #${MODAL_ID} .new-style-text-tools-label {
@@ -4647,6 +5687,33 @@
         font-weight: 700;
         height: 34px;
         padding: 7px 10px;
+      }
+
+      #${MODAL_ID} .new-style-text-tools.new-style-text-tools--sidebar,
+      #${MODAL_ID} .new-style-save-tools.new-style-save-tools--sidebar {
+        display: grid;
+        grid-template-columns: 1fr;
+        align-items: stretch;
+        gap: 8px;
+        overflow: visible;
+        padding: 1px 0 2px;
+      }
+
+      #${MODAL_ID} .new-style-workspace-tools--sidebar .new-style-tool-btn,
+      #${MODAL_ID} .new-style-text-tools--sidebar .new-style-tool-btn,
+      #${MODAL_ID} .new-style-save-tools--sidebar .new-style-tool-btn {
+        width: 100%;
+        text-align: center;
+        white-space: normal;
+        min-height: 40px;
+      }
+
+      #${MODAL_ID} .new-style-text-tools--sidebar .new-style-text-font,
+      #${MODAL_ID} .new-style-text-tools--sidebar .new-style-text-size,
+      #${MODAL_ID} .new-style-text-tools--sidebar .new-style-text-color,
+      #${MODAL_ID} .new-style-save-tools--sidebar .new-style-save-input {
+        width: 100%;
+        min-width: 0;
       }
 
       #${MODAL_ID} .new-style-save-status {
@@ -4758,6 +5825,12 @@
         box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.28);
       }
 
+      #${MODAL_ID} .new-style-badge-card__solid--rect {
+        width: 76px;
+        height: 48px;
+        border-radius: 14px;
+      }
+
       #${MODAL_ID} .new-style-badge-card__label {
         font-size: 11px;
         font-weight: 700;
@@ -4769,6 +5842,8 @@
 
       #${MODAL_ID} .new-style-canvas {
         position: relative;
+        grid-column: 1;
+        grid-row: 1 / span 2;
         width: auto;
         max-width: 100%;
         height: 100%;
@@ -4796,7 +5871,7 @@
           linear-gradient(to bottom, rgba(148, 163, 184, 0.08) 1px, transparent 1px),
           linear-gradient(180deg, rgba(8, 13, 24, 0.96), rgba(12, 18, 32, 0.98));
         background-size: auto, 24px 24px, 24px 24px, auto;
-        overflow: hidden;
+        overflow: auto;
       }
 
       #${MODAL_ID} .new-style-workspace-stage {
@@ -4847,17 +5922,91 @@
       }
 
       #${MODAL_ID} .new-style-workspace-hint {
-        position: absolute;
-        right: 12px;
-        bottom: 12px;
-        max-width: min(40%, 340px);
-        padding: 8px 10px;
-        border-radius: 12px;
-        border: 1px solid rgba(148, 163, 184, 0.2);
-        background: rgba(2, 6, 23, 0.55);
-        color: #8ea4c2;
+        position: static;
+        grid-column: 2;
+        grid-row: 2;
+        width: 100%;
+        max-width: 100%;
+        display: flex;
+        align-items: end;
+        justify-content: center;
+        align-self: end;
+        pointer-events: none;
+        position: relative;
+        z-index: 6;
+      }
+
+      #${MODAL_ID} .new-style-workspace-hint-controls {
+        width: 100%;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 5px;
+        pointer-events: none;
+      }
+
+      #${MODAL_ID} .new-style-workspace-hint-zoom {
+        display: grid;
+        grid-template-columns: 52px minmax(0, 1fr) 52px;
+        align-items: center;
+        gap: 4px;
+        width: 100%;
+        pointer-events: none;
+      }
+
+      #${MODAL_ID} .new-style-workspace-hint-zoom .new-style-tool-btn {
+        width: 100%;
+        min-width: 0;
+        min-height: 26px;
+        padding-inline: 7px;
+        border-radius: 9px;
         font-size: 11px;
-        line-height: 1.4;
+        pointer-events: auto;
+      }
+
+      #${MODAL_ID} .new-style-workspace-hint-zoom .new-style-workspace-zoom-value {
+        flex: 1 1 auto;
+        min-width: 42px;
+        font-size: 10px;
+      }
+
+      #${MODAL_ID} .new-style-workspace-hint .new-style-tool-btn {
+        width: 100%;
+        min-height: 30px;
+        border-radius: 10px;
+        border-color: rgba(103, 232, 249, 0.18);
+        background:
+          linear-gradient(180deg, rgba(13, 23, 42, 0.94), rgba(8, 15, 30, 0.98));
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.08),
+          0 6px 14px rgba(2, 6, 23, 0.14);
+        color: #e5eefb !important;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: auto;
+      }
+
+      #${MODAL_ID} .new-style-workspace-hint .new-style-tool-btn:hover {
+        border-color: rgba(34, 211, 238, 0.44);
+        background:
+          linear-gradient(180deg, rgba(18, 32, 58, 0.96), rgba(10, 20, 38, 1));
+        transform: translateY(-1px);
+      }
+
+      #${MODAL_ID} .new-style-workspace-hint .new-style-tool-btn:active {
+        transform: translateY(0);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.06),
+          0 5px 12px rgba(2, 6, 23, 0.18);
+      }
+
+      #${MODAL_ID} .new-style-workspace-hint .new-style-canvas-action {
+        min-height: 30px;
+        padding-inline: 10px;
+        border-color: rgba(34, 211, 238, 0.28);
       }
 
       #${MODAL_ID} .new-style-workspace-selected {
@@ -4871,36 +6020,45 @@
 
       #${MODAL_ID} .new-style-workspace-tools::-webkit-scrollbar,
       #${MODAL_ID} .new-style-text-tools::-webkit-scrollbar,
-      #${MODAL_ID} .new-style-save-tools::-webkit-scrollbar {
+      #${MODAL_ID} .new-style-save-tools::-webkit-scrollbar,
+      #${MODAL_ID} .new-style-product-list::-webkit-scrollbar {
         width: 8px;
         height: 8px;
       }
 
       #${MODAL_ID} .new-style-workspace-tools::-webkit-scrollbar-thumb,
       #${MODAL_ID} .new-style-text-tools::-webkit-scrollbar-thumb,
-      #${MODAL_ID} .new-style-save-tools::-webkit-scrollbar-thumb {
+      #${MODAL_ID} .new-style-save-tools::-webkit-scrollbar-thumb,
+      #${MODAL_ID} .new-style-product-list::-webkit-scrollbar-thumb {
         background: rgba(103, 232, 249, 0.34);
         border-radius: 999px;
       }
 
       @media (max-width: 1450px) {
         #${MODAL_ID} .new-style-body {
-          grid-template-columns: minmax(270px, 330px) minmax(0, 1fr);
+          grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+        }
+
+        #${MODAL_ID} .new-style-product-item {
+          flex-basis: 280px;
         }
       }
 
       @media (max-width: 1240px) {
         #${MODAL_ID} .new-style-body {
           grid-template-columns: 1fr;
+          grid-auto-rows: minmax(320px, auto);
+          overflow: auto;
         }
 
         #${MODAL_ID} .new-style-panel--builder {
           order: 1;
+          min-height: 360px;
         }
 
         #${MODAL_ID} .new-style-panel--data {
           order: 2;
-          grid-template-rows: auto auto auto minmax(180px, 1fr) minmax(140px, 180px);
+          min-height: 420px;
         }
       }
 
@@ -4925,16 +6083,32 @@
         }
 
         #${MODAL_ID} .new-style-workspace {
-          grid-template-rows: auto auto auto minmax(280px, 1fr) auto auto auto;
+          grid-template-rows: auto auto minmax(280px, 1fr) auto auto;
+        }
+
+        #${MODAL_ID} .new-style-workspace-main {
+          grid-template-columns: 1fr;
+        }
+
+        #${MODAL_ID} .new-style-workspace-actions-bar {
+          grid-template-columns: 1fr auto;
+        }
+
+        #${MODAL_ID} .new-style-workspace-actions-side {
+          width: 100%;
+          justify-content: flex-end;
         }
 
         #${MODAL_ID} .new-style-canvas {
           min-width: 0;
         }
 
+        #${MODAL_ID} .new-style-product-item {
+          flex-basis: 240px;
+        }
+
         #${MODAL_ID} .new-style-workspace-hint {
-          max-width: min(60%, 220px);
-          font-size: 10px;
+          max-width: 180px;
         }
       }
 
@@ -4962,10 +6136,6 @@
           font-size: 11px;
         }
 
-        #${MODAL_ID} .new-style-workspace-hint {
-          display: none;
-        }
-
         #${MODAL_ID} .new-style-save-input {
           min-width: 180px;
         }
@@ -4985,7 +6155,7 @@
         <div class="new-style-header">
           <div>
             <h2 class="new-style-title" id="newStyleTitle">New Style</h2>
-            <p class="new-style-subtitle">Po lewej baza produktow z JSON, po prawej workspace pod budowe nowego kreatora stylow.</p>
+            <p class="new-style-subtitle">Po lewej przybornik, po prawej lista produktow i workspace pod budowe nowego kreatora stylow.</p>
           </div>
           <div class="new-style-actions">
             <button type="button" class="new-style-btn" id="${REFRESH_BTN_ID}">Odswiez baze</button>
@@ -4995,13 +6165,158 @@
         <div class="new-style-body">
           <section class="new-style-panel new-style-panel--data">
             <div>
-              <h3 class="new-style-panel-title">Baza produktow</h3>
-              <p class="new-style-panel-note">${PRODUCT_DATA_URL}</p>
+              <h3 class="new-style-panel-title">Przybornik</h3>
+              <p class="new-style-panel-note">Szybki panel stylu z sekcjami i ikonami jak w edytorze projektu.</p>
             </div>
-            <div class="new-style-json-status" id="${PRODUCT_STATUS_ID}">Ladowanie danych produktowych...</div>
-            <input id="${PRODUCT_SEARCH_ID}" class="new-style-input" type="search" placeholder="Szukaj po nazwie, indeksie, EAN albo marce">
-            <div id="${PRODUCT_LIST_ID}" class="new-style-product-list"></div>
-            <textarea id="${PRODUCT_JSON_ID}" class="new-style-json-viewer" spellcheck="false" readonly></textarea>
+            <div class="new-style-builder-tabs">
+              <button type="button" class="new-style-builder-tab is-active" data-builder-tab="${BUILDER_TAB_PRODUCT}">Nowy styl produktow</button>
+              <button type="button" class="new-style-builder-tab" data-builder-tab="${BUILDER_TAB_PRICE}">Wlasny styl ceny</button>
+            </div>
+            <div class="new-style-sidebar-section" data-builder-panel="${BUILDER_TAB_PRODUCT}">
+              <div class="new-style-sidebar-section-head">
+                <p class="new-style-sidebar-section-title">
+                  <span class="new-style-sidebar-icon-chip" aria-hidden="true">${getSidebarIconSvg("badge")}</span>
+                  <span>Badge i styl ceny</span>
+                </p>
+                <p class="new-style-sidebar-section-copy">Wybierz ksztalt badge, biblioteke plikow i gotowy styl ceny dla produktu.</p>
+              </div>
+              <div class="new-style-sidebar-control-grid">
+                <label class="new-style-sidebar-control new-style-sidebar-control--span2">
+                  <span class="new-style-sidebar-control-label">Typ badge</span>
+                  <select id="${PRODUCT_BADGE_SELECT_ID}" class="new-style-save-input">
+                    ${getPriceBadgeOptionsHtml("solid")}
+                  </select>
+                </label>
+                ${getSidebarToolButtonHtml({ id: PRODUCT_BADGE_LIBRARY_TOGGLE_ID, label: "Biblioteka badge", icon: "library" })}
+                ${getSidebarToolButtonHtml({ tool: "download-style-json", label: "Pobierz style.json", icon: "download" })}
+                <label class="new-style-sidebar-control new-style-sidebar-control--span2">
+                  <span class="new-style-sidebar-control-label">Styl ceny do produktu</span>
+                  <select id="${PRICE_STYLE_APPLY_SELECT_ID}" class="new-style-save-input">
+                    ${getSavedPriceStylesOptionsHtml("")}
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div class="new-style-sidebar-section" data-builder-panel="${BUILDER_TAB_PRICE}" hidden>
+              <div class="new-style-sidebar-section-head">
+                <p class="new-style-sidebar-section-title">
+                  <span class="new-style-sidebar-icon-chip" aria-hidden="true">${getSidebarIconSvg("badge")}</span>
+                  <span>Badge i eksport</span>
+                </p>
+                <p class="new-style-sidebar-section-copy">Buduj wlasny styl ceny, wybierz badge i pobierz gotowy plik biblioteki.</p>
+              </div>
+              <div class="new-style-sidebar-control-grid">
+                <label class="new-style-sidebar-control new-style-sidebar-control--span2">
+                  <span class="new-style-sidebar-control-label">Typ badge</span>
+                  <select id="${PRICE_BADGE_STYLE_SELECT_ID}" class="new-style-save-input">
+                    ${getPriceBadgeOptionsHtml("solid")}
+                  </select>
+                </label>
+                ${getSidebarToolButtonHtml({ id: PRICE_BADGE_LIBRARY_TOGGLE_ID, label: "Biblioteka badge", icon: "library" })}
+                ${getSidebarToolButtonHtml({ tool: "download-price-style-json", label: "Pobierz customprice.json", icon: "download" })}
+              </div>
+            </div>
+            <div class="new-style-sidebar-section">
+              <div class="new-style-sidebar-section-head">
+                <p class="new-style-sidebar-section-title">
+                  <span class="new-style-sidebar-icon-chip" aria-hidden="true">${getSidebarIconSvg("font")}</span>
+                  <span>Tekst i kolory</span>
+                </p>
+                <p class="new-style-sidebar-section-copy">Szybkie sterowanie czcionka, formatowaniem i kolorami zaznaczonego elementu.</p>
+              </div>
+              <div class="new-style-sidebar-control-grid">
+                <label class="new-style-sidebar-control new-style-sidebar-control--span2">
+                  <span class="new-style-sidebar-control-label">Czcionka</span>
+                  <select id="${TEXT_FONT_ID}" class="new-style-text-font">
+                    ${getFontOptionsHtml()}
+                  </select>
+                </label>
+                <label class="new-style-sidebar-control">
+                  <span class="new-style-sidebar-control-label">Rozmiar</span>
+                  <input id="${TEXT_SIZE_ID}" class="new-style-text-size" type="number" min="6" max="280" step="1" value="12" aria-label="Rozmiar tekstu">
+                </label>
+                <label class="new-style-sidebar-control">
+                  <span class="new-style-sidebar-control-label">Kolor tekstu</span>
+                  <input id="${TEXT_COLOR_ID}" class="new-style-text-color" type="color" value="#e5eefb" aria-label="Kolor tekstu">
+                </label>
+                <label class="new-style-sidebar-control">
+                  <span class="new-style-sidebar-control-label">Kolor badge</span>
+                  <input id="${BADGE_COLOR_ID}" class="new-style-text-color" type="color" value="#d71920" aria-label="Kolor badge">
+                </label>
+                <label class="new-style-sidebar-control">
+                  <span class="new-style-sidebar-control-label">Kolor linii</span>
+                  <input id="${DIVIDER_COLOR_ID}" class="new-style-text-color" type="color" value="#9fb6d7" aria-label="Kolor linii">
+                </label>
+                <label class="new-style-sidebar-control new-style-sidebar-control--span2">
+                  <span class="new-style-sidebar-control-label">Waluta</span>
+                  <select id="${CURRENCY_SELECT_ID}" class="new-style-text-font" aria-label="Waluta">
+                    <option value="£">GBP £</option>
+                    <option value="zł">PLN zł</option>
+                    <option value="€">EUR €</option>
+                    <option value="$">USD $</option>
+                  </select>
+                </label>
+              </div>
+              <div class="new-style-format-row">
+                ${getTextFormatButtonHtml("bold", "B", "Pogrubienie")}
+                ${getTextFormatButtonHtml("italic", "I", "Kursywa")}
+                ${getTextFormatButtonHtml("underline", "U", "Podkreslenie")}
+                ${getSidebarToolButtonHtml({ tool: "edit-text", label: "Edytuj", icon: "edit", className: "new-style-tool-btn--mini" })}
+                ${getSidebarToolButtonHtml({ tool: "apply-text-style", label: "Styl", icon: "apply", className: "new-style-tool-btn--mini" })}
+              </div>
+              <div class="new-style-side-tool-grid new-style-side-tool-grid--actions">
+                ${getSidebarToolButtonHtml({ tool: "add-currency", label: "Dodaj walute", icon: "currency" })}
+                ${getSidebarToolButtonHtml({ tool: "apply-divider-color", label: "Zastosuj linie", icon: "line" })}
+              </div>
+            </div>
+            <div class="new-style-sidebar-section" data-builder-panel="${BUILDER_TAB_PRODUCT}">
+              <div class="new-style-sidebar-section-head">
+                <p class="new-style-sidebar-section-title">
+                  <span class="new-style-sidebar-icon-chip" aria-hidden="true">${getSidebarIconSvg("spark")}</span>
+                  <span>Wstaw element</span>
+                </p>
+                <p class="new-style-sidebar-section-copy">Dodawaj elementy szybciej jak w panelu narzedzi projektowych.</p>
+              </div>
+              <div class="new-style-side-tool-grid">
+                ${getSidebarInsertButtonsHtml([
+                  { tool: "add-product-image", label: "Zdjecie produktu", icon: "image" },
+                  { tool: "add-name", label: "Nazwa produktu", icon: "text" },
+                  { tool: "add-index", label: "Indeks", icon: "hash" },
+                  { tool: "add-package", label: "Opak", icon: "pack" },
+                  { tool: "add-price", label: "Cena", icon: "price" },
+                  { tool: "add-badge-rect", label: "Badge prostokat", icon: "badge" },
+                  { tool: "add-badge-circle", label: "Badge kolo", icon: "badge" },
+                  { tool: "add-flag", label: "Flaga", icon: "flag" },
+                  { tool: "add-text", label: "Tekst", icon: "font" },
+                  { tool: "add-rect", label: "Prostokat", icon: "rect" },
+                  { tool: "add-circle", label: "Kolo", icon: "circle" },
+                  { tool: "add-line", label: "Linia", icon: "line" },
+                  { tool: "add-ean", label: "EAN", icon: "barcode" }
+                ])}
+              </div>
+            </div>
+            <div class="new-style-sidebar-section" data-builder-panel="${BUILDER_TAB_PRICE}" hidden>
+              <div class="new-style-sidebar-section-head">
+                <p class="new-style-sidebar-section-title">
+                  <span class="new-style-sidebar-icon-chip" aria-hidden="true">${getSidebarIconSvg("spark")}</span>
+                  <span>Wstaw element</span>
+                </p>
+                <p class="new-style-sidebar-section-copy">Narzedzia pod budowe samego stylu ceny i badge.</p>
+              </div>
+              <div class="new-style-side-tool-grid">
+                ${getSidebarInsertButtonsHtml([
+                  { tool: "add-price", label: "Cena", icon: "price" },
+                  { tool: "add-badge-rect", label: "Badge prostokat", icon: "badge" },
+                  { tool: "add-badge-circle", label: "Badge kolo", icon: "badge" },
+                  { tool: "add-currency", label: "Znak waluty", icon: "currency" },
+                  { tool: "add-text", label: "Tekst", icon: "font" },
+                  { tool: "add-rect", label: "Prostokat", icon: "rect" },
+                  { tool: "add-circle", label: "Kolo", icon: "circle" },
+                  { tool: "add-line", label: "Linia", icon: "line" }
+                ])}
+              </div>
+            </div>
+            <div class="new-style-save-status" id="${STYLE_SAVE_STATUS_ID}"></div>
           </section>
           <section class="new-style-panel new-style-panel--builder">
             <div>
@@ -5009,114 +6324,67 @@
               <p class="new-style-panel-note" id="${BUILDER_NOTE_ID}">Przeciagaj, skaluj, rotuj i edytuj elementy bezposrednio na obszarze roboczym.</p>
             </div>
             <div class="new-style-workspace">
-              <div class="new-style-builder-tabs">
-                <button type="button" class="new-style-builder-tab is-active" data-builder-tab="${BUILDER_TAB_PRODUCT}">Nowy styl produktow</button>
-                <button type="button" class="new-style-builder-tab" data-builder-tab="${BUILDER_TAB_PRICE}">Wlasny styl ceny</button>
+              <div class="new-style-product-browser">
+                <input id="${PRODUCT_SEARCH_ID}" class="new-style-input" type="search" placeholder="Szukaj po nazwie, indeksie, EAN albo marce">
+                <div id="${PRODUCT_LIST_ID}" class="new-style-product-list"></div>
               </div>
-              <div class="new-style-workspace-tools" data-builder-panel="${BUILDER_TAB_PRODUCT}">
-                <button type="button" class="new-style-tool-btn" data-tool="add-product-image">Zdjecie produktu</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-name">Nazwa produktu</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-index">Indeks</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-package">Opak</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-price">Cena</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-badge-rect">Badge prostokat</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-badge-circle">Badge kolo</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-divider">Divider</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-flag">Flaga</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-text">Tekst</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-rect">Prostokat</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-circle">Kolo</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-line">Linia</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-ean">EAN</button>
-                <button type="button" class="new-style-tool-btn" data-tool="scale-down">-</button>
-                <button type="button" class="new-style-tool-btn" data-tool="scale-up">+</button>
-                <button type="button" class="new-style-tool-btn" data-tool="rotate-left">Obrot -</button>
-                <button type="button" class="new-style-tool-btn" data-tool="rotate-right">Obrot +</button>
-                <button type="button" class="new-style-tool-btn" data-tool="bring-front">Do przodu</button>
-                <button type="button" class="new-style-tool-btn" data-tool="send-back">Do tylu</button>
-                <button type="button" class="new-style-tool-btn" data-tool="duplicate">Duplikuj</button>
-                <button type="button" class="new-style-tool-btn" data-tool="delete">Usun</button>
-              </div>
-              <div class="new-style-workspace-tools" data-builder-panel="${BUILDER_TAB_PRICE}" hidden>
-                <button type="button" class="new-style-tool-btn" data-tool="add-price">Cena</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-badge-rect">Badge prostokat</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-badge-circle">Badge kolo</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-currency">Znak waluty</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-text">Tekst</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-rect">Prostokat</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-circle">Kolo</button>
-                <button type="button" class="new-style-tool-btn" data-tool="add-line">Linia</button>
-                <button type="button" class="new-style-tool-btn" data-tool="scale-down">-</button>
-                <button type="button" class="new-style-tool-btn" data-tool="scale-up">+</button>
-                <button type="button" class="new-style-tool-btn" data-tool="rotate-left">Obrot -</button>
-                <button type="button" class="new-style-tool-btn" data-tool="rotate-right">Obrot +</button>
-                <button type="button" class="new-style-tool-btn" data-tool="bring-front">Do przodu</button>
-                <button type="button" class="new-style-tool-btn" data-tool="send-back">Do tylu</button>
-                <button type="button" class="new-style-tool-btn" data-tool="duplicate">Duplikuj</button>
-                <button type="button" class="new-style-tool-btn" data-tool="delete">Usun</button>
-              </div>
-              <div class="new-style-text-tools">
-                <span class="new-style-text-tools-label">Styl tekstu:</span>
-                <select id="${TEXT_FONT_ID}" class="new-style-text-font">
-                  ${getFontOptionsHtml()}
-                </select>
-                <input id="${TEXT_COLOR_ID}" class="new-style-text-color" type="color" value="#e5eefb" aria-label="Kolor tekstu">
-                <input id="${TEXT_SIZE_ID}" class="new-style-text-size" type="number" min="6" max="280" step="1" value="12" aria-label="Rozmiar tekstu">
-                <span class="new-style-text-tools-label">Linia:</span>
-                <input id="${DIVIDER_COLOR_ID}" class="new-style-text-color" type="color" value="#9fb6d7" aria-label="Kolor dividera">
-                <button type="button" class="new-style-tool-btn" data-tool="apply-divider-color">Kolor linii</button>
-                <select id="${CURRENCY_SELECT_ID}" class="new-style-text-font" aria-label="Waluta">
-                  <option value="£">GBP £</option>
-                  <option value="zł">PLN zł</option>
-                  <option value="€">EUR €</option>
-                  <option value="$">USD $</option>
-                </select>
-                <button type="button" class="new-style-tool-btn" data-tool="add-currency">Znak waluty</button>
-                <button type="button" class="new-style-tool-btn" data-tool="edit-text">Edytuj tekst</button>
-                <button type="button" class="new-style-tool-btn" data-tool="apply-text-style">Zastosuj styl</button>
-              </div>
-              <div class="new-style-save-tools" data-builder-panel="${BUILDER_TAB_PRODUCT}">
-                <select id="${STYLE_LOAD_SELECT_ID}" class="new-style-save-input">
-                  ${getSavedStylesOptionsHtml("")}
-                </select>
-                <button type="button" class="new-style-tool-btn" data-tool="load-style">Wczytaj styl</button>
-                <span class="new-style-text-tools-label">Badge ceny:</span>
-                <select id="${PRODUCT_BADGE_SELECT_ID}" class="new-style-save-input">
-                  ${getPriceBadgeOptionsHtml("solid")}
-                </select>
-                <button type="button" class="new-style-tool-btn" id="${PRODUCT_BADGE_LIBRARY_TOGGLE_ID}">Wybierz badge</button>
-                <select id="${PRICE_STYLE_APPLY_SELECT_ID}" class="new-style-save-input">
-                  ${getSavedPriceStylesOptionsHtml("")}
-                </select>
-                <button type="button" class="new-style-tool-btn" data-tool="clear-style">Wyczysc</button>
-                <input id="${STYLE_NAME_ID}" class="new-style-save-input" type="text" placeholder="Nazwa nowego stylu">
-                <button type="button" class="new-style-tool-btn" data-tool="save-style">Zapisz styl</button>
-                <button type="button" class="new-style-tool-btn" data-tool="download-style-json">Pobierz style.json</button>
-              </div>
-              <div class="new-style-save-tools" data-builder-panel="${BUILDER_TAB_PRICE}" hidden>
-                <select id="${PRICE_STYLE_LOAD_SELECT_ID}" class="new-style-save-input">
-                  ${getSavedPriceStylesOptionsHtml("")}
-                </select>
-                <button type="button" class="new-style-tool-btn" data-tool="load-price-style">Wczytaj styl ceny</button>
-                <span class="new-style-text-tools-label">Badge ceny:</span>
-                <select id="${PRICE_BADGE_STYLE_SELECT_ID}" class="new-style-save-input">
-                  ${getPriceBadgeOptionsHtml("solid")}
-                </select>
-                <button type="button" class="new-style-tool-btn" id="${PRICE_BADGE_LIBRARY_TOGGLE_ID}">Wybierz badge</button>
-                <button type="button" class="new-style-tool-btn" data-tool="clear-style">Wyczysc</button>
-                <input id="${PRICE_STYLE_NAME_ID}" class="new-style-save-input" type="text" placeholder="Nazwa stylu ceny">
-                <button type="button" class="new-style-tool-btn" data-tool="save-price-style">Zapisz styl ceny</button>
-                <button type="button" class="new-style-tool-btn" data-tool="download-price-style-json">Pobierz customprice.json</button>
-              </div>
-              <div class="new-style-canvas">
-                <div class="new-style-canvas-inner">
-                  <div class="new-style-workspace-stage" id="${WORKSPACE_STAGE_ID}"></div>
-                  <div class="new-style-workspace-hint" id="${WORKSPACE_HINT_ID}">
-                    Kliknij element aby go zaznaczyc. Drag przesuwa, uchwyty zmieniaja rozmiar i rotacje.
-                  </div>
+              <div class="new-style-workspace-actions">
+                <div class="new-style-workspace-actions-bar" data-builder-panel="${BUILDER_TAB_PRODUCT}">
+                  <select id="${STYLE_LOAD_SELECT_ID}" class="new-style-save-input">
+                    ${getSavedStylesOptionsHtml("")}
+                  </select>
+                  <button type="button" class="new-style-tool-btn" data-tool="load-style">Wczytaj styl</button>
+                  <input id="${STYLE_NAME_ID}" class="new-style-save-input" type="text" placeholder="Nazwa nowego stylu">
+                  <button type="button" class="new-style-tool-btn" data-tool="save-style">Zapisz styl</button>
+                </div>
+                <div class="new-style-workspace-actions-bar" data-builder-panel="${BUILDER_TAB_PRICE}" hidden>
+                  <select id="${PRICE_STYLE_LOAD_SELECT_ID}" class="new-style-save-input">
+                    ${getSavedPriceStylesOptionsHtml("")}
+                  </select>
+                  <button type="button" class="new-style-tool-btn" data-tool="load-price-style">Wczytaj styl ceny</button>
+                  <input id="${PRICE_STYLE_NAME_ID}" class="new-style-save-input" type="text" placeholder="Nazwa stylu ceny">
+                  <button type="button" class="new-style-tool-btn" data-tool="save-price-style">Zapisz styl ceny</button>
+                </div>
+                <div class="new-style-workspace-actions-side">
                 </div>
               </div>
-              <div class="new-style-save-status" id="${STYLE_SAVE_STATUS_ID}"></div>
+              <div class="new-style-workspace-main">
+                <div class="new-style-canvas">
+                  <div class="new-style-canvas-inner">
+                    <div class="new-style-workspace-stage" id="${WORKSPACE_STAGE_ID}"></div>
+                  </div>
+                </div>
+                <div class="new-style-workspace-hint" id="${WORKSPACE_HINT_ID}">
+                  <div class="new-style-workspace-hint-controls">
+                    <div class="new-style-workspace-hint-zoom" aria-label="Zoom obszaru roboczego">
+                      <button type="button" class="new-style-tool-btn" id="${WORKSPACE_ZOOM_OUT_ID}" data-tool="workspace-zoom-out">-</button>
+                      <button type="button" class="new-style-tool-btn" id="${WORKSPACE_ZOOM_RESET_ID}" data-tool="workspace-zoom-reset"><span id="${WORKSPACE_ZOOM_VALUE_ID}" class="new-style-workspace-zoom-value">100%</span></button>
+                      <button type="button" class="new-style-tool-btn" id="${WORKSPACE_ZOOM_IN_ID}" data-tool="workspace-zoom-in">+</button>
+                    </div>
+                    <button type="button" class="new-style-tool-btn new-style-canvas-action" data-tool="clear-style">Wyczysc</button>
+                  </div>
+                </div>
+                <div class="new-style-workspace-tools new-style-workspace-tools--side" data-builder-panel="${BUILDER_TAB_PRODUCT}">
+                  <button type="button" class="new-style-tool-btn" data-tool="scale-down">-</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="scale-up">+</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="rotate-left">Obrot -</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="rotate-right">Obrot +</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="bring-front">Do przodu</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="send-back">Do tylu</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="duplicate">Duplikuj</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="delete">Usun</button>
+                </div>
+                <div class="new-style-workspace-tools new-style-workspace-tools--side" data-builder-panel="${BUILDER_TAB_PRICE}" hidden>
+                  <button type="button" class="new-style-tool-btn" data-tool="scale-down">-</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="scale-up">+</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="rotate-left">Obrot -</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="rotate-right">Obrot +</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="bring-front">Do przodu</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="send-back">Do tylu</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="duplicate">Duplikuj</button>
+                  <button type="button" class="new-style-tool-btn" data-tool="delete">Usun</button>
+                </div>
+              </div>
               <div class="new-style-workspace-selected" id="${WORKSPACE_SELECTED_ID}">Wybrany element: brak</div>
               <div class="new-style-workspace-selected" id="${SELECTED_CANVAS_ID}">Produkt: brak</div>
             </div>
@@ -5136,15 +6404,20 @@
     document.getElementById(REFRESH_BTN_ID)?.addEventListener("click", () => {
       openModal({ forceReload: true });
     });
-    document.getElementById(PRODUCT_SEARCH_ID)?.addEventListener("input", (event) => {
+    document.getElementById(PRODUCT_SEARCH_ID)?.addEventListener("input", async (event) => {
+      const previousSelectedId = String(state.selectedProductId || "");
       state.searchQuery = String(event.target?.value || "");
       renderProductList();
-      syncSelectedProductUi();
+      await syncSelectedProductUi(
+        previousSelectedId !== state.selectedProductId && String(state.activeBuilderTab || "") === BUILDER_TAB_PRODUCT
+          ? { populateStarterWorkspace: true, clearName: true, showStatus: false }
+          : { showStatus: false }
+      );
     });
-    document.getElementById(PRODUCT_LIST_ID)?.addEventListener("click", async (event) => {
-      const item = event.target?.closest?.("[data-product-id]");
-      if (!item) return;
-      state.selectedProductId = String(item.getAttribute("data-product-id") || "");
+    document.getElementById(PRODUCT_LIST_ID)?.addEventListener("change", async (event) => {
+      const select = event.target?.closest?.("[data-product-select]");
+      if (!select) return;
+      state.selectedProductId = String(select.value || "");
       renderProductList();
       await syncSelectedProductUi(
         String(state.activeBuilderTab || "") === BUILDER_TAB_PRODUCT
@@ -5157,10 +6430,25 @@
         await setActiveBuilderTab(button.getAttribute("data-builder-tab"));
       });
     });
-    modal.querySelector(".new-style-workspace")?.addEventListener("click", (event) => {
+    modal.querySelector(".new-style-body")?.addEventListener("click", (event) => {
       const button = event.target?.closest?.("[data-tool]");
       if (!button) return;
       handleWorkspaceTool(button.getAttribute("data-tool"));
+    });
+    document.getElementById(WORKSPACE_ZOOM_OUT_ID)?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setWorkspaceZoom(getWorkspaceZoom() - 0.15);
+    });
+    document.getElementById(WORKSPACE_ZOOM_RESET_ID)?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setWorkspaceZoom(1);
+    });
+    document.getElementById(WORKSPACE_ZOOM_IN_ID)?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setWorkspaceZoom(getWorkspaceZoom() + 0.15);
     });
     document.getElementById(TEXT_FONT_ID)?.addEventListener("change", () => {
       applyTextStyleToSelected();
@@ -5168,8 +6456,20 @@
     document.getElementById(TEXT_COLOR_ID)?.addEventListener("input", () => {
       applyTextStyleToSelected();
     });
+    document.getElementById(BADGE_COLOR_ID)?.addEventListener("input", () => {
+      void applyBadgeColorToWorkspace();
+    });
     document.getElementById(DIVIDER_COLOR_ID)?.addEventListener("input", () => {
       applyDividerColorToSelected();
+    });
+    modal.querySelectorAll("[data-text-format]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        toggleSelectedTextFormatting(button.getAttribute("data-text-format"));
+      });
+    });
+    document.getElementById(TEXT_SIZE_ID)?.addEventListener("input", () => {
+      applyTextStyleToSelected();
     });
     document.getElementById(TEXT_SIZE_ID)?.addEventListener("change", () => {
       applyTextStyleToSelected();
@@ -5233,6 +6533,7 @@
     document.addEventListener("keydown", onDocumentKeydown);
 
     updateBuilderTabUi();
+    syncTextFormatButtons(null);
 
     return modal;
   }
@@ -5254,6 +6555,21 @@
     }
 
     if (isTypingTarget) return;
+
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowUp" || event.key === "ArrowDown") {
+      const step = event.shiftKey ? 10 : 1;
+      let deltaX = 0;
+      let deltaY = 0;
+      if (event.key === "ArrowLeft") deltaX = -step;
+      if (event.key === "ArrowRight") deltaX = step;
+      if (event.key === "ArrowUp") deltaY = -step;
+      if (event.key === "ArrowDown") deltaY = step;
+      if (deltaX !== 0 || deltaY !== 0) {
+        event.preventDefault();
+        nudgeSelectedNodeBy(deltaX, deltaY);
+      }
+      return;
+    }
 
     if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
@@ -5341,23 +6657,21 @@
       return;
     }
 
-    const visible = filtered.slice(0, MAX_VISIBLE_PRODUCTS);
-    listEl.innerHTML = visible.map((product) => `
-      <div class="new-style-product-item${product.id === state.selectedProductId ? " is-active" : ""}" data-product-id="${escapeHtml(product.id)}">
-        <div class="new-style-product-name">${escapeHtml(product.name || "-")}</div>
-        <div class="new-style-product-meta">
-          <span class="new-style-product-chip">IDX: ${escapeHtml(product.index || "-")}</span>
-          <span class="new-style-product-chip">OPAK: ${escapeHtml(formatPackage(product))}</span>
-          <span class="new-style-product-chip">EAN: ${escapeHtml(product.ean || "-")}</span>
-        </div>
-      </div>
-    `).join("");
-
-    if (filtered.length > MAX_VISIBLE_PRODUCTS) {
-      setProductStatus(`Pokazano ${MAX_VISIBLE_PRODUCTS} z ${filtered.length} produktow. Zawęź wyszukiwanie, aby zobaczyc więcej.`, "default");
-    } else {
-      setProductStatus(`Wczytano ${all.length} produktow. Aktualnie widocznych: ${filtered.length}.`, "default");
+    if (!filtered.some((product) => product.id === state.selectedProductId)) {
+      state.selectedProductId = filtered[0]?.id || "";
     }
+
+    listEl.innerHTML = `
+      <select class="new-style-product-select" data-product-select aria-label="Wybierz produkt">
+        ${filtered.map((product) => `
+          <option value="${escapeHtml(product.id)}"${product.id === state.selectedProductId ? " selected" : ""}>
+            ${escapeHtml(`${product.index || "-"} - ${product.name || "-"}`)}
+          </option>
+        `).join("")}
+      </select>
+    `;
+
+    setProductStatus(`Wczytano ${all.length} produktow. Aktualnie widocznych: ${filtered.length}.`, "default");
   }
 
   async function syncSelectedProductUi(options = {}) {

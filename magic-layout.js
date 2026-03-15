@@ -1325,14 +1325,22 @@
     );
   }
 
+  function readMagicLayoutSlotIndex(node, attrName) {
+    if (!node || typeof node.getAttr !== "function") return null;
+    const raw = node.getAttr(attrName);
+    if (raw === null || raw === undefined || raw === "") return null;
+    const slotIndex = Number(raw);
+    return Number.isFinite(slotIndex) && slotIndex >= 0 ? slotIndex : null;
+  }
+
   function getModuleMetaFromNode(node) {
     if (!node || !node.getAttr) return { directModuleId: "", slotIndex: null };
     const directModuleId = String(node.getAttr("directModuleId") || "").trim();
-    const directSlot = Number(node.getAttr("slotIndex"));
-    const preservedSlot = Number(node.getAttr("preservedSlotIndex"));
+    const directSlot = readMagicLayoutSlotIndex(node, "slotIndex");
+    const preservedSlot = readMagicLayoutSlotIndex(node, "preservedSlotIndex");
     return {
       directModuleId,
-      slotIndex: Number.isFinite(directSlot) ? directSlot : (Number.isFinite(preservedSlot) ? preservedSlot : null)
+      slotIndex: Number.isFinite(directSlot) ? directSlot : preservedSlot
     };
   }
 
@@ -1377,7 +1385,7 @@
       return page.layer.find((candidate) => {
         if (!candidate || !candidate.getAttr) return false;
         if (candidate.getParent && candidate.getParent() !== page.layer) return false;
-        return Number(candidate.getAttr("slotIndex")) === slotIndex;
+        return readMagicLayoutSlotIndex(candidate, "slotIndex") === slotIndex;
       });
     }
 
