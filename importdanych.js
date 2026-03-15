@@ -957,10 +957,39 @@ window.exportStageToDataURLWithBackground = exportStageToDataURLWithBackground;
 // ============================================
 // 🔒 NORMALIZACJA ZAZNACZENIA (dziecko → GROUP)
 // ============================================
+function isDirectModuleEditableTextNode(node) {
+    if (!(node instanceof Konva.Text)) return false;
+    if (!(node.getAttr && typeof node.getAttr === "function")) return false;
+    const parent = node.getParent ? node.getParent() : null;
+    if (parent && parent.getAttr && parent.getAttr("isPriceGroup")) return false;
+    const isManagedDirectText = !!(
+        node.getAttr("directModuleId") ||
+        node.getAttr("isName") ||
+        node.getAttr("isIndex") ||
+        node.getAttr("isCustomPackageInfo")
+    );
+    if (!isManagedDirectText) return false;
+    let current = parent;
+    while (current && current.getParent) {
+        if (
+            current instanceof Konva.Group &&
+            current.getAttr &&
+            current.getAttr("isUserGroup") &&
+            current.getAttr("isAutoSlotGroup")
+        ) {
+            return true;
+        }
+        current = current.getParent ? current.getParent() : null;
+    }
+    return false;
+}
+window.isDirectModuleEditableTextNode = isDirectModuleEditableTextNode;
+
 function normalizeSelection(nodes) {
     if (!Array.isArray(nodes)) return [];
 
     const toGroupRoot = (node) => {
+        if (isDirectModuleEditableTextNode(node)) return node;
         let current = node;
         let lockedToPriceGroup = false;
         while (
@@ -5646,6 +5675,10 @@ stage.on('mousedown.userGroupDrag touchstart.userGroupDrag', (e) => {
     if (e.evt && e.evt.shiftKey) return;
     document.activeStage = stage;
 
+    if (typeof window.isDirectModuleEditableTextNode === "function" && window.isDirectModuleEditableTextNode(e.target)) {
+        return;
+    }
+
     let target = e.target;
     let userGroup = null;
     while (target && target !== stage) {
@@ -8040,7 +8073,9 @@ stage.on("mousedown.pickSmallest", (e) => {
 
     // wybieramy najmniejszy element jako docelowy klik
     let pick = hits[0];
+    const pickIsDirectEditableText = isDirectModuleEditableTextNode(pick);
     const pickUserGroupAncestor = (() => {
+        if (pickIsDirectEditableText) return null;
         let cur = pick;
         while (cur && cur.getParent) {
             const parent = cur.getParent();
@@ -8063,7 +8098,7 @@ stage.on("mousedown.pickSmallest", (e) => {
         )
     ) {
         const pickIsPriceLike = !!(pick.getAttr && (pick.getAttr("isPriceGroup") || pick.getAttr("isDirectPriceRectBg")));
-        if (!pickIsPriceLike) {
+        if (!pickIsPriceLike && !pickIsDirectEditableText) {
             pick = pick.getParent();
         }
     }
@@ -8085,6 +8120,9 @@ stage.on("click tap", (e) => {
     document.activeStage = stage;
 
     const rawTarget = e.target;
+    const rawTargetIsDirectEditableText =
+        typeof window.isDirectModuleEditableTextNode === "function" &&
+        window.isDirectModuleEditableTextNode(rawTarget);
     const isPriceLikeNode = (n) => !!(n && n.getAttr && (n.getAttr("isPriceGroup") || n.getAttr("isDirectPriceRectBg")));
     const getUserGroupAncestor = (n) => {
         let cur = n;
@@ -8129,7 +8167,7 @@ stage.on("click tap", (e) => {
     if (forcedDirectPriceTarget) {
         target = forcedDirectPriceTarget;
     }
-    const targetUserGroupAncestor = getUserGroupAncestor(target);
+    const targetUserGroupAncestor = rawTargetIsDirectEditableText ? null : getUserGroupAncestor(target);
     if (targetUserGroupAncestor) {
         target = targetUserGroupAncestor;
     } else if (
@@ -8143,7 +8181,7 @@ stage.on("click tap", (e) => {
         )
     ) {
         const targetIsPriceLike = isPriceLikeNode(target);
-        if (!targetIsPriceLike) {
+        if (!targetIsPriceLike && !rawTargetIsDirectEditableText) {
             target = target.getParent();
         }
     }
@@ -8175,7 +8213,10 @@ stage.on("click tap", (e) => {
                             return (ra.width * ra.height) - (rb.width * rb.height);
                         });
                         let fallbackPick = fallbackHits[0];
-                        const fallbackUserGroupAncestor = getUserGroupAncestor(fallbackPick);
+                        const fallbackIsDirectEditableText =
+                            typeof window.isDirectModuleEditableTextNode === "function" &&
+                            window.isDirectModuleEditableTextNode(fallbackPick);
+                        const fallbackUserGroupAncestor = fallbackIsDirectEditableText ? null : getUserGroupAncestor(fallbackPick);
                         if (fallbackUserGroupAncestor) {
                             fallbackPick = fallbackUserGroupAncestor;
                         } else if (
@@ -8189,7 +8230,7 @@ stage.on("click tap", (e) => {
                             )
                         ) {
                             const fallbackIsPriceLike = isPriceLikeNode(fallbackPick);
-                            if (!fallbackIsPriceLike) {
+                            if (!fallbackIsPriceLike && !fallbackIsDirectEditableText) {
                                 fallbackPick = fallbackPick.getParent();
                             }
                         }
@@ -12139,6 +12180,13 @@ function enableEditableText(node, page) {
             textarea.remove();
             window.isEditingText = false;
             window.removeEventListener("click", close);
+            requestAnimationFrame(() => {
+                const selectedNow = Array.isArray(page.selectedNodes) ? page.selectedNodes : [];
+                if (selectedNow.length === 1 && selectedNow[0] === node) {
+                    window.showTextToolbar?.(node);
+                    window.hideTextPanel?.();
+                }
+            });
         };
 
         const close = (e) => {

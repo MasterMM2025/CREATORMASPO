@@ -6,6 +6,64 @@ let currentStage = null;
 let currentLayer = null;
 let pageEditPanel = null;
 let currentPage = null;
+let pageEditSyncScheduled = false;
+let pageEditSyncInProgress = false;
+
+function getActiveEditablePage() {
+  const list = Array.isArray(window.pages) ? window.pages : [];
+  if (!list.length) return null;
+  const activeStage = document.activeStage || null;
+  return (
+    list.find((page) => page && !page.isCover && page.stage === activeStage) ||
+    list.find((page) => page && !page.isCover) ||
+    null
+  );
+}
+
+function syncVisiblePageEditToActivePage() {
+  if (pageEditSyncInProgress) return false;
+  if (!(window.isPageEditPanelVisible && window.isPageEditPanelVisible())) return false;
+  const nextPage = getActiveEditablePage();
+  if (!nextPage || nextPage === currentPage) return false;
+  pageEditSyncInProgress = true;
+  try {
+    window.openPageEdit(nextPage);
+    return true;
+  } finally {
+    pageEditSyncInProgress = false;
+  }
+}
+
+function scheduleVisiblePageEditSync() {
+  if (pageEditSyncScheduled) return;
+  pageEditSyncScheduled = true;
+  const run = () => {
+    pageEditSyncScheduled = false;
+    syncVisiblePageEditToActivePage();
+  };
+  if (typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(run);
+    return;
+  }
+  setTimeout(run, 0);
+}
+
+if (!window.__pageEditActivePageSyncBound) {
+  window.__pageEditActivePageSyncBound = true;
+  window.addEventListener('canvasModified', () => {
+    scheduleVisiblePageEditSync();
+  });
+  document.addEventListener('mousedown', (e) => {
+    const target = e.target && e.target.closest ? e.target.closest('.page-container, .canvas-wrapper, .page-zoom-wrap') : null;
+    if (!target) return;
+    scheduleVisiblePageEditSync();
+  }, true);
+  document.addEventListener('touchstart', (e) => {
+    const target = e.target && e.target.closest ? e.target.closest('.page-container, .canvas-wrapper, .page-zoom-wrap') : null;
+    if (!target) return;
+    scheduleVisiblePageEditSync();
+  }, true);
+}
 
 window.destroyPageEditPanel = function() {
   if (!pageEditPanel) return;
@@ -1010,11 +1068,15 @@ function applyPageEditStylesToPage(page, styles, selectedCurrency, options = {})
 }
 
 window.openPageEdit = function(page) {
+  if (!page || page.isCover) return false;
   try {
     window.closeBackgroundSidePanel?.({ restorePageEditor: false, resetToolbarState: true });
   } catch (_e) {}
   if (pageEditPanel && pageEditPanel.classList?.contains('imgfx-side-panel')) {
     window.destroyPageEditPanel?.();
+  }
+  if (page.stage) {
+    document.activeStage = page.stage;
   }
   currentPage = page;
   const panel = createPageEditPanel();
@@ -1077,19 +1139,21 @@ window.openPageEdit = function(page) {
   syncPageEditToggleState(true);
 
   document.getElementById('removeBannerBtn').onclick = () => {
-    const old = page.layer.findOne(o => o.getAttr('name') === 'banner');
+    const targetPage = currentPage && !currentPage.isCover ? currentPage : page;
+    const old = targetPage?.layer?.findOne?.(o => o.getAttr('name') === 'banner');
     if (old) {
       old.destroy();
-      page.settings.bannerUrl = null;
-      page.layer.batchDraw();
+      targetPage.settings.bannerUrl = null;
+      targetPage.layer.batchDraw();
     }
   };
 
-  applyToAllCheckbox.addEventListener('change', updateApplyScopeUI);
+  applyToAllCheckbox.onchange = updateApplyScopeUI;
 
 document.getElementById('applyPageEditBtn').onclick = () => {
+    const basePage = currentPage && !currentPage.isCover ? currentPage : page;
     const applyToAll = applyToAllCheckbox.checked;
-    const targetPages = applyToAll ? pages : [page];
+    const targetPages = applyToAll ? pages : [basePage];
     const selectedCurrency = currencySelect.value;
 
     const newStyles = {
@@ -1160,7 +1224,8 @@ document.getElementById('applyPageEditBtn').onclick = () => {
         const reader = new FileReader();
         reader.onload = e => {
           Konva.Image.fromURL(e.target.result, img => {
-            const scale = Math.min(page.stage.width() / img.width(), 113 / img.height());
+            const referencePage = currentPage && !currentPage.isCover ? currentPage : page;
+            const scale = Math.min(referencePage.stage.width() / img.width(), 113 / img.height());
             img.scale({ x: scale, y: scale });
             img.x(0);
             img.y(0);
@@ -1186,8 +1251,8 @@ document.getElementById('applyPageEditBtn').onclick = () => {
     document.getElementById('cancelPageEditBtn').onclick = () => {
       closePanel();
     };
-  };
-
+  return true;
+};
 
 // === EDYCJA ZDJĘĆ ===
 function showImageOptions(img, page) {
@@ -1314,39 +1379,62 @@ function fitCurrencyTextNodeToContent(node) {
   }
 }
 
+function isPriceUnitLikeTextNode(node) {
+  if (!(node instanceof Konva.Text)) return false;
+  const text = String(node.text?.() || '').trim();
+  const normalizedText = text.toUpperCase();
+  if (node.getAttr && (
+    node.getAttr('isCustomPackageInfo') ||
+    node.getAttr('workspaceKind') === 'packageText'
+  )) {
+    return false;
+  }
+  if (/^\s*OPAK(?:OWANIE)?\b/i.test(text)) return false;
+  if (node.getAttr && (
+    node.getAttr('pricePart') === 'unit' ||
+    node.getAttr('isPriceUnit') ||
+    node.getAttr('priceRole') === 'unit' ||
+    node.getAttr('workspaceKind') === 'currencySymbol'
+  )) {
+    return true;
+  }
+  if (!text) return false;
+  if (/^[£€$]$/i.test(text) || /^zł$/i.test(text)) return true;
+  if (/\/\s*(SZT|KG)\.?/i.test(text)) return true;
+  return /^(?:SZT|KG)\.?$/i.test(normalizedText);
+}
+
+function updateStandaloneCurrencyTextNode(node, symbol) {
+  if (!(node instanceof Konva.Text)) return;
+  const safeSymbol = String(symbol || '').trim() || '£';
+  const text = String(node.text?.() || '').trim();
+  if (!text) {
+    node.text(safeSymbol);
+    fitCurrencyTextNodeToContent(node);
+    return;
+  }
+  if (!text.includes('/')) {
+    node.text(safeSymbol);
+    fitCurrencyTextNodeToContent(node);
+    return;
+  }
+  const slashIndex = text.indexOf('/');
+  const unitPart = slashIndex >= 0 ? text.slice(slashIndex).trim() : '';
+  node.text(unitPart ? `${safeSymbol} ${unitPart}` : safeSymbol);
+  fitCurrencyTextNodeToContent(node);
+}
+
 function updatePriceCurrency(priceGroup, currency) {
   if (!(priceGroup instanceof Konva.Group)) return;
 
   const unit =
     priceGroup.findOne('.priceUnit') ||
-    (priceGroup.find((node) => {
-      if (!(node instanceof Konva.Text)) return false;
-      if (!node.getAttr) return false;
-      return (
-        node.getAttr('pricePart') === 'unit' ||
-        node.getAttr('isPriceUnit') ||
-        node.getAttr('priceRole') === 'unit' ||
-        node.getAttr('workspaceKind') === 'currencySymbol'
-      );
-    })[0] || null);
-  if (!unit) return;
+    (priceGroup.find((node) => isPriceUnitLikeTextNode(node))[0] || null);
+  if (!unit) return false;
 
   const symbol = getCurrencySymbolByCode(currency);
-  const text = String(unit.text?.() || '').trim();
-  if (!text) {
-    unit.text(symbol);
-    fitCurrencyTextNodeToContent(unit);
-    return;
-  }
-  if (!text.includes('/')) {
-    unit.text(symbol);
-    fitCurrencyTextNodeToContent(unit);
-    return;
-  }
-  const slashIndex = text.indexOf('/');
-  const unitPart = slashIndex >= 0 ? text.slice(slashIndex).trim() : '';
-  unit.text(unitPart ? `${symbol} ${unitPart}` : symbol);
-  fitCurrencyTextNodeToContent(unit);
+  updateStandaloneCurrencyTextNode(unit, symbol);
+  return true;
 }
 
 function updateCatalogEntryCurrencyForSlot(page, slotIndex, currencyCode, currencySymbol) {
@@ -1366,11 +1454,100 @@ function resolveSlotIndexFromNode(node) {
   return null;
 }
 
+function resolveDirectSlotIndexFromNode(node) {
+  let current = node;
+  while (current) {
+    const slotIndex = Number(current.getAttr?.('slotIndex'));
+    if (Number.isFinite(slotIndex) && slotIndex >= 0) return slotIndex;
+    const preservedSlotIndex = Number(current.getAttr?.('preservedSlotIndex'));
+    if (Number.isFinite(preservedSlotIndex) && preservedSlotIndex >= 0) return preservedSlotIndex;
+    current = typeof current.getParent === 'function' ? current.getParent() : null;
+  }
+  return null;
+}
+
+function normalizeDirectRebuildSlots(slotIndexes) {
+  return Array.from(new Set(
+    (Array.isArray(slotIndexes) ? slotIndexes : [])
+      .map((slotIndex) => Number(slotIndex))
+      .filter((slotIndex) => Number.isFinite(slotIndex) && slotIndex >= 0)
+  ));
+}
+
+function queueDirectCurrencyRebuild(page, slotIndexes) {
+  const uniqueSlots = normalizeDirectRebuildSlots(slotIndexes);
+  if (!page || !uniqueSlots.length) return;
+  if (typeof window.CustomStyleDirectHooks?.rebuildDirectModuleLayoutsOnPage !== 'function') return;
+
+  const pendingKey = uniqueSlots.join(',');
+  if (String(page._pendingDirectCurrencyRebuildKey || '')) {
+    page._nextDirectCurrencyRebuildSlots = normalizeDirectRebuildSlots([
+      ...(Array.isArray(page._nextDirectCurrencyRebuildSlots) ? page._nextDirectCurrencyRebuildSlots : []),
+      ...uniqueSlots
+    ]);
+    return;
+  }
+  page._pendingDirectCurrencyRebuildKey = pendingKey;
+  page._pendingDirectCurrencyRebuildSlots = uniqueSlots.slice();
+
+  Promise.resolve(window.CustomStyleDirectHooks.rebuildDirectModuleLayoutsOnPage(page, {
+    slotIndexes: uniqueSlots
+  }))
+    .then((rebuilt) => {
+      if (!(Number(rebuilt) > 0)) return;
+      page.layer?.batchDraw?.();
+      page.transformerLayer?.batchDraw?.();
+      if (typeof window.dispatchCanvasModified === 'function') {
+        window.dispatchCanvasModified(page.stage, {
+          historyMode: 'immediate',
+          historySource: 'page-edit-currency-rebuild'
+        });
+      } else {
+        window.dispatchEvent?.(new CustomEvent('canvasModified', {
+          detail: {
+            stage: page.stage,
+            historyMode: 'immediate',
+            historySource: 'page-edit-currency-rebuild'
+          }
+        }));
+      }
+    })
+    .catch(() => {})
+    .finally(() => {
+      if (String(page._pendingDirectCurrencyRebuildKey || '') === pendingKey) {
+        page._pendingDirectCurrencyRebuildKey = '';
+        page._pendingDirectCurrencyRebuildSlots = [];
+      }
+      const queuedSlots = normalizeDirectRebuildSlots(page._nextDirectCurrencyRebuildSlots);
+      page._nextDirectCurrencyRebuildSlots = [];
+      if (queuedSlots.length) {
+        queueDirectCurrencyRebuild(page, queuedSlots);
+      }
+    });
+}
+
 function updateDirectCustomModuleCurrency(page, currency) {
   if (!page || !page.layer || typeof page.layer.find !== 'function') return;
 
   const normalizedCurrency = normalizeCurrencyCode(currency);
   const nextSymbol = getCurrencySymbolByCode(normalizedCurrency);
+  const updatedDirectSlots = new Set();
+  const directNodes = page.layer.find((node) => {
+    if (!node?.getAttr) return false;
+    if (node.getAttr('isDirectCustomModuleGroup')) return true;
+    return !!String(node.getAttr('directModuleId') || '').trim();
+  }) || [];
+  const directNodeList = Array.isArray(directNodes)
+    ? directNodes
+    : (typeof directNodes.toArray === 'function' ? directNodes.toArray() : Array.from(directNodes));
+  const directSlotIndexes = Array.from(new Set(
+    directNodeList
+      .map((node) => resolveDirectSlotIndexFromNode(node))
+      .filter((slotIndex) => Number.isFinite(slotIndex) && slotIndex >= 0)
+  ));
+  directSlotIndexes.forEach((slotIndex) => {
+    updateCatalogEntryCurrencyForSlot(page, slotIndex, normalizedCurrency, nextSymbol);
+  });
   const directPriceGroups = page.layer.find((node) => {
     if (!(node instanceof Konva.Group)) return false;
     if (!node.getAttr || !node.getAttr('isPriceGroup')) return false;
@@ -1381,10 +1558,13 @@ function updateDirectCustomModuleCurrency(page, currency) {
   });
 
   directPriceGroups.forEach((priceGroup) => {
-    updatePriceCurrency(priceGroup, normalizedCurrency);
+    const updated = updatePriceCurrency(priceGroup, normalizedCurrency);
     refreshPriceGroupLayout(priceGroup, page);
-    const slotIndex = resolveSlotIndexFromNode(priceGroup);
+    const slotIndex = resolveDirectSlotIndexFromNode(priceGroup);
     updateCatalogEntryCurrencyForSlot(page, slotIndex, normalizedCurrency, nextSymbol);
+    if (updated && Number.isFinite(slotIndex) && slotIndex >= 0) {
+      updatedDirectSlots.add(slotIndex);
+    }
   });
 
   const standaloneCurrencyNodes = page.layer.find((node) => {
@@ -1397,9 +1577,38 @@ function updateDirectCustomModuleCurrency(page, currency) {
   standaloneCurrencyNodes.forEach((node) => {
     node.text(nextSymbol);
     fitCurrencyTextNodeToContent(node);
-    const slotIndex = resolveSlotIndexFromNode(node);
+    const slotIndex = resolveDirectSlotIndexFromNode(node);
     updateCatalogEntryCurrencyForSlot(page, slotIndex, normalizedCurrency, nextSymbol);
+    if (Number.isFinite(slotIndex) && slotIndex >= 0) {
+      updatedDirectSlots.add(slotIndex);
+    }
   });
+
+  const standaloneUnitNodes = page.layer.find((node) => {
+    if (!(node instanceof Konva.Text)) return false;
+    if (!node.getAttr) return false;
+    const parent = typeof node.getParent === 'function' ? node.getParent() : null;
+    if (parent && parent.getAttr && parent.getAttr('isPriceGroup')) return false;
+    const isDirectNode =
+      !!String(node.getAttr('directModuleId') || '').trim() ||
+      !!(parent && parent.getAttr && parent.getAttr('isDirectCustomModuleGroup'));
+    if (!isDirectNode) return false;
+    return isPriceUnitLikeTextNode(node);
+  });
+
+  standaloneUnitNodes.forEach((node) => {
+    updateStandaloneCurrencyTextNode(node, nextSymbol);
+    const slotIndex = resolveDirectSlotIndexFromNode(node);
+    updateCatalogEntryCurrencyForSlot(page, slotIndex, normalizedCurrency, nextSymbol);
+    if (Number.isFinite(slotIndex) && slotIndex >= 0) {
+      updatedDirectSlots.add(slotIndex);
+    }
+  });
+
+  const slotsNeedingRebuild = directSlotIndexes.filter((slotIndex) => !updatedDirectSlots.has(slotIndex));
+  if (slotsNeedingRebuild.length) {
+    queueDirectCurrencyRebuild(page, slotsNeedingRebuild);
+  }
 }
 
 

@@ -1567,6 +1567,17 @@ async function restoreDirectNodeRecursiveFromPayload(payload, page, layer) {
     if (!payload || !window.Konva) return null;
     if (!isPageHydrationContextActive(page)) return null;
 
+    const restoreSavedDirectShapeFill = async (node, attrs) => {
+        const safeAttrs = attrs && typeof attrs === "object" ? attrs : {};
+        const imageUrl = String(safeAttrs.shapeFillImageUrl || "").trim();
+        if (!imageUrl) return;
+        const applyFill = window.CustomStyleDirectHooks && window.CustomStyleDirectHooks.applyImageFillToShapeNode;
+        if (typeof applyFill !== "function") return;
+        try {
+            await applyFill(node, imageUrl, String(safeAttrs.shapeFillFallbackColor || safeAttrs.fill || ""));
+        } catch (_e) {}
+    };
+
     if (payload.type === "textNode") {
         const t = new Konva.Text({
             x: payload.x ?? 0,
@@ -1627,7 +1638,46 @@ async function restoreDirectNodeRecursiveFromPayload(payload, page, layer) {
             listening: payload.listening !== false
         });
         if (payload.attrs) r.setAttrs(payload.attrs);
+        await restoreSavedDirectShapeFill(r, payload.attrs);
         return r;
+    }
+
+    if (payload.type === "circleNode") {
+        const c = new Konva.Circle({
+            x: payload.x ?? 0,
+            y: payload.y ?? 0,
+            radius: payload.radius || 0,
+            scaleX: payload.scaleX || 1,
+            scaleY: payload.scaleY || 1,
+            rotation: payload.rotation || 0,
+            fill: payload.fill,
+            opacity: payload.opacity ?? 1,
+            stroke: payload.stroke,
+            strokeWidth: payload.strokeWidth,
+            draggable: payload.draggable === true,
+            listening: payload.listening !== false
+        });
+        if (payload.attrs) c.setAttrs(payload.attrs);
+        await restoreSavedDirectShapeFill(c, payload.attrs);
+        return c;
+    }
+
+    if (payload.type === "lineNode") {
+        const l = new Konva.Line({
+            x: payload.x ?? 0,
+            y: payload.y ?? 0,
+            points: Array.isArray(payload.points) ? payload.points.slice() : [0, 0, 0, 0],
+            scaleX: payload.scaleX || 1,
+            scaleY: payload.scaleY || 1,
+            rotation: payload.rotation || 0,
+            stroke: payload.stroke || "#111111",
+            strokeWidth: payload.strokeWidth,
+            opacity: payload.opacity ?? 1,
+            draggable: payload.draggable === true,
+            listening: payload.listening !== false
+        });
+        if (payload.attrs) l.setAttrs(payload.attrs);
+        return l;
     }
 
     if (payload.type === "imageNode" && (payload.src || (payload.attrs && payload.attrs.editorSrc) || (payload.attrs && payload.attrs.thumbSrc))) {
@@ -2237,6 +2287,51 @@ function serializeDirectNodeRecursive(node) {
             opacity: node.opacity ? node.opacity() : 1,
             stroke: node.stroke ? node.stroke() : undefined,
             strokeWidth: node.strokeWidth ? node.strokeWidth() : undefined,
+            draggable: node.draggable ? node.draggable() : false,
+            listening: node.listening ? node.listening() : true,
+            attrs
+        };
+    }
+
+    if (node instanceof Konva.Circle) {
+        const attrs = pruneTransientDirectAttrsForSave(
+            sanitizeAttrsForSave(node.getAttrs ? node.getAttrs() : {}),
+            "circle"
+        );
+        return {
+            type: "circleNode",
+            x: node.x(),
+            y: node.y(),
+            radius: node.radius ? node.radius() : 0,
+            scaleX: node.scaleX ? node.scaleX() : 1,
+            scaleY: node.scaleY ? node.scaleY() : 1,
+            rotation: node.rotation ? node.rotation() : 0,
+            fill: node.fill ? node.fill() : undefined,
+            opacity: node.opacity ? node.opacity() : 1,
+            stroke: node.stroke ? node.stroke() : undefined,
+            strokeWidth: node.strokeWidth ? node.strokeWidth() : undefined,
+            draggable: node.draggable ? node.draggable() : false,
+            listening: node.listening ? node.listening() : true,
+            attrs
+        };
+    }
+
+    if (node instanceof Konva.Line) {
+        const attrs = pruneTransientDirectAttrsForSave(
+            sanitizeAttrsForSave(node.getAttrs ? node.getAttrs() : {}),
+            "line"
+        );
+        return {
+            type: "lineNode",
+            x: node.x ? node.x() : 0,
+            y: node.y ? node.y() : 0,
+            points: Array.isArray(node.points ? node.points() : null) ? node.points().slice() : [],
+            scaleX: node.scaleX ? node.scaleX() : 1,
+            scaleY: node.scaleY ? node.scaleY() : 1,
+            rotation: node.rotation ? node.rotation() : 0,
+            stroke: node.stroke ? node.stroke() : undefined,
+            strokeWidth: node.strokeWidth ? node.strokeWidth() : undefined,
+            opacity: node.opacity ? node.opacity() : 1,
             draggable: node.draggable ? node.draggable() : false,
             listening: node.listening ? node.listening() : true,
             attrs

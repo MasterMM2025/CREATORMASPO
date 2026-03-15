@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <title>Badge Harness</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; background: #0f172a; color: #e2e8f0; }
+    iframe { width: 1400px; height: 900px; border: 1px solid #334155; background: #fff; }
+    pre { white-space: pre-wrap; background: #111827; padding: 12px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Badge Harness</h1>
+  <pre id="result">starting...</pre>
+  <iframe id="appFrame" src="/kreator.html"></iframe>
+  <script>
+    const resultEl = document.getElementById("result");
+    const frame = document.getElementById("appFrame");
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function waitFor(check, timeout = 30000, step = 150) {
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        try {
+          const value = await check();
+          if (value) return value;
+        } catch (_err) {}
+        await sleep(step);
+      }
+      throw new Error("timeout");
+    }
+
+    function click(el) {
+      if (!el) throw new Error("missing element to click");
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    }
+
+    function setSelectValue(select, value) {
+      if (!select) throw new Error("missing select");
+      select.value = value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    function setInputValue(input, value) {
+      if (!input) throw new Error("missing input");
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    function getWorkspaceBadgeInfo(win) {
+      const stage = Array.isArray(win?.Konva?.stages)
+        ? win.Konva.stages.find((item) => item?.container?.() && item.container().id === "newStyleWorkspaceStage")
+        : null;
+      const layerChildren = stage?.children && typeof stage.children.toArray === "function"
+        ? stage.children.toArray()
+        : (Array.isArray(stage?.children) ? stage.children : []);
+      const layer = layerChildren.find((item) => item?.getClassName?.() === "Layer") || layerChildren[0] || null;
+      const nodes = layer?.getChildren && typeof layer.getChildren === "function"
+        ? (typeof layer.getChildren().toArray === "function" ? layer.getChildren().toArray() : layer.getChildren())
+        : [];
+      const badgeGroup = (Array.isArray(nodes) ? nodes : []).find((node) => {
+        const kind = String(node?.getAttr?.("workspaceKind") || "");
+        return kind === "badgeCircle" || kind === "badgeRect";
+      }) || null;
+      const shapeNodes = badgeGroup?.getChildren && typeof badgeGroup.getChildren === "function"
+        ? (typeof badgeGroup.getChildren().toArray === "function" ? badgeGroup.getChildren().toArray() : badgeGroup.getChildren())
+        : [];
+      const shape = (Array.isArray(shapeNodes) ? shapeNodes : []).find((node) => {
+        const className = String(node?.getClassName?.() || "");
+        return className === "Circle" || className === "Rect";
+      }) || null;
+      return {
+        hasBadgeGroup: !!badgeGroup,
+        workspaceKind: String(badgeGroup?.getAttr?.("workspaceKind") || ""),
+        shapeClass: String(shape?.getClassName?.() || ""),
+        fillPriority: typeof shape?.fillPriority === "function" ? String(shape.fillPriority() || "") : "",
+        badgeStyleId: String(shape?.getAttr?.("priceBadgeStyleId") || ""),
+        patternPresent: typeof shape?.fillPatternImage === "function" ? !!shape.fillPatternImage() : false
+      };
+    }
+
+    async function chooseBadgeFromPopup(doc, toggleId) {
+      click(doc.getElementById(toggleId));
+      const popup = await waitFor(() => doc.querySelector(".new-style-badge-library:not([hidden])"));
+      const nonSolid = await waitFor(() => popup.querySelector('[data-badge-style-id]:not([data-badge-style-id="solid"])'));
+      const chosenId = String(nonSolid.getAttribute("data-badge-style-id") || "");
+      click(nonSolid);
+      await waitFor(() => popup.hidden === true || popup.matches("[hidden]"));
+      return chosenId;
+    }
+
+    async function run() {
+      await waitFor(() => frame.contentDocument && frame.contentDocument.readyState === "complete");
+      await waitFor(() => frame.contentDocument && frame.contentDocument.getElementById("sidebarNewStyle"));
+      click(frame.contentDocument.getElementById("sidebarNewStyle"));
+      await waitFor(() => {
+        const modal = frame.contentDocument.getElementById("newStyleModal");
+        return modal && modal.style.display === "flex";
+      });
+
+      click(await waitFor(() => frame.contentDocument.querySelector('[data-tool="add-badge-circle"]')));
+      const productBadgeId = await chooseBadgeFromPopup(frame.contentDocument, "newStyleProductBadgeLibraryToggle");
+      await sleep(1200);
+      const productWorkspace = getWorkspaceBadgeInfo(frame.contentWindow);
+
+      setInputValue(frame.contentDocument.getElementById("newStyleStyleName"), "Harness badge produkt");
+      click(frame.contentDocument.querySelector('[data-tool="save-style"]'));
+      await sleep(1000);
+      const savedStyles = JSON.parse(frame.contentWindow.localStorage.getItem("styl_wlasny_custom_styles_v1") || "[]");
+      const savedProduct = savedStyles.find((item) => String(item?.label || "") === "Harness badge produkt") || null;
+
+      click(frame.contentDocument.querySelector('[data-builder-tab="price"]'));
+      await waitFor(() => !frame.contentDocument.querySelector('[data-builder-panel="price"]')?.hidden);
+      click(await waitFor(() => frame.contentDocument.querySelector('[data-builder-panel="price"] [data-tool="add-badge-circle"]')));
+      const priceBadgeId = await chooseBadgeFromPopup(frame.contentDocument, "newStylePriceBadgeLibraryToggle");
+      await sleep(1200);
+      const priceWorkspace = getWorkspaceBadgeInfo(frame.contentWindow);
+
+      setInputValue(frame.contentDocument.getElementById("newStylePriceStyleName"), "Harness badge cena");
+      click(frame.contentDocument.querySelector('[data-tool="save-price-style"]'));
+      await sleep(1000);
+      const savedPriceStyles = JSON.parse(frame.contentWindow.localStorage.getItem("styl_wlasny_custom_price_styles_v1") || "[]");
+      const savedPrice = savedPriceStyles.find((item) => String(item?.label || "") === "Harness badge cena") || null;
+
+      return {
+        productBadgeId,
+        productWorkspace,
+        savedProductBadgeId: String(savedProduct?.config?.priceBadgeStyleId || ""),
+        savedProductBadgePath: String(savedProduct?.config?.priceBadgeStylePath || ""),
+        priceBadgeId,
+        priceWorkspace,
+        savedPriceBadgeId: String(savedPrice?.badgeStyleId || ""),
+        savedPriceBadgePath: String(savedPrice?.badgeStylePath || "")
+      };
+    }
+
+    run()
+      .then((result) => {
+        resultEl.textContent = JSON.stringify({ ok: true, result }, null, 2);
+      })
+      .catch((error) => {
+        const debugDoc = frame.contentDocument;
+        resultEl.textContent = JSON.stringify({
+          ok: false,
+          message: String(error && error.message ? error.message : error),
+          stack: error && error.stack ? String(error.stack) : "",
+          debug: {
+            frameHref: String(debugDoc?.location?.href || ""),
+            frameReady: String(debugDoc?.readyState || ""),
+            frameTitle: String(debugDoc?.title || ""),
+            bodyStart: String(debugDoc?.body?.innerHTML || "").slice(0, 400)
+          }
+        }, null, 2);
+      });
+  </script>
+</body>
+</html>

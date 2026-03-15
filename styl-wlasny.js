@@ -273,6 +273,83 @@
     });
     return out;
   })();
+
+  function normalizeBadgeStyleId(value) {
+    const source = String(value || "").trim();
+    if (!source) return "solid";
+    const safe = source
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return safe ? `firebase-badge-${safe}` : "solid";
+  }
+
+  function humanizeBadgeLabel(value) {
+    return String(value || "")
+      .replace(/\.[^.]+$/, "")
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim() || "Badge";
+  }
+
+  function upsertPriceBadgeStyleOption(styleDef) {
+    const safe = styleDef && typeof styleDef === "object" ? styleDef : null;
+    const id = String(safe?.id || "").trim();
+    const label = String(safe?.label || "").trim();
+    if (!id || !label) return;
+    const normalized = {
+      id,
+      label,
+      path: String(safe?.path || "").trim(),
+      url: String(safe?.url || "").trim()
+    };
+    const idx = PRICE_BADGE_STYLE_OPTIONS.findIndex((item) => String(item?.id || "") === id);
+    if (idx >= 0) PRICE_BADGE_STYLE_OPTIONS[idx] = normalized;
+    else PRICE_BADGE_STYLE_OPTIONS.push(normalized);
+  }
+
+  function renderPriceBadgeSelectOptions(selectEl, preferredValue = "solid") {
+    if (!selectEl) return;
+    const currentValue = String(preferredValue || selectEl.value || "solid").trim() || "solid";
+    selectEl.innerHTML = PRICE_BADGE_STYLE_OPTIONS
+      .map((opt) => `<option value="${escapeHtml(opt.id)}">${escapeHtml(String(opt.label || opt.id || "").trim())}</option>`)
+      .join("");
+    selectEl.value = PRICE_BADGE_STYLE_OPTIONS.some((opt) => String(opt?.id || "") === currentValue)
+      ? currentValue
+      : "solid";
+  }
+
+  function resolvePriceBadgeStyleId(value, fallback = "solid") {
+    const target = String(value || "").trim() || fallback;
+    return PRICE_BADGE_STYLE_OPTIONS.some((opt) => opt.id === target) ? target : fallback;
+  }
+
+  function getModuleLayoutDefaultPriceBadgeStyleId(styleMetaOrId) {
+    const styleMeta = (typeof styleMetaOrId === "string" || !styleMetaOrId)
+      ? getSelectedModuleLayoutStyleMeta(styleMetaOrId)
+      : styleMetaOrId;
+    const cfg = (styleMeta?.config && typeof styleMeta.config === "object") ? styleMeta.config : {};
+    const textCfg = (cfg?.text && typeof cfg.text === "object") ? cfg.text : {};
+    const path = String(cfg.priceBadgeStylePath || textCfg.priceBadgeStylePath || "").trim();
+    const url = String(cfg.priceBadgeStyleUrl || textCfg.priceBadgeStyleUrl || "").trim();
+    const rawId = String(cfg.priceBadgeStyleId || textCfg.priceBadgeStyleId || "").trim();
+    const normalizedId = rawId || ((path || url) ? normalizeBadgeStyleId(path || url) : "solid");
+    if (normalizedId !== "solid" && (path || url)) {
+      upsertPriceBadgeStyleOption({
+        id: normalizedId,
+        label: humanizeBadgeLabel(path ? path.split("/").pop() : normalizedId),
+        path,
+        url
+      });
+    }
+    return resolvePriceBadgeStyleId(
+      normalizedId ||
+      "solid"
+    );
+  }
+
   function getRegisteredModuleLayoutStyles() {
     const list = Array.isArray(window.STYL_WLASNY_REGISTRY?.moduleLayouts)
       ? window.STYL_WLASNY_REGISTRY.moduleLayouts
@@ -889,12 +966,12 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     );
   }
 
-  function loadKonvaImageFromUrl(url, timeoutMs = 2600) {
+  function loadImageElementFromUrl(url, timeoutMs = 2600) {
     const src = String(url || "").trim();
-    if (!src || !window.Konva || typeof window.Konva.Image?.fromURL !== "function") {
+    if (!src) {
       return Promise.resolve(null);
     }
-    return new Promise((resolve) => {
+    const attempt = (useAnonymousCors) => new Promise((resolve) => {
       let done = false;
       const finish = (img) => {
         if (done) return;
@@ -902,13 +979,122 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         clearTimeout(timer);
         resolve(img || null);
       };
+      const img = new Image();
+      if (useAnonymousCors) img.crossOrigin = "anonymous";
+      img.onload = () => finish(img);
+      img.onerror = () => finish(null);
       const timer = setTimeout(() => finish(null), Math.max(500, timeoutMs));
       try {
-        window.Konva.Image.fromURL(src, (img) => finish(img));
+        img.src = src;
       } catch (_err) {
         finish(null);
       }
     });
+    return attempt(true).then((img) => img || attempt(false));
+  }
+
+  function loadKonvaImageFromUrl(url, timeoutMs = 2600) {
+    const src = String(url || "").trim();
+    if (!src || !window.Konva) {
+      return Promise.resolve(null);
+    }
+    if (typeof window.Konva.Image?.fromURL !== "function") {
+      return loadImageElementFromUrl(src, timeoutMs).then((img) => {
+        if (!img) return null;
+        try {
+          return new window.Konva.Image({ image: img });
+        } catch (_err) {
+          return null;
+        }
+      });
+    }
+    return new Promise((resolve) => {
+      let done = false;
+      let fallbackStarted = false;
+      const finish = (img) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(img || null);
+      };
+      const startFallback = () => {
+        if (done || fallbackStarted) return;
+        fallbackStarted = true;
+        clearTimeout(timer);
+        loadImageElementFromUrl(src, timeoutMs).then((img) => {
+          if (!img) {
+            finish(null);
+            return;
+          }
+          try {
+            finish(new window.Konva.Image({ image: img }));
+          } catch (_err) {
+            finish(null);
+          }
+        });
+      };
+      const timer = setTimeout(() => startFallback(), Math.max(500, timeoutMs));
+      try {
+        window.Konva.Image.fromURL(src, (img) => {
+          if (img) finish(img);
+          else startFallback();
+        }, () => startFallback());
+      } catch (_err) {
+        startFallback();
+      }
+    });
+  }
+
+  function getSnapshotBadgeImageMeta(context, options = {}) {
+    const badgeGroupKind = String(options?.badgeGroupKind || "").trim();
+    if (badgeGroupKind !== "badgeRect" && badgeGroupKind !== "badgeCircle") return null;
+    const catalogEntry = context?.catalogEntry && typeof context.catalogEntry === "object" ? context.catalogEntry : {};
+    const badgeStyleId = String(catalogEntry?.PRICE_BG_STYLE_ID || customPriceBadgeStyleId || "solid").trim() || "solid";
+    const badgeImageUrl = String(catalogEntry?.PRICE_BG_IMAGE_URL || "").trim() || getSelectedPriceBadgeBackgroundUrl();
+    if (!badgeImageUrl || badgeStyleId === "solid") return null;
+    return {
+      badgeStyleId,
+      badgeImageUrl,
+      badgeGroupKind
+    };
+  }
+
+  async function applyImageFillToShapeNode(shapeNode, url, fallbackColor = "") {
+    const isRect = shapeNode instanceof window.Konva.Rect;
+    const isCircle = shapeNode instanceof window.Konva.Circle;
+    if (!isRect && !isCircle) return false;
+    const safeUrl = String(url || "").trim();
+    if (shapeNode.setAttr) {
+      shapeNode.setAttr("shapeFillImageUrl", safeUrl || null);
+      shapeNode.setAttr("shapeFillFallbackColor", String(fallbackColor || ""));
+    }
+    if (typeof shapeNode.fillPatternImage === "function") shapeNode.fillPatternImage(null);
+    if (typeof shapeNode.fillPriority === "function") shapeNode.fillPriority("color");
+    if (typeof shapeNode.fillPatternScaleX === "function") shapeNode.fillPatternScaleX(1);
+    if (typeof shapeNode.fillPatternScaleY === "function") shapeNode.fillPatternScaleY(1);
+    if (typeof shapeNode.fillPatternX === "function") shapeNode.fillPatternX(0);
+    if (typeof shapeNode.fillPatternY === "function") shapeNode.fillPatternY(0);
+    if (typeof shapeNode.fill === "function" && fallbackColor) shapeNode.fill(String(fallbackColor || ""));
+    if (!safeUrl) return false;
+
+    const image = await loadImageElementFromUrl(safeUrl, 3200);
+    if (!image) return false;
+
+    const width = isCircle
+      ? Math.max(1, Number(shapeNode.radius?.() || 1) * 2)
+      : Math.max(1, Number(shapeNode.width?.() || 1));
+    const height = isCircle
+      ? Math.max(1, Number(shapeNode.radius?.() || 1) * 2)
+      : Math.max(1, Number(shapeNode.height?.() || 1));
+    const naturalW = Math.max(1, Number(image.naturalWidth || image.width || 1));
+    const naturalH = Math.max(1, Number(image.naturalHeight || image.height || 1));
+    if (typeof shapeNode.fillPatternImage === "function") shapeNode.fillPatternImage(image);
+    if (typeof shapeNode.fillPatternRepeat === "function") shapeNode.fillPatternRepeat("no-repeat");
+    if (typeof shapeNode.fillPatternScaleX === "function") shapeNode.fillPatternScaleX(width / naturalW);
+    if (typeof shapeNode.fillPatternScaleY === "function") shapeNode.fillPatternScaleY(height / naturalH);
+    if (typeof shapeNode.fill === "function") shapeNode.fill("transparent");
+    if (typeof shapeNode.fillPriority === "function") shapeNode.fillPriority("pattern");
+    return true;
   }
 
   function ensureCustomStyleDarkTheme() {
@@ -1699,11 +1885,20 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     customPreviewVisibility.showBarcode = false;
   }
 
+  function syncCustomStyleCurrencyFromActivePage(pageOverride) {
+    const activePage = pageOverride || getActiveCatalogPage();
+    const normalizedCode = normalizeDirectCurrencyCode(activePage?.settings?.currency);
+    if (!normalizedCode) return false;
+    customCurrencySymbol = getDirectCurrencySymbolByCode(normalizedCode);
+    return true;
+  }
+
   function resetCustomStyleEditorSessionState(options = {}) {
     const blankOnNextOpen = !!options.blankOnNextOpen;
     const allowDraftRestore = !!options.allowDraftRestore;
     closeEmbeddedCustomStyleCreator();
     resetCustomStyleEditorParamsToDefaults();
+    syncCustomStyleCurrencyFromActivePage();
     customEditorBlankResetMode = blankOnNextOpen;
     const preferredDraft = allowDraftRestore && Array.isArray(customDraftModules) && customDraftModules.length
       ? (customDraftModules.find((d) => String(d?.id || "") === String(customActiveDraftId || "")) || customDraftModules[0] || null)
@@ -2494,7 +2689,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   }
 
   function getSelectedPriceBadgeStyleMeta() {
-    return PRICE_BADGE_STYLE_OPTIONS.find((opt) => opt.id === customPriceBadgeStyleId) || PRICE_BADGE_STYLE_OPTIONS[0];
+    const safeId = resolvePriceBadgeStyleId(customPriceBadgeStyleId, "solid");
+    return PRICE_BADGE_STYLE_OPTIONS.find((opt) => opt.id === safeId) || PRICE_BADGE_STYLE_OPTIONS[0];
   }
 
   function getSelectedPriceBadgeBackgroundUrl() {
@@ -2597,9 +2793,37 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return String(getSnapshotNodeAttrs(def).workspaceKind || "").trim();
   }
 
+  function getSnapshotTextSeed(def) {
+    return String(getSnapshotNodeAttrs(def).text || "").trim();
+  }
+
+  function looksLikeSnapshotPriceUnitText(value) {
+    const text = String(value || "").trim();
+    if (!text) return false;
+    if (/[£€$]/.test(text)) return true;
+    if (/\bz[łl]\b/i.test(text)) return true;
+    if (/\/\s*(SZT|KG)\.?/i.test(text)) return true;
+    return /^\s*\/?\s*(SZT|KG)\.?\s*$/i.test(text);
+  }
+
+  function isSnapshotLikelyPriceText(def) {
+    const explicitRole = String(getSnapshotNodeCustomAttrs(def).priceRole || "").trim().toLowerCase();
+    if (explicitRole === "major" || explicitRole === "minor" || explicitRole === "unit") return true;
+    if (getSnapshotNodeKind(def) === "currencySymbol") return true;
+    const text = getSnapshotTextSeed(def);
+    if (!text) return false;
+    if (looksLikeSnapshotPriceUnitText(text)) return true;
+    const digitsOnly = text.replace(/[^\d]/g, "");
+    if (!digitsOnly) return false;
+    const lettersOnly = normalizeText(text).replace(/[\d\s.,:+\-/%]/g, "");
+    return !lettersOnly;
+  }
+
   function inferSnapshotPriceRole(def, fallbackIndex = -1) {
     const explicitRole = String(getSnapshotNodeCustomAttrs(def).priceRole || "").trim().toLowerCase();
     if (explicitRole === "major" || explicitRole === "minor" || explicitRole === "unit") return explicitRole;
+    if (getSnapshotNodeKind(def) === "currencySymbol") return "unit";
+    if (looksLikeSnapshotPriceUnitText(getSnapshotTextSeed(def))) return "unit";
     if (fallbackIndex === 0) return "major";
     if (fallbackIndex === 1) return "minor";
     if (fallbackIndex === 2) return "unit";
@@ -3009,6 +3233,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         cornerRadius: Number(attrs.cornerRadius || 0),
         draggable: attrs.draggable !== false
       });
+      const rectBadgeMeta = getSnapshotBadgeImageMeta(context, options);
+      if (rectBadgeMeta?.badgeGroupKind === "badgeRect") {
+        await applyImageFillToShapeNode(node, rectBadgeMeta.badgeImageUrl, String(attrs.fill || "transparent"));
+      }
     } else if (className === "Circle") {
       node = new window.Konva.Circle({
         x: Number(attrs.x || 0),
@@ -3019,6 +3247,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         strokeWidth: Math.max(0, Number(attrs.strokeWidth || 0)),
         draggable: attrs.draggable !== false
       });
+      const circleBadgeMeta = getSnapshotBadgeImageMeta(context, options);
+      if (circleBadgeMeta?.badgeGroupKind === "badgeCircle") {
+        await applyImageFillToShapeNode(node, circleBadgeMeta.badgeImageUrl, String(attrs.fill || "transparent"));
+      }
     } else if (className === "Line") {
       node = new window.Konva.Line({
         x: Number(attrs.x || 0),
@@ -3037,14 +3269,20 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const children = Array.isArray(def?.children) ? def.children : [];
       let priceTextIndex = 0;
       for (const childDef of children) {
+        const isPriceTextCandidate = kind === "priceGroup" &&
+          String(childDef?.className || "") === "Text" &&
+          isSnapshotLikelyPriceText(childDef);
         const childOptions = {
           ...options,
+          badgeGroupKind: (kind === "badgeRect" || kind === "badgeCircle")
+            ? kind
+            : String(options?.badgeGroupKind || "").trim(),
           priceRole: kind === "priceGroup"
             ? inferSnapshotPriceRole(childDef, priceTextIndex)
             : "",
           inPriceGroup: kind === "priceGroup"
         };
-        if (kind === "priceGroup" && String(childDef?.className || "") === "Text") {
+        if (isPriceTextCandidate) {
           priceTextIndex += 1;
         }
         const childNode = await createKonvaNodeFromEditorSnapshot(childDef, context, childOptions);
@@ -3077,9 +3315,24 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     if (node instanceof window.Konva.Text) {
       node.setAttr("isProductText", true);
+      const textValue = String(node.text?.() || "").trim();
+      const priceRole = String(node.getAttr?.("priceRole") || "").trim().toLowerCase();
+      if (priceRole === "major") node.setAttr("pricePart", "main");
+      if (priceRole === "minor") node.setAttr("pricePart", "dec");
+      if (priceRole === "unit") {
+        node.setAttr("pricePart", "unit");
+        node.setAttr("isPriceUnit", true);
+      }
+      if (!priceRole && looksLikeSnapshotPriceUnitText(textValue)) {
+        node.setAttr("pricePart", "unit");
+        node.setAttr("isPriceUnit", true);
+      }
       if (kind === "nameText") node.setAttr("isName", true);
       if (kind === "indexText") node.setAttr("isIndex", true);
       if (kind === "packageText") node.setAttr("isCustomPackageInfo", true);
+      if (kind === "currencySymbol") {
+        node.setAttr("isPriceUnit", true);
+      }
       if (kind === "flag") node.setAttr("isCountryBadge", true);
       if (kind === "nameText" || kind === "indexText" || kind === "packageText") {
         tightenDirectTextSelectionBox(node);
@@ -3134,10 +3387,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       list.forEach((child, index) => {
         decorateSnapshotNodeForDirectModule(child, defs[index] || {}, context);
         if (kind === "priceGroup" && child instanceof window.Konva.Text) {
+          const isUnitChild =
+            child.getAttr?.("priceRole") === "unit" ||
+            child.getAttr?.("pricePart") === "unit" ||
+            child.getAttr?.("isPriceUnit");
           child.draggable(false);
           syncPriceTextNodeMetrics(child, {
-            extraPad: child.getAttr?.("priceRole") === "unit" ? 8 : 4,
-            minWidth: child.getAttr?.("priceRole") === "unit" ? 24 : 8,
+            extraPad: isUnitChild ? 8 : 4,
+            minWidth: isUnitChild ? 24 : 8,
             minHeight: 8
           });
         }
@@ -3276,9 +3533,26 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (!priceGroup || !priceGroup.getAttr) return;
     const children = priceGroup.getChildren ? priceGroup.getChildren() : [];
     const hitArea = children.find((n) => n && n.getAttr && n.getAttr("isPriceHitArea"));
-    const main = children.find((n) => n && n.getAttr && n.getAttr("pricePart") === "main");
-    const dec = children.find((n) => n && n.getAttr && n.getAttr("pricePart") === "dec");
-    const unit = children.find((n) => n && n.getAttr && n.getAttr("pricePart") === "unit");
+    const main = children.find((n) =>
+      n && n.getAttr && (
+        n.getAttr("pricePart") === "main" ||
+        n.getAttr("priceRole") === "major"
+      )
+    );
+    const dec = children.find((n) =>
+      n && n.getAttr && (
+        n.getAttr("pricePart") === "dec" ||
+        n.getAttr("priceRole") === "minor"
+      )
+    );
+    const unit = children.find((n) =>
+      n && n.getAttr && (
+        n.getAttr("pricePart") === "unit" ||
+        n.getAttr("isPriceUnit") ||
+        n.getAttr("priceRole") === "unit" ||
+        n.getAttr("workspaceKind") === "currencySymbol"
+      )
+    );
     const layer = priceGroup.getLayer ? priceGroup.getLayer() : null;
     const parentGroup = priceGroup.getParent ? priceGroup.getParent() : null;
     const directModuleId = String(priceGroup.getAttr?.("directModuleId") || "");
@@ -3958,9 +4232,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const finalPriceTextOffsetY = useAbsolutePriceTextOffset ? customPriceTextOffsetY : (priceTextOffsetY + customPriceTextOffsetY);
 
     const priceBadgeStyleId = String(catalogEntry?.PRICE_BG_STYLE_ID || customPriceBadgeStyleId || "solid");
+    const priceBadgeImageUrlDirect = String(catalogEntry?.PRICE_BG_IMAGE_URL || "").trim() || getSelectedPriceBadgeBackgroundUrl();
     if (!hidePriceDirect && !hidePriceBadgeDirect && !noPriceCircleDirect && !isRoundedRectPriceDirect) {
-      const priceCircleUrl = String(catalogEntry?.PRICE_BG_IMAGE_URL || "").trim() || getSelectedPriceBadgeBackgroundUrl();
-      const priceBg = await createKonvaImageNodeFromUrl(priceCircleUrl);
+      const priceBg = await createKonvaImageNodeFromUrl(priceBadgeImageUrlDirect);
       if (priceBg) {
         priceBg.x(priceArea.x);
         priceBg.y(priceArea.y);
@@ -4043,6 +4317,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         isDirectPriceRectBg: true,
         selectable: true
       });
+      if (priceBadgeStyleId !== "solid" && priceBadgeImageUrlDirect) {
+        await applyImageFillToRectNode(priceRect, priceBadgeImageUrlDirect, rectBgColor);
+      }
       priceRectBgNode = priceRect;
       addNode(priceRectBgNode);
       bindDirectPriceRectEditor(priceRectBgNode, page);
@@ -4720,6 +4997,25 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return familyBaseProduct ? familyBaseImageUrl : currentPreviewImageUrl;
   }
 
+  function hasCommittedFamilyPreview() {
+    const entries = Array.isArray(currentFamilyProducts) ? currentFamilyProducts : [];
+    return entries.filter((item) => item && item.product).length > 1;
+  }
+
+  function getPreviewRenderProduct(fallbackProduct = null) {
+    if (hasCommittedFamilyPreview()) {
+      return familyBaseProduct || currentPreviewProduct || fallbackProduct || null;
+    }
+    return fallbackProduct || currentPreviewProduct || familyBaseProduct || null;
+  }
+
+  function getPreviewRenderImageUrl(fallbackImageUrl = "") {
+    if (hasCommittedFamilyPreview()) {
+      return String(fallbackImageUrl || familyBaseImageUrl || currentPreviewImageUrl || "").trim();
+    }
+    return String(fallbackImageUrl || currentPreviewImageUrl || familyBaseImageUrl || "").trim();
+  }
+
   function resolveProductImageUrl(product, onReady) {
     if (!product) {
       onReady(null);
@@ -4849,8 +5145,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   function renderFamilyImagesTrack() {
     const track = document.getElementById("customPreviewImagesTrack");
     if (!track) return;
-    const entries = Array.isArray(currentFamilyProducts) ? currentFamilyProducts : [];
-    const base = getEffectivePreviewProduct();
+    const useFamilyPreview = hasCommittedFamilyPreview();
+    const entries = useFamilyPreview ? (Array.isArray(currentFamilyProducts) ? currentFamilyProducts : []) : [];
+    const base = getPreviewRenderProduct();
     const selectedLayoutStyleId = String(customModuleLayoutStyleId || "default");
     const useExactSingleImagePreview = isCustomSingleStyle(selectedLayoutStyleId);
     const familyIndexes = entries
@@ -4861,7 +5158,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (!entries.length) {
       track.innerHTML = `<img id="customPreviewImage" alt="Podgląd produktu" style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;transform:${useExactSingleImagePreview ? "none" : "scale(1.08)"};transform-origin:left top;">`;
       const imgEl = document.getElementById("customPreviewImage");
-      const effectiveUrl = getEffectivePreviewImageUrl();
+      const effectiveUrl = getPreviewRenderImageUrl();
       if (imgEl) {
         if (effectiveUrl) imgEl.src = effectiveUrl;
         else imgEl.removeAttribute("src");
@@ -5313,6 +5610,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       for (const childDef of children) {
         const childOptions = {
           ...options,
+          badgeGroupKind: (kind === "badgeRect" || kind === "badgeCircle")
+            ? kind
+            : String(options?.badgeGroupKind || "").trim(),
           priceRole: kind === "priceGroup"
             ? inferSnapshotPriceRole(childDef, priceTextIndex)
             : "",
@@ -5386,6 +5686,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       rect.style.boxSizing = "border-box";
       rect.style.transformOrigin = "left top";
       rect.style.transform = `rotate(${Number(attrs.rotation || 0)}deg)`;
+      const rectBadgeMeta = getSnapshotBadgeImageMeta(context, options);
+      if (rectBadgeMeta?.badgeGroupKind === "badgeRect") {
+        rect.style.background = "transparent";
+        rect.style.backgroundImage = `url("${rectBadgeMeta.badgeImageUrl}")`;
+        rect.style.backgroundRepeat = "no-repeat";
+        rect.style.backgroundPosition = "center";
+        rect.style.backgroundSize = "100% 100%";
+      }
       return rect;
     }
 
@@ -5403,6 +5711,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       circle.style.borderColor = String(attrs.stroke || "transparent");
       circle.style.borderRadius = "50%";
       circle.style.boxSizing = "border-box";
+      const circleBadgeMeta = getSnapshotBadgeImageMeta(context, options);
+      if (circleBadgeMeta?.badgeGroupKind === "badgeCircle") {
+        circle.style.background = "transparent";
+        circle.style.backgroundImage = `url("${circleBadgeMeta.badgeImageUrl}")`;
+        circle.style.backgroundRepeat = "no-repeat";
+        circle.style.backgroundPosition = "center";
+        circle.style.backgroundSize = "100% 100%";
+      }
       return circle;
     }
 
@@ -5454,7 +5770,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const flagEl = document.getElementById("customPreviewFlag");
 
     if (!nameEl || !indexEl || !mainEl || !decEl || !unitEl || !barcodeEl) return;
-    if (!product) {
+    const previewProduct = getPreviewRenderProduct(product);
+    const previewImageUrl = getPreviewRenderImageUrl(imageUrl);
+    if (!previewProduct) {
       setPreviewSnapshotMode(false);
       nameEl.textContent = "";
       indexEl.textContent = "";
@@ -5473,18 +5791,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       return;
     }
 
-    const previewCatalogEntry = buildCatalogProductFromCustom(product) || {};
-    const familyCountPreview = Array.isArray(currentFamilyProducts) ? currentFamilyProducts.length : 0;
-    const hasFamilyPreview = familyCountPreview > 1;
+    const previewCatalogEntry = buildCatalogProductFromCustom(previewProduct, { previewMode: true }) || {};
+    const hasFamilyPreview = hasCommittedFamilyPreview();
     const selectedLayoutStyleId = String(previewCatalogEntry?.MODULE_LAYOUT_STYLE_ID || customModuleLayoutStyleId || "default");
     const editorSnapshot = !hasFamilyPreview
       ? getCatalogEntryModuleLayoutEditorSnapshot(previewCatalogEntry, selectedLayoutStyleId)
       : null;
     if (editorSnapshot) {
       void renderPreviewFromEditorSnapshot(editorSnapshot, {
-        product,
+        product: previewProduct,
         catalogEntry: previewCatalogEntry,
-        imageUrl: String(imageUrl || getEffectivePreviewImageUrl() || "")
+        imageUrl: previewImageUrl
       });
       return;
     }
@@ -5505,14 +5822,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     applyPreviewLayoutMode(isSingleDirectPreview, selectedLayoutStyleId);
     nameEl.textContent = hideNamePreview
       ? ""
-      : String(previewCatalogEntry?.NAZWA || getDisplayName(product) || "-");
+      : String(previewCatalogEntry?.NAZWA || getDisplayName(previewProduct) || "-");
     indexEl.textContent = hideIndexPreview
       ? ""
-      : String(previewCatalogEntry?.INDEKS || getDisplayIndex(product) || "-");
+      : String(previewCatalogEntry?.INDEKS || getDisplayIndex(previewProduct) || "-");
     if (packageInfoEl) {
       packageInfoEl.textContent = hidePackagePreview
         ? ""
-        : String(previewCatalogEntry?.CUSTOM_PACKAGE_INFO_TEXT || buildPackageInfoText(product) || "");
+        : String(previewCatalogEntry?.CUSTOM_PACKAGE_INFO_TEXT || buildPackageInfoText(previewProduct) || "");
     }
     nameEl.style.display = hideNamePreview ? "none" : "block";
     indexEl.style.display = hideIndexPreview ? "none" : "block";
@@ -5522,7 +5839,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       updateFamilyIndexPreviewText();
     }
 
-    const price = formatPrice(previewCatalogEntry?.CENA || getDisplayPrice(product));
+    const price = formatPrice(previewCatalogEntry?.CENA || getDisplayPrice(previewProduct));
     const currencySymbol = getEffectiveCurrencySymbol(previewCatalogEntry, price.currency);
     const metaAlign = normalizeAlignOption(previewCatalogEntry?.TEXT_ALIGN || customMetaTextAlign, "left");
     const useCustomSingleTextPalette = isSingleDirectPreview && isCustomSingleStyle(selectedLayoutStyleId);
@@ -5723,9 +6040,18 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         priceCircle.style.width = `${rectW}px`;
         priceCircle.style.height = `${rectH}px`;
         priceCircle.style.borderRadius = `${rectR}px`;
-        priceCircle.style.backgroundImage = "none";
+        const roundedBadgeBgUrl = String(previewCatalogEntry?.PRICE_BG_IMAGE_URL || "").trim() || getSelectedPriceBadgeBackgroundUrl();
         const roundedPreviewBg = String(previewCatalogEntry?.PRICE_BG_COLOR || customPriceCircleColor || singleSpec.text.priceBgColor || "#2eaee8");
-        priceCircle.style.background = roundedPreviewBg;
+        if (previewPriceBadgeStyleId !== "solid" && roundedBadgeBgUrl) {
+          priceCircle.style.background = "transparent";
+          priceCircle.style.backgroundImage = `url("${roundedBadgeBgUrl}")`;
+          priceCircle.style.backgroundRepeat = "no-repeat";
+          priceCircle.style.backgroundPosition = "center";
+          priceCircle.style.backgroundSize = "100% 100%";
+        } else {
+          priceCircle.style.backgroundImage = "none";
+          priceCircle.style.background = roundedPreviewBg;
+        }
       } else {
         priceCircle.style.width = `${base}px`;
         priceCircle.style.height = `${base}px`;
@@ -5824,15 +6150,22 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return window.pages.find((p) => p.stage === document.activeStage) || window.pages[0];
   }
 
-  function buildCatalogProductFromCustom(product) {
+  function buildCatalogProductFromCustom(product, options = {}) {
     if (!product) return null;
-    const base = getEffectivePreviewProduct() || product;
+    const previewMode = !!options.previewMode;
+    const useFamilyContext = !previewMode || hasCommittedFamilyPreview();
+    const base = useFamilyContext
+      ? (getEffectivePreviewProduct() || product)
+      : (product || currentPreviewProduct || familyBaseProduct || null);
+    if (!base) return null;
     const name = getDisplayName(base);
     const ean = scientificToPlain(base.ean);
     const countryRaw = String(base?.raw?.["text-left 3"] || "RUMUNIA").trim();
     const includeBarcode = !!customPreviewVisibility.showBarcode;
     const includeFlag = !!customPreviewVisibility.showFlag;
-    const family = Array.isArray(currentFamilyProducts) ? currentFamilyProducts : [];
+    const family = useFamilyContext
+      ? (Array.isArray(currentFamilyProducts) ? currentFamilyProducts : [])
+      : [];
     const familyIndexes = family
       .map((item) => getDisplayIndex(item && item.product ? item.product : null))
       .filter(Boolean);
@@ -6569,6 +6902,13 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           textarea.remove();
           window.isEditingText = false;
           window.removeEventListener("click", close);
+          requestAnimationFrame(() => {
+            const selectedNow = Array.isArray(page.selectedNodes) ? page.selectedNodes : [];
+            if (selectedNow.length === 1 && selectedNow[0] === node) {
+              window.showTextToolbar?.(node);
+              window.hideTextPanel?.();
+            }
+          });
         };
 
         const close = (e) => {
@@ -7761,7 +8101,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       if (showBarcodeToggleMark) applyToggleMark(showBarcodeToggleMark, !!customPreviewVisibility.showBarcode);
       if (priceColorInput) priceColorInput.value = customPriceCircleColor || "#d71920";
       if (moduleLayoutSelect) moduleLayoutSelect.value = customModuleLayoutStyleId || "default";
-      if (priceStyleSelect) priceStyleSelect.value = customPriceBadgeStyleId || "solid";
+    if (priceStyleSelect) renderPriceBadgeSelectOptions(priceStyleSelect, resolvePriceBadgeStyleId(customPriceBadgeStyleId, "solid"));
       if (priceLayoutSelect) renderCustomPriceLayoutSelectOptions(priceLayoutSelect, customPriceLayoutStyleId || "");
       if (priceTextColorInput) priceTextColorInput.value = customPriceTextColor || "#ffffff";
       if (currencySelect) currencySelect.value = normalizeCustomCurrencySymbol(customCurrencySymbol, "£");
@@ -7856,7 +8196,12 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       customModuleLayoutStyleId = String(s.customModuleLayoutStyleId || customModuleLayoutStyleId || "default");
       saveLastSelectedModuleLayoutStyleId(customModuleLayoutStyleId);
       customPriceLayoutStyleId = String(s.customPriceLayoutStyleId || customPriceLayoutStyleId || "").trim();
-      customPriceBadgeStyleId = String(s.customPriceBadgeStyleId || customPriceBadgeStyleId || "solid");
+      customPriceBadgeStyleId = resolvePriceBadgeStyleId(
+        s.customPriceBadgeStyleId ||
+        getModuleLayoutDefaultPriceBadgeStyleId(customModuleLayoutStyleId) ||
+        customPriceBadgeStyleId ||
+        "solid"
+      );
       customPriceTextColor = String(s.customPriceTextColor || customPriceTextColor || "#ffffff");
       customCurrencySymbol = normalizeCustomCurrencySymbol(s.customCurrencySymbol || customCurrencySymbol || "£", "£");
       customPriceTextScale = Number.isFinite(Number(s.customPriceTextScale)) ? Number(s.customPriceTextScale) : (customPriceTextScale || 1);
@@ -8336,8 +8681,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         customPriceFontFamily = normalizeFontOption(preset.price, customPriceFontFamily || DEFAULT_STYLE_FONT_PRESET.price);
         if (metaFontSelect) refreshFontSelectOptions(metaFontSelect, customMetaFontFamily);
         if (priceFontSelect) refreshFontSelectOptions(priceFontSelect, customPriceFontFamily);
-        customPriceBadgeStyleId = "solid";
-        if (priceStyleSelect) priceStyleSelect.value = "solid";
+        customPriceBadgeStyleId = getModuleLayoutDefaultPriceBadgeStyleId(styleMeta);
+        if (priceStyleSelect) renderPriceBadgeSelectOptions(priceStyleSelect, customPriceBadgeStyleId || "solid");
         const suggestedBg = String(styleText.priceBgColor || "").trim();
         customPriceCircleColor = suggestedBg || "#d71920";
         if (priceColorInput) priceColorInput.value = customPriceCircleColor;
@@ -8356,9 +8701,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       };
     }
     if (priceStyleSelect) {
-      priceStyleSelect.value = customPriceBadgeStyleId || "solid";
+      renderPriceBadgeSelectOptions(priceStyleSelect, customPriceBadgeStyleId || "solid");
       priceStyleSelect.onchange = () => {
-        customPriceBadgeStyleId = String(priceStyleSelect.value || "solid");
+        customPriceBadgeStyleId = resolvePriceBadgeStyleId(priceStyleSelect.value || "solid", "solid");
         renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
       };
     }
@@ -8720,6 +9065,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   }
 
   window.CustomStyleDirectHooks = Object.assign({}, window.CustomStyleDirectHooks || {}, {
+    applyImageFillToShapeNode,
     bindDirectPriceGroupEditor,
     restoreDirectModuleNodeSelectabilityOnPage,
     rebuildDirectModuleLayoutsOnPage

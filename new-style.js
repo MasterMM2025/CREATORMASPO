@@ -17,6 +17,12 @@
   const PRICE_STYLE_APPLY_SELECT_ID = "newStylePriceApplySelect";
   const PRICE_STYLE_LOAD_SELECT_ID = "newStylePriceLoadSelect";
   const PRICE_STYLE_NAME_ID = "newStylePriceStyleName";
+  const PRODUCT_BADGE_SELECT_ID = "newStyleProductBadgeSelect";
+  const PRICE_BADGE_STYLE_SELECT_ID = "newStylePriceBadgeSelect";
+  const PRODUCT_BADGE_LIBRARY_TOGGLE_ID = "newStyleProductBadgeLibraryToggle";
+  const PRODUCT_BADGE_LIBRARY_ID = "newStyleProductBadgeLibrary";
+  const PRICE_BADGE_LIBRARY_TOGGLE_ID = "newStylePriceBadgeLibraryToggle";
+  const PRICE_BADGE_LIBRARY_ID = "newStylePriceBadgeLibrary";
   const STYLE_SAVE_STATUS_ID = "newStyleSaveStatus";
   const TEXT_FONT_ID = "newStyleTextFont";
   const TEXT_COLOR_ID = "newStyleTextColor";
@@ -29,6 +35,7 @@
   const CUSTOM_PRICE_STYLES_STORAGE_KEY = "styl_wlasny_custom_price_styles_v1";
   const CUSTOM_PRICE_STYLES_REMOTE_PATH = "styles/customprice.json";
   const CUSTOM_STYLES_BUCKET = "gs://pdf-creator-f7a8b.firebasestorage.app";
+  const BADGE_FOLDER_PATH = "badge";
   const BUILDER_TAB_PRODUCT = "product";
   const BUILDER_TAB_PRICE = "price";
   const LOCKED_SYSTEM_STYLE_IDS = new Set(["styl-numer-1", "styl-numer-2", "styl-numer-3"]);
@@ -40,6 +47,7 @@
   const MODULE_BASE_WIDTH = 500;
   const MODULE_BASE_HEIGHT = 362;
   let firebaseStorageApiPromise = null;
+  const workspaceBadgeImageCache = new Map();
 
   const state = {
     products: null,
@@ -53,6 +61,11 @@
     activeBuilderTab: BUILDER_TAB_PRODUCT,
     productWorkspaceDraft: null,
     priceWorkspaceDraft: null,
+    badgeLibrary: {
+      loadingPromise: null,
+      items: [],
+      error: ""
+    },
     workspace: {
       stage: null,
       layer: null,
@@ -116,6 +129,12 @@
   function buildImageUrl(index, ext) {
     const objectPath = `${IMAGE_FOLDER}/${String(index || "").trim()}.${ext}`;
     return `${IMAGE_BUCKET_BASE}${encodeURIComponent(objectPath)}?alt=media`;
+  }
+
+  function buildStorageMediaUrl(objectPath) {
+    const safePath = String(objectPath || "").trim();
+    if (!safePath) return null;
+    return `${IMAGE_BUCKET_BASE}${encodeURIComponent(safePath)}?alt=media`;
   }
 
   function loadImageWithFallback(index) {
@@ -490,6 +509,418 @@
     });
   }
 
+  function getRegisteredPriceBadgeStyles() {
+    const list = Array.isArray(window.STYL_WLASNY_REGISTRY?.priceBadges)
+      ? window.STYL_WLASNY_REGISTRY.priceBadges
+      : [];
+    return list
+      .map((item) => ({
+        id: String(item?.id || "").trim(),
+        label: String(item?.label || "").trim(),
+        path: String(item?.path || "").trim(),
+        url: String(item?.url || "").trim()
+      }))
+      .filter((item) => item.id && item.label);
+  }
+
+  function normalizeBadgeStyleId(value) {
+    const source = String(value || "").trim();
+    if (!source) return "solid";
+    const safe = source
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return safe ? `firebase-badge-${safe}` : "solid";
+  }
+
+  function getBadgeSelectIdForTab(tab) {
+    return String(tab || "") === BUILDER_TAB_PRICE
+      ? PRICE_BADGE_STYLE_SELECT_ID
+      : PRODUCT_BADGE_SELECT_ID;
+  }
+
+  function getBadgeLibraryToggleIdForTab(tab) {
+    return String(tab || "") === BUILDER_TAB_PRICE
+      ? PRICE_BADGE_LIBRARY_TOGGLE_ID
+      : PRODUCT_BADGE_LIBRARY_TOGGLE_ID;
+  }
+
+  function getBadgeLibraryIdForTab(tab) {
+    return String(tab || "") === BUILDER_TAB_PRICE
+      ? PRICE_BADGE_LIBRARY_ID
+      : PRODUCT_BADGE_LIBRARY_ID;
+  }
+
+  function humanizeBadgeLabel(value) {
+    return String(value || "")
+      .replace(/\.[^.]+$/, "")
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim() || "Badge";
+  }
+
+  function getDynamicPriceBadgeStyles() {
+    const items = Array.isArray(state.badgeLibrary?.items) ? state.badgeLibrary.items : [];
+    const registered = getRegisteredPriceBadgeStyles();
+    return items
+      .map((asset) => {
+        const fullPath = String(asset?.fullPath || "").trim();
+        const url = String(asset?.url || "").trim();
+        const name = String(asset?.name || fullPath.split("/").pop() || "").trim();
+        const matched = registered.find((item) => {
+          const itemPath = String(item?.path || "").trim();
+          const itemUrl = String(item?.url || "").trim();
+          return (fullPath && itemPath === fullPath) || (url && itemUrl === url);
+        });
+        if (matched) return matched;
+        if (!fullPath && !url) return null;
+        return {
+          id: normalizeBadgeStyleId(fullPath || name || url),
+          label: humanizeBadgeLabel(name || fullPath || url),
+          path: fullPath,
+          url
+        };
+      })
+      .filter((item) => item && item.id && item.label);
+  }
+
+  function getPriceBadgeStyleOptions() {
+    const out = [{ id: "solid", label: "Kolor koła (domyślny)", path: "", url: "" }];
+    const seen = new Set(["solid"]);
+    [...getRegisteredPriceBadgeStyles(), ...getDynamicPriceBadgeStyles()].forEach((styleDef) => {
+      if (seen.has(styleDef.id)) return;
+      seen.add(styleDef.id);
+      out.push(styleDef);
+    });
+    return out;
+  }
+
+  function resolvePriceBadgeStyleId(value, fallback = "solid") {
+    const target = String(value || "").trim() || fallback;
+    return getPriceBadgeStyleOptions().some((item) => item.id === target) ? target : fallback;
+  }
+
+  function getPriceBadgeStyleMeta(styleId) {
+    const safeId = resolvePriceBadgeStyleId(styleId, "solid");
+    return getPriceBadgeStyleOptions().find((item) => item.id === safeId) || getPriceBadgeStyleOptions()[0];
+  }
+
+  function getStyleConfigPriceBadgeStyleMeta(styleConfig) {
+    const cfg = styleConfig && typeof styleConfig === "object" ? styleConfig : null;
+    const textCfg = cfg?.text && typeof cfg.text === "object" ? cfg.text : null;
+    const path = String(cfg?.priceBadgeStylePath || textCfg?.priceBadgeStylePath || "").trim();
+    const url = String(cfg?.priceBadgeStyleUrl || textCfg?.priceBadgeStyleUrl || "").trim();
+    const rawId = String(cfg?.priceBadgeStyleId || textCfg?.priceBadgeStyleId || "").trim();
+    const id = rawId || (path || url ? normalizeBadgeStyleId(path || url) : "solid");
+    return {
+      id,
+      path,
+      url
+    };
+  }
+
+  function getPriceBadgeOptionsHtml(selectedId = "solid") {
+    const target = resolvePriceBadgeStyleId(selectedId);
+    return getPriceBadgeStyleOptions()
+      .map((item) => {
+        const selected = item.id === target ? ' selected' : "";
+        return `<option value="${escapeHtml(item.id)}"${selected}>${escapeHtml(item.label)}</option>`;
+      })
+      .join("");
+  }
+
+  function ensureBadgeStyleMetaAvailable(styleMeta) {
+    const safe = styleMeta && typeof styleMeta === "object" ? styleMeta : null;
+    const id = String(safe?.id || "").trim();
+    const path = String(safe?.path || "").trim();
+    const url = String(safe?.url || "").trim();
+    if (!id || id === "solid") return "solid";
+    if (getPriceBadgeStyleOptions().some((item) => item.id === id)) return id;
+    if (!path && !url) return "solid";
+    const current = Array.isArray(state.badgeLibrary?.items) ? state.badgeLibrary.items.slice() : [];
+    const exists = current.some((item) => {
+      const itemPath = String(item?.fullPath || "").trim();
+      const itemUrl = String(item?.url || "").trim();
+      return (path && itemPath === path) || (url && itemUrl === url);
+    });
+    if (!exists) {
+      current.push({
+        name: path ? path.split("/").pop() : id,
+        fullPath: path || id,
+        url
+      });
+      state.badgeLibrary.items = current;
+    }
+    return id;
+  }
+
+  function refreshPriceBadgeSelect(tab = BUILDER_TAB_PRODUCT, selectedId = "solid") {
+    const select = document.getElementById(getBadgeSelectIdForTab(tab));
+    if (!select) return;
+    const safeId = resolvePriceBadgeStyleId(selectedId);
+    select.innerHTML = getPriceBadgeOptionsHtml(safeId);
+    select.value = safeId;
+    syncBadgeLibrarySelection(tab);
+  }
+
+  function getSelectedPriceBadgeStyleId(tab = BUILDER_TAB_PRODUCT) {
+    const select = document.getElementById(getBadgeSelectIdForTab(tab));
+    return resolvePriceBadgeStyleId(select?.value || "solid");
+  }
+
+  function mergeBadgeLibraryAssets(primaryList, secondaryList = []) {
+    const out = [];
+    const seen = new Set();
+    [...(Array.isArray(primaryList) ? primaryList : []), ...(Array.isArray(secondaryList) ? secondaryList : [])].forEach((item) => {
+      const name = String(item?.name || "").trim();
+      const fullPath = String(item?.fullPath || "").trim();
+      const url = String(item?.url || "").trim();
+      const key = fullPath || url || name;
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      out.push({ name, fullPath, url });
+    });
+    return out.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "pl", { sensitivity: "base", numeric: true }));
+  }
+
+  async function loadBadgeLibraryAssetsFromRemoteStorage() {
+    const api = await ensureFirebaseStorageApiForStyles();
+    if (typeof api.listAll !== "function") {
+      throw new Error("Brak API listAll dla folderu badge.");
+    }
+    const folderRef = api.ref(api.storage, BADGE_FOLDER_PATH);
+    const result = await api.listAll(folderRef);
+    const items = Array.isArray(result?.items) ? result.items : [];
+    const resolved = await Promise.all(items.map(async (item) => {
+      try {
+        const url = await api.getDownloadURL(item);
+        return {
+          name: String(item?.name || "").trim(),
+          fullPath: String(item?.fullPath || `${BADGE_FOLDER_PATH}/${item?.name || ""}`).trim(),
+          url: String(url || "").trim()
+        };
+      } catch (_err) {
+        return null;
+      }
+    }));
+    return resolved
+      .filter((item) => item && (item.fullPath || item.url))
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "pl", { sensitivity: "base", numeric: true }));
+  }
+
+  async function ensureBadgeLibraryReady(options = {}) {
+    const forceReload = !!options.forceReload;
+    const badgeState = state.badgeLibrary || {};
+    if (!forceReload && Array.isArray(badgeState.items) && badgeState.items.length) {
+      return badgeState.items.slice();
+    }
+    if (badgeState.loadingPromise) return await badgeState.loadingPromise;
+    const existingItems = Array.isArray(badgeState.items) ? badgeState.items.slice() : [];
+    badgeState.loadingPromise = (async () => {
+      try {
+        const items = await loadBadgeLibraryAssetsFromRemoteStorage();
+        badgeState.items = mergeBadgeLibraryAssets(items, existingItems);
+        badgeState.error = "";
+        return badgeState.items.slice();
+      } catch (err) {
+        badgeState.error = String(err?.message || err || "Nie udało się wczytać badge.");
+        console.warn("New Style: nie udało się wczytać folderu badge:", err);
+        badgeState.items = existingItems;
+        return existingItems.slice();
+      } finally {
+        badgeState.loadingPromise = null;
+      }
+    })();
+    state.badgeLibrary = badgeState;
+    return await badgeState.loadingPromise;
+  }
+
+  function getBadgePreviewCardUrl(styleDef) {
+    const safe = styleDef && typeof styleDef === "object" ? styleDef : null;
+    if (!safe) return "";
+    return String(safe.url || "").trim() || String(buildStorageMediaUrl(safe.path) || "").trim();
+  }
+
+  function loadWorkspaceBadgeImage(url) {
+    const src = String(url || "").trim();
+    if (!src) return Promise.resolve(null);
+    if (workspaceBadgeImageCache.has(src)) return workspaceBadgeImageCache.get(src);
+    const loadAttempt = (useAnonymousCors) => new Promise((resolve) => {
+      const img = new Image();
+      // Nie wszystkie pliki badge z Firebase mają poprawny CORS dla canvasa.
+      // Dla workspace wystarczy bezpieczny fallback do zwykłego <img>, żeby badge było widoczne.
+      if (useAnonymousCors) img.crossOrigin = "anonymous";
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = src;
+    });
+    const promise = loadAttempt(true).then((img) => img || loadAttempt(false));
+    workspaceBadgeImageCache.set(src, promise);
+    return promise;
+  }
+
+  function getBadgeShapeNode(group) {
+    if (!group || typeof group.findOne !== "function") return null;
+    return group.findOne((node) => node && node.getClassName && (
+      node.getClassName() === "Rect" || node.getClassName() === "Circle"
+    )) || null;
+  }
+
+  async function applyBadgeStyleToGroup(group, styleMeta) {
+    const shapeNode = getBadgeShapeNode(group);
+    if (!shapeNode) return false;
+    const shapeClass = String(shapeNode.getClassName?.() || "");
+    const currentFill = typeof shapeNode.fill === "function" ? String(shapeNode.fill() || "#d71920") : "#d71920";
+    if (!shapeNode.getAttr?.("workspaceSolidFill")) {
+      try { shapeNode.setAttr("workspaceSolidFill", currentFill); } catch (_err) {}
+    }
+    if (!shapeNode.getAttr?.("workspaceSolidStroke")) {
+      try { shapeNode.setAttr("workspaceSolidStroke", String(shapeNode.stroke?.() || "#f8fafc")); } catch (_err) {}
+    }
+    if (!shapeNode.getAttr?.("workspaceSolidStrokeWidth")) {
+      try { shapeNode.setAttr("workspaceSolidStrokeWidth", Number(shapeNode.strokeWidth?.() || 2)); } catch (_err) {}
+    }
+    const solidFill = String(shapeNode.getAttr?.("workspaceSolidFill") || currentFill || "#d71920");
+    const solidStroke = String(shapeNode.getAttr?.("workspaceSolidStroke") || shapeNode.stroke?.() || "#f8fafc");
+    const solidStrokeWidth = Math.max(0, Number(shapeNode.getAttr?.("workspaceSolidStrokeWidth") || shapeNode.strokeWidth?.() || 2));
+    const previewUrl = getBadgePreviewCardUrl(styleMeta);
+
+    if (typeof shapeNode.fillPatternImage === "function") shapeNode.fillPatternImage(null);
+    if (typeof shapeNode.fillPriority === "function") shapeNode.fillPriority("color");
+    if (typeof shapeNode.fillPatternScaleX === "function") shapeNode.fillPatternScaleX(1);
+    if (typeof shapeNode.fillPatternScaleY === "function") shapeNode.fillPatternScaleY(1);
+    if (typeof shapeNode.fillPatternX === "function") shapeNode.fillPatternX(0);
+    if (typeof shapeNode.fillPatternY === "function") shapeNode.fillPatternY(0);
+    if (typeof shapeNode.fill === "function") shapeNode.fill(solidFill);
+    if (typeof shapeNode.stroke === "function") shapeNode.stroke(solidStroke);
+    if (typeof shapeNode.strokeWidth === "function") shapeNode.strokeWidth(solidStrokeWidth);
+    try {
+      shapeNode.setAttr("priceBadgeStyleId", String(styleMeta?.id || "solid"));
+      shapeNode.setAttr("priceBadgeStylePath", String(styleMeta?.path || ""));
+      shapeNode.setAttr("priceBadgeStyleUrl", String(styleMeta?.url || ""));
+    } catch (_err) {}
+
+    if (!previewUrl || String(styleMeta?.id || "solid") === "solid") {
+      return true;
+    }
+
+    const image = await loadWorkspaceBadgeImage(previewUrl);
+    if (!image) return false;
+
+    const width = shapeClass === "Circle"
+      ? Math.max(1, Number(shapeNode.radius?.() || 1) * 2)
+      : Math.max(1, Number(shapeNode.width?.() || 1));
+    const height = shapeClass === "Circle"
+      ? Math.max(1, Number(shapeNode.radius?.() || 1) * 2)
+      : Math.max(1, Number(shapeNode.height?.() || 1));
+    const naturalW = Math.max(1, Number(image.naturalWidth || image.width || 1));
+    const naturalH = Math.max(1, Number(image.naturalHeight || image.height || 1));
+
+    if (typeof shapeNode.fillPatternImage === "function") shapeNode.fillPatternImage(image);
+    if (typeof shapeNode.fillPatternRepeat === "function") shapeNode.fillPatternRepeat("no-repeat");
+    if (typeof shapeNode.fillPatternScaleX === "function") shapeNode.fillPatternScaleX(width / naturalW);
+    if (typeof shapeNode.fillPatternScaleY === "function") shapeNode.fillPatternScaleY(height / naturalH);
+    if (typeof shapeNode.fill === "function") shapeNode.fill("transparent");
+    if (typeof shapeNode.fillPriority === "function") shapeNode.fillPriority("pattern");
+    if (typeof shapeNode.stroke === "function") shapeNode.stroke("transparent");
+    if (typeof shapeNode.strokeWidth === "function") shapeNode.strokeWidth(0);
+    return true;
+  }
+
+  async function applySelectedBadgeStyleToWorkspace(tab = BUILDER_TAB_PRODUCT) {
+    const ws = ensureWorkspaceEditor();
+    if (!ws?.layer) return false;
+    const styleMeta = getPriceBadgeStyleMeta(getSelectedPriceBadgeStyleId(tab));
+    const badgeNodes = [
+      findWorkspaceNodeByKind("badgeRect"),
+      findWorkspaceNodeByKind("badgeCircle")
+    ].filter(Boolean);
+    if (!badgeNodes.length) return false;
+    await Promise.all(badgeNodes.map((node) => applyBadgeStyleToGroup(node, styleMeta)));
+    ws.layer.batchDraw();
+    return true;
+  }
+
+  function buildBadgeLibraryCardMarkup(styleDef, selectedId) {
+    const id = String(styleDef?.id || "").trim();
+    if (!id) return "";
+    const label = String(styleDef?.label || id).trim();
+    const active = id === selectedId ? " is-active" : "";
+    const previewUrl = getBadgePreviewCardUrl(styleDef);
+    const media = id === "solid"
+      ? `<div class="new-style-badge-card__solid"></div>`
+      : (previewUrl
+        ? `<img class="new-style-badge-card__img" src="${escapeHtml(previewUrl)}" alt="${escapeHtml(label)}" loading="lazy">`
+        : `<div class="new-style-badge-card__solid"></div>`);
+    return `
+      <button type="button" class="new-style-badge-card${active}" data-badge-style-id="${escapeHtml(id)}" title="${escapeHtml(label)}">
+        <span class="new-style-badge-card__preview">${media}</span>
+        <span class="new-style-badge-card__label">${escapeHtml(label)}</span>
+      </button>
+    `;
+  }
+
+  function syncBadgeLibrarySelection(tab = BUILDER_TAB_PRODUCT) {
+    const container = document.getElementById(getBadgeLibraryIdForTab(tab));
+    if (!container) return;
+    const selectedId = getSelectedPriceBadgeStyleId(tab);
+    container.querySelectorAll("[data-badge-style-id]").forEach((node) => {
+      node.classList.toggle("is-active", String(node.getAttribute("data-badge-style-id") || "") === selectedId);
+    });
+  }
+
+  async function renderBadgeLibrary(tab = BUILDER_TAB_PRODUCT, options = {}) {
+    const container = document.getElementById(getBadgeLibraryIdForTab(tab));
+    if (!container) return;
+    container.innerHTML = `
+      <div class="new-style-badge-library__panel">
+        <div class="new-style-badge-library__toolbar">
+          <div class="new-style-badge-library__title">Badge z folderu <code>${BADGE_FOLDER_PATH}</code></div>
+          <button type="button" class="new-style-tool-btn" data-badge-library-close>Zamknij</button>
+        </div>
+        <div class="new-style-badge-library__empty">Ładowanie badge...</div>
+      </div>
+    `;
+    await ensureBadgeLibraryReady(options);
+    refreshPriceBadgeSelect(tab, getSelectedPriceBadgeStyleId(tab));
+    const selectedId = getSelectedPriceBadgeStyleId(tab);
+    const selectedMeta = getPriceBadgeStyleMeta(selectedId);
+    const libraryOptions = [
+      { id: "solid", label: "Kolor koła (domyślny)", path: "", url: "" },
+      ...getDynamicPriceBadgeStyles()
+    ];
+    if (selectedMeta?.id && !libraryOptions.some((item) => item.id === selectedMeta.id)) {
+      libraryOptions.push(selectedMeta);
+    }
+    if (!libraryOptions.length) {
+      container.innerHTML = `
+        <div class="new-style-badge-library__panel">
+          <div class="new-style-badge-library__toolbar">
+            <div class="new-style-badge-library__title">Badge z folderu <code>${BADGE_FOLDER_PATH}</code></div>
+            <button type="button" class="new-style-tool-btn" data-badge-library-close>Zamknij</button>
+          </div>
+          <div class="new-style-badge-library__empty">Brak dostępnych badge.</div>
+        </div>
+      `;
+      return;
+    }
+    const warning = String(state.badgeLibrary?.error || "").trim();
+    container.innerHTML = `
+      <div class="new-style-badge-library__panel">
+        <div class="new-style-badge-library__toolbar">
+          <div class="new-style-badge-library__title">Badge z folderu <code>${BADGE_FOLDER_PATH}</code></div>
+          <button type="button" class="new-style-tool-btn" data-badge-library-close>Zamknij</button>
+        </div>
+        ${warning ? `<div class="new-style-badge-library__empty">Nie udało się odczytać całego folderu badge. Pokazuję dostępne pozycje lokalne.</div>` : ""}
+        <div class="new-style-badge-library__grid">
+          ${libraryOptions.map((styleDef) => buildBadgeLibraryCardMarkup(styleDef, selectedId)).join("")}
+        </div>
+      </div>
+    `;
+  }
+
   function createStorageNotReadyError(message) {
     const error = new Error(message || "Firebase Storage nie jest jeszcze gotowy.");
     error.code = "storage-not-ready";
@@ -514,11 +945,13 @@
         const api = window.firebaseStorageExports || await import("https://www.gstatic.com/firebasejs/12.6.0/firebase-storage.js");
         const refFn = api?.ref;
         const getDownloadURLFn = api?.getDownloadURL;
+        const listAllFn = api?.listAll;
         const uploadBytesFn = api?.uploadBytes;
         const getStorageFn = api?.getStorage;
         if (
           typeof refFn !== "function" ||
           typeof getDownloadURLFn !== "function" ||
+          typeof listAllFn !== "function" ||
           typeof uploadBytesFn !== "function"
         ) {
           throw new Error("Brak API Firebase Storage.");
@@ -531,6 +964,7 @@
           storage,
           ref: refFn,
           getDownloadURL: getDownloadURLFn,
+          listAll: listAllFn,
           uploadBytes: uploadBytesFn
         };
       })();
@@ -835,9 +1269,427 @@
     }
   }
 
+  function syncWorkspaceTextSemanticAttrs(node) {
+    if (!(node instanceof window.Konva.Text)) return;
+    const currentKind = String(node.getAttr?.("workspaceKind") || "").trim();
+    const nextKind = currentKind || "userText";
+    if (!currentKind && typeof node.setAttr === "function") {
+      try { node.setAttr("workspaceKind", nextKind); } catch (_err) {}
+    }
+
+    const currentLabel = String(node.getAttr?.("workspaceLabel") || "").trim();
+    if (!currentLabel && typeof node.setAttr === "function") {
+      let nextLabel = "Tekst";
+      if (nextKind === "nameText") nextLabel = "Nazwa produktu";
+      else if (nextKind === "indexText") nextLabel = "Indeks";
+      else if (nextKind === "packageText") nextLabel = "Opakowanie";
+      else if (nextKind === "currencySymbol") nextLabel = `Waluta ${String(node.text?.() || "").trim() || "£"}`;
+      try { node.setAttr("workspaceLabel", nextLabel); } catch (_err) {}
+    }
+
+    if (typeof node.lineHeight === "function") {
+      const currentLineHeight = Number(node.lineHeight() || 0);
+      if (!(currentLineHeight > 0)) node.lineHeight(1);
+    }
+  }
+
+  function getWorkspaceMeasuredTextWidth(node) {
+    if (!(node instanceof window.Konva.Text)) return 0;
+    if (typeof node.getTextWidth === "function") {
+      const measured = Number(node.getTextWidth() || 0);
+      if (measured > 0) return measured;
+    }
+
+    const textValue = String(node.text?.() || "");
+    if (!textValue) return 0;
+    const probe = document.createElement("canvas");
+    const context = probe.getContext("2d");
+    if (!context) return Math.max(0, Number(node.width?.() || 0));
+
+    const fontStyle = String(node.fontStyle?.() || "").trim();
+    const fontSize = Math.max(1, Number(node.fontSize?.() || 12));
+    const fontFamily = String(node.fontFamily?.() || "Arial").trim() || "Arial";
+    context.font = `${fontStyle ? `${fontStyle} ` : ""}${fontSize}px ${fontFamily}`;
+
+    return textValue
+      .split(/\r?\n/g)
+      .reduce((maxWidth, line) => Math.max(maxWidth, Math.ceil(context.measureText(line || " ").width)), 0);
+  }
+
+  function getWorkspaceTextNodeAutoHeight(node, fallback = 0) {
+    if (!(node instanceof window.Konva.Text)) return Math.max(1, Number(fallback || 1));
+    const box = typeof node.getClientRect === "function"
+      ? node.getClientRect({ skipTransform: true, skipStroke: false })
+      : null;
+    const measuredHeight = Number(box?.height || 0);
+    const currentHeight = Number(node.height?.() || 0);
+    const fontHeight = Math.max(
+      1,
+      Math.ceil(Number(node.fontSize?.() || 12) * Math.max(1, Number(node.lineHeight?.() || 1)))
+    );
+    return Math.max(1, Math.ceil(measuredHeight || currentHeight || Number(fallback || fontHeight) || fontHeight));
+  }
+
+  function syncWorkspaceTextLayout(node, options = {}) {
+    if (!(node instanceof window.Konva.Text)) return;
+    syncWorkspaceTextSemanticAttrs(node);
+
+    const ws = getWorkspace();
+    const stageW = Number(ws?.stage?.width?.() || MODULE_BASE_WIDTH);
+    const maxWidth = Math.max(24, Number(options.maxWidth || Math.round(stageW * 0.62)));
+    const wrapMode = String(options.wrapMode || "").trim();
+    const tightWidth = options.tightWidth !== false;
+    const minHeight = Math.max(1, Number(options.minHeight || 0));
+    const measuredWidth = getWorkspaceMeasuredTextWidth(node);
+    const fontSize = Math.max(1, Number(node.fontSize?.() || 12));
+    const widthPadding = Math.max(12, Math.ceil(fontSize * 0.45));
+
+    if (wrapMode && typeof node.wrap === "function") node.wrap(wrapMode);
+
+    if (typeof node.width === "function") {
+      const currentWidth = Math.max(0, Number(node.width() || 0));
+      let nextWidth;
+      if (tightWidth) {
+        nextWidth = Math.min(maxWidth, Math.max(24, Math.ceil(measuredWidth + widthPadding)));
+      } else {
+        const fallbackWidth = Math.max(120, Math.ceil(measuredWidth + widthPadding));
+        nextWidth = Math.min(maxWidth, currentWidth > 0 ? currentWidth : fallbackWidth);
+      }
+      node.width(Math.max(24, nextWidth));
+    }
+
+    if (typeof node.height === "function") {
+      const autoHeight = getWorkspaceTextNodeAutoHeight(node, minHeight);
+      node.height(Math.max(minHeight, autoHeight));
+    }
+  }
+
   function getSelectedCurrencySymbol() {
     const select = document.getElementById(CURRENCY_SELECT_ID);
     return String(select?.value || "£").trim() || "£";
+  }
+
+  function updateWorkspacePriceCurrencyText(unitNode, symbol) {
+    if (!(unitNode instanceof window.Konva.Text) || typeof unitNode.text !== "function") return false;
+    const safeSymbol = String(symbol || "£").trim() || "£";
+    const current = String(unitNode.text() || "").trim();
+    if (!current) {
+      unitNode.text(safeSymbol);
+      return true;
+    }
+    if (!current.includes("/")) {
+      unitNode.text(safeSymbol);
+      return true;
+    }
+    const slashIndex = current.indexOf("/");
+    const suffix = slashIndex >= 0 ? current.slice(slashIndex).trim() : "";
+    unitNode.text(suffix ? `${safeSymbol} ${suffix}` : safeSymbol);
+    return true;
+  }
+
+  function applySelectedCurrencyToWorkspace() {
+    const ws = ensureWorkspaceEditor();
+    if (!ws?.layer) return false;
+    const symbol = getSelectedCurrencySymbol();
+    let changed = false;
+
+    const priceGroups = ws.layer.find((node) => node?.getAttr?.("workspaceKind") === "priceGroup");
+    priceGroups.forEach((group) => {
+      if (!(group instanceof window.Konva.Group)) return;
+      const unitNode = group.findOne((node) => node?.getAttr?.("priceRole") === "unit");
+      const majorNode = group.findOne((node) => node?.getAttr?.("priceRole") === "major");
+      if (!unitNode) return;
+      if (updateWorkspacePriceCurrencyText(unitNode, symbol)) {
+        const majorSize = Math.max(20, Number(majorNode?.fontSize?.() || 64));
+        const ratios = getWorkspacePriceRatiosFromGroup(group, { minor: 0.3, unit: 0.22 });
+        layoutPriceGroup(group, { majorSize, ratios });
+        changed = true;
+      }
+    });
+
+    const currencyNodes = ws.layer.find((node) => {
+      if (!(node instanceof window.Konva.Text)) return false;
+      return node?.getAttr?.("workspaceKind") === "currencySymbol";
+    });
+    currencyNodes.forEach((node) => {
+      const parent = typeof node.getParent === "function" ? node.getParent() : null;
+      if (parent instanceof window.Konva.Group && parent.getAttr?.("workspaceKind") === "priceGroup") return;
+      if (typeof node.text === "function") node.text(symbol);
+      try { node.setAttr("workspaceLabel", `Waluta ${symbol}`); } catch (_err) {}
+      changed = true;
+    });
+
+    if (changed) ws.layer.batchDraw();
+    return changed;
+  }
+
+  function isBadgeWorkspaceKind(kind) {
+    const safeKind = String(kind || "").trim();
+    return safeKind === "badgeRect" || safeKind === "badgeCircle";
+  }
+
+  function getWorkspaceBadgeNode() {
+    return findWorkspaceNodeByKind("badgeRect") || findWorkspaceNodeByKind("badgeCircle") || null;
+  }
+
+  function getWorkspacePriceShapeProfileFromBadgeNode(badgeNode) {
+    const kind = String(badgeNode?.getAttr?.("workspaceKind") || "").trim();
+    return getWorkspacePriceShapeProfile({
+      isRoundedRect: kind === "badgeRect",
+      isCircle: kind === "badgeCircle"
+    });
+  }
+
+  function getNodeStageRect(node) {
+    if (!node || typeof node.getClientRect !== "function") return null;
+    return node.getClientRect({ skipStroke: false });
+  }
+
+  function getNodeLocalRect(node) {
+    if (!node || typeof node.getClientRect !== "function") return null;
+    return node.getClientRect({ skipTransform: true, skipStroke: false });
+  }
+
+  function getStoredBadgePriceLayoutState(badgeNode) {
+    if (!badgeNode?.getAttr) return null;
+    const offsetX = Number(badgeNode.getAttr("badgePriceOffsetX"));
+    const offsetY = Number(badgeNode.getAttr("badgePriceOffsetY"));
+    const main = Number(badgeNode.getAttr("badgePriceMainFactor"));
+    const dec = Number(badgeNode.getAttr("badgePriceDecFactor"));
+    const unit = Number(badgeNode.getAttr("badgePriceUnitFactor"));
+    if (!Number.isFinite(offsetX) || !Number.isFinite(offsetY)) return null;
+    if (!(main > 0) || !(dec > 0) || !(unit > 0)) return null;
+    return {
+      offsetX,
+      offsetY,
+      factors: { main, dec, unit }
+    };
+  }
+
+  function storeBadgePriceLayoutState(badgeNode, layoutState) {
+    if (!badgeNode || typeof badgeNode.setAttr !== "function") return;
+    const offsetX = Number(layoutState?.offsetX);
+    const offsetY = Number(layoutState?.offsetY);
+    const main = Number(layoutState?.factors?.main);
+    const dec = Number(layoutState?.factors?.dec);
+    const unit = Number(layoutState?.factors?.unit);
+    if (!Number.isFinite(offsetX) || !Number.isFinite(offsetY)) return;
+    if (!(main > 0) || !(dec > 0) || !(unit > 0)) return;
+    try { badgeNode.setAttr("badgePriceOffsetX", Number(offsetX.toFixed(4))); } catch (_err) {}
+    try { badgeNode.setAttr("badgePriceOffsetY", Number(offsetY.toFixed(4))); } catch (_err) {}
+    try { badgeNode.setAttr("badgePriceMainFactor", Number(main.toFixed(4))); } catch (_err) {}
+    try { badgeNode.setAttr("badgePriceDecFactor", Number(dec.toFixed(4))); } catch (_err) {}
+    try { badgeNode.setAttr("badgePriceUnitFactor", Number(unit.toFixed(4))); } catch (_err) {}
+  }
+
+  function captureBadgePriceLayoutState(badgeNode) {
+    const priceGroup = findWorkspaceNodeByKind("priceGroup");
+    if (!badgeNode || !priceGroup || !priceGroup.getAttr?.("badgeAutoLayout")) return false;
+    const badgeRect = getNodeStageRect(badgeNode);
+    const priceRect = getNodeStageRect(priceGroup);
+    if (!(badgeRect?.width > 0) || !(badgeRect?.height > 0) || !priceRect) return false;
+    const shapeProfile = getWorkspacePriceShapeProfileFromBadgeNode(badgeNode);
+    const factors = captureWorkspacePriceFactors(priceGroup, {
+      w: Number(badgeRect.width || 0),
+      h: Number(badgeRect.height || 0)
+    }, shapeProfile);
+    storeBadgePriceLayoutState(badgeNode, {
+      offsetX: (Number(priceRect.x || 0) - Number(badgeRect.x || 0)) / Math.max(1, Number(badgeRect.width || 1)),
+      offsetY: (Number(priceRect.y || 0) - Number(badgeRect.y || 0)) / Math.max(1, Number(badgeRect.height || 1)),
+      factors
+    });
+    return true;
+  }
+
+  function fitBadgeNodeAroundPriceGroup(badgeNode, priceGroup) {
+    const priceRect = getNodeStageRect(priceGroup);
+    const shapeNode = getBadgeShapeNode(badgeNode);
+    const badgeKind = String(badgeNode?.getAttr?.("workspaceKind") || "").trim();
+    if (!(priceRect?.width > 0) || !(priceRect?.height > 0) || !shapeNode) return false;
+
+    if (badgeKind === "badgeRect" && shapeNode instanceof window.Konva.Rect) {
+      const paddingX = Math.max(14, Number(priceRect.width || 0) * 0.18);
+      const paddingY = Math.max(10, Number(priceRect.height || 0) * 0.28);
+      const nextWidth = Math.max(150, Number(priceRect.width || 0) + paddingX * 2);
+      const nextHeight = Math.max(74, Number(priceRect.height || 0) + paddingY * 2);
+      if (typeof badgeNode.x === "function") badgeNode.x(Number((Number(priceRect.x || 0) - paddingX).toFixed(2)));
+      if (typeof badgeNode.y === "function") badgeNode.y(Number((Number(priceRect.y || 0) - paddingY).toFixed(2)));
+      if (typeof shapeNode.x === "function") shapeNode.x(0);
+      if (typeof shapeNode.y === "function") shapeNode.y(0);
+      if (typeof shapeNode.width === "function") shapeNode.width(nextWidth);
+      if (typeof shapeNode.height === "function") shapeNode.height(nextHeight);
+      if (typeof shapeNode.cornerRadius === "function") {
+        const currentRadius = Number(shapeNode.cornerRadius() || 14);
+        shapeNode.cornerRadius(Math.max(10, Math.min(nextHeight / 2, currentRadius || 14)));
+      }
+      return true;
+    }
+
+    if (badgeKind === "badgeCircle" && shapeNode instanceof window.Konva.Circle) {
+      const padding = Math.max(12, Math.max(Number(priceRect.width || 0), Number(priceRect.height || 0)) * 0.18);
+      const diameter = Math.max(84, Math.max(Number(priceRect.width || 0), Number(priceRect.height || 0)) + padding * 2);
+      const radius = diameter / 2;
+      if (typeof badgeNode.x === "function") {
+        badgeNode.x(Number((Number(priceRect.x || 0) + Number(priceRect.width || 0) / 2 - radius).toFixed(2)));
+      }
+      if (typeof badgeNode.y === "function") {
+        badgeNode.y(Number((Number(priceRect.y || 0) + Number(priceRect.height || 0) / 2 - radius).toFixed(2)));
+      }
+      if (typeof shapeNode.x === "function") shapeNode.x(radius);
+      if (typeof shapeNode.y === "function") shapeNode.y(radius);
+      if (typeof shapeNode.radius === "function") shapeNode.radius(radius);
+      return true;
+    }
+
+    return false;
+  }
+
+  function getDefaultPriceOffsetForBadge(shapeProfile, badgeRect, priceBox) {
+    const width = Math.max(1, Number(badgeRect?.width || 1));
+    const height = Math.max(1, Number(badgeRect?.height || 1));
+    const boxWidth = Math.max(1, Number(priceBox?.width || 1));
+    const boxHeight = Math.max(1, Number(priceBox?.height || 1));
+    if (shapeProfile.isRoundedRect) {
+      return {
+        x: Math.max(0, Math.min(1, Math.max(10, width * 0.08) / width)),
+        y: Math.max(0, Math.min(1, Math.max(0, (height - boxHeight) / 2) / height))
+      };
+    }
+    return {
+      x: Math.max(0, Math.min(1, Math.max(0, (width - boxWidth) / 2) / width)),
+      y: Math.max(0, Math.min(1, Math.max(0, (height - boxHeight) / 2) / height))
+    };
+  }
+
+  function fitPriceGroupIntoBadgeArea(priceGroup, badgeRect, shapeProfile, factors) {
+    const safeFactors = factors && typeof factors === "object" ? factors : getWorkspaceDefaultPriceFactors(shapeProfile);
+    const ratios = getWorkspacePriceRatiosFromFactors(safeFactors);
+    const base = deriveWorkspacePriceBaseFromRect(shapeProfile, {
+      w: Number(badgeRect?.width || 0),
+      h: Number(badgeRect?.height || 0)
+    });
+    let majorSize = Math.max(18, Number((base * Math.max(0.12, Number(safeFactors.main) || 0.12)).toFixed(2)));
+    layoutPriceGroup(priceGroup, { majorSize, ratios });
+
+    let box = getNodeLocalRect(priceGroup) || { x: 0, y: 0, width: 0, height: 0 };
+    const width = Math.max(1, Number(badgeRect?.width || 1));
+    const height = Math.max(1, Number(badgeRect?.height || 1));
+    const paddingX = shapeProfile.isRoundedRect ? Math.max(10, width * 0.08) : Math.max(8, width * 0.1);
+    const maxWidth = Math.max(20, width - (shapeProfile.isRoundedRect ? paddingX * 2 : paddingX));
+    const maxHeight = Math.max(20, height * (shapeProfile.isRoundedRect ? 0.82 : 0.78));
+    const fitScale = Math.min(
+      1,
+      maxWidth / Math.max(1, Number(box.width || 1)),
+      maxHeight / Math.max(1, Number(box.height || 1))
+    );
+    if (fitScale < 0.999) {
+      majorSize = Math.max(18, Number((majorSize * fitScale).toFixed(2)));
+      layoutPriceGroup(priceGroup, { majorSize, ratios });
+      box = getNodeLocalRect(priceGroup) || box;
+    }
+    return { box, ratios, majorSize };
+  }
+
+  function syncPriceGroupToBadgeNode(badgeNode, options = {}) {
+    const priceGroup = findWorkspaceNodeByKind("priceGroup");
+    if (!badgeNode || !priceGroup) return false;
+    const shouldAutoLayout = !!options.forceDefaultOffset || !!priceGroup.getAttr?.("badgeAutoLayout");
+    if (!shouldAutoLayout) return false;
+    const badgeRect = getNodeStageRect(badgeNode);
+    if (!(badgeRect?.width > 0) || !(badgeRect?.height > 0)) return false;
+
+    const shapeProfile = getWorkspacePriceShapeProfileFromBadgeNode(badgeNode);
+    const storedState = options.useStoredLayout ? getStoredBadgePriceLayoutState(badgeNode) : null;
+    const fitted = fitPriceGroupIntoBadgeArea(
+      priceGroup,
+      badgeRect,
+      shapeProfile,
+      storedState?.factors || getWorkspaceDefaultPriceFactors(shapeProfile)
+    );
+    const priceBox = fitted.box || getNodeLocalRect(priceGroup) || { x: 0, y: 0, width: 0, height: 0 };
+    const defaultOffset = getDefaultPriceOffsetForBadge(shapeProfile, badgeRect, priceBox);
+    const offsetX = storedState && Number.isFinite(storedState.offsetX) ? storedState.offsetX : defaultOffset.x;
+    const offsetY = storedState && Number.isFinite(storedState.offsetY) ? storedState.offsetY : defaultOffset.y;
+
+    if (typeof priceGroup.x === "function") {
+      priceGroup.x(Number((Number(badgeRect.x || 0) + Number(badgeRect.width || 0) * offsetX - Number(priceBox.x || 0)).toFixed(2)));
+    }
+    if (typeof priceGroup.y === "function") {
+      priceGroup.y(Number((Number(badgeRect.y || 0) + Number(badgeRect.height || 0) * offsetY - Number(priceBox.y || 0)).toFixed(2)));
+    }
+    try { priceGroup.setAttr("badgeAutoLayout", true); } catch (_err) {}
+
+    const finalFactors = captureWorkspacePriceFactors(priceGroup, {
+      w: Number(badgeRect.width || 0),
+      h: Number(badgeRect.height || 0)
+    }, shapeProfile);
+    storeBadgePriceLayoutState(badgeNode, { offsetX, offsetY, factors: finalFactors });
+    return true;
+  }
+
+  async function refreshBadgeNodeAfterGeometryChange(badgeNode, options = {}) {
+    if (!badgeNode) return false;
+    if (options.syncPrice) {
+      syncPriceGroupToBadgeNode(badgeNode, {
+        useStoredLayout: !!options.useStoredLayout,
+        forceDefaultOffset: !!options.forceDefaultOffset
+      });
+    }
+    const shapeNode = getBadgeShapeNode(badgeNode);
+    const styleId = String(shapeNode?.getAttr?.("priceBadgeStyleId") || getSelectedPriceBadgeStyleId(String(state.activeBuilderTab || BUILDER_TAB_PRODUCT)));
+    const styleMeta = getPriceBadgeStyleMeta(styleId);
+    await applyBadgeStyleToGroup(badgeNode, styleMeta);
+    const ws = getWorkspace();
+    if (ws?.layer) ws.layer.batchDraw();
+    return true;
+  }
+
+  function styleUsesCircularBadge(styleMeta) {
+    const haystack = normalizeText([
+      styleMeta?.id,
+      styleMeta?.label,
+      styleMeta?.path
+    ].filter(Boolean).join(" "));
+    if (!haystack) return true;
+    return haystack.includes("kolko") ||
+      haystack.includes("kolo") ||
+      haystack.includes("circle") ||
+      haystack.includes("round");
+  }
+
+  function getPreferredBadgeShapeForStyle(styleMeta) {
+    return styleUsesCircularBadge(styleMeta) ? "circle" : "rect";
+  }
+
+  function ensureBadgeSelectionVisibleInWorkspace(tab = BUILDER_TAB_PRODUCT) {
+    const ws = ensureWorkspaceEditor();
+    if (!ws?.layer) return false;
+    const hasBadge = !!findWorkspaceNodeByKind("badgeRect") || !!findWorkspaceNodeByKind("badgeCircle");
+    const hasPriceGroup = !!findWorkspaceNodeByKind("priceGroup");
+    if (hasBadge && hasPriceGroup) return false;
+
+    const styleMeta = getPriceBadgeStyleMeta(getSelectedPriceBadgeStyleId(tab));
+    const addedBadge = !hasBadge;
+    const addedPriceGroup = !hasPriceGroup;
+    if (!hasBadge) {
+      addBadgeNode(getPreferredBadgeShapeForStyle(styleMeta));
+    }
+    if (!hasPriceGroup) {
+      addPriceGroupNode();
+    }
+    const badgeNode = getWorkspaceBadgeNode();
+    const priceGroup = findWorkspaceNodeByKind("priceGroup");
+    if (badgeNode) {
+      if (priceGroup && addedBadge && !addedPriceGroup) {
+        try { priceGroup.setAttr("badgeAutoLayout", true); } catch (_err) {}
+        fitBadgeNodeAroundPriceGroup(badgeNode, priceGroup);
+        captureBadgePriceLayoutState(badgeNode);
+      } else {
+        syncPriceGroupToBadgeNode(badgeNode, { forceDefaultOffset: true });
+      }
+      selectWorkspaceNode(badgeNode);
+    }
+    return true;
   }
 
   function parsePriceParts(rawValue) {
@@ -1182,16 +2034,37 @@
     };
     const commit = () => {
       node.text(textarea.value || " ");
-      if (typeof node.width === "function") {
-        node.width(Math.max(80, textarea.offsetWidth - 4));
+      syncWorkspaceTextSemanticAttrs(node);
+      const stageW = Number(ws.stage.width() || MODULE_BASE_WIDTH);
+      const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+      const isGenericUserText = !kind || kind === "userText" || kind === "text";
+      const hasLineBreak = /[\r\n]/.test(String(node.text?.() || ""));
+      if (isGenericUserText) {
+        fitTextNodeIntoWorkspace(node, {
+          maxWidth: Math.round(stageW * (hasLineBreak ? 0.72 : 0.52)),
+          preferredWidth: Math.round(stageW * (hasLineBreak ? 0.54 : 0.34)),
+          fontSize: Number(node.fontSize?.() || 24),
+          minFontSize: 12,
+          wrap: hasLineBreak
+        });
+        syncWorkspaceTextLayout(node, {
+          wrapMode: hasLineBreak ? "word" : "none",
+          tightWidth: !hasLineBreak,
+          maxWidth: Math.round(stageW * (hasLineBreak ? 0.72 : 0.52)),
+          minHeight: Math.max(24, Math.ceil(Number(node.fontSize?.() || 24) * 1.15))
+        });
+      } else {
+        if (typeof node.width === "function") {
+          node.width(Math.max(80, textarea.offsetWidth - 4));
+        }
+        fitTextNodeIntoWorkspace(node, {
+          maxWidth: Math.round(stageW * 0.9),
+          preferredWidth: Math.round(stageW * 0.82),
+          fontSize: Number(node.fontSize?.() || 24),
+          minFontSize: 12,
+          forceWidth: true
+        });
       }
-      fitTextNodeIntoWorkspace(node, {
-        maxWidth: Math.round(Number(ws.stage.width() || MODULE_BASE_WIDTH) * 0.9),
-        preferredWidth: Math.round(Number(ws.stage.width() || MODULE_BASE_WIDTH) * 0.82),
-        fontSize: Number(node.fontSize?.() || 24),
-        minFontSize: 12,
-        forceWidth: true
-      });
       ws.layer.batchDraw();
       setSaveStatus("Zapisano edycje tekstu.", "default");
       cleanup();
@@ -1313,11 +2186,64 @@
   function setupWorkspaceNodeBehavior(node) {
     const ws = getWorkspace();
     if (!ws?.stage || !node) return;
+    if (node instanceof window.Konva.Text) {
+      syncWorkspaceTextSemanticAttrs(node);
+      const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+      const textValue = String(node.text?.() || "");
+      const isGenericUserText = !kind || kind === "userText" || kind === "text";
+      const isSingleLine = !!textValue && !/[\r\n]/.test(textValue);
+      const measuredWidth = getWorkspaceMeasuredTextWidth(node);
+      const currentWidth = Math.max(0, Number(node.width?.() || 0));
+      const targetWidth = Math.max(24, Math.ceil(measuredWidth + 14));
+      const stageW = Number(ws.stage.width?.() || MODULE_BASE_WIDTH);
+      if (isGenericUserText && isSingleLine && measuredWidth > 0 && currentWidth > Math.max(targetWidth * 1.8, stageW * 0.6)) {
+        if (typeof node.wrap === "function") node.wrap("none");
+        if (typeof node.width === "function") node.width(targetWidth);
+        if (typeof node.height === "function") {
+          node.height(getWorkspaceTextNodeAutoHeight(node, Math.max(24, Math.ceil((Number(node.fontSize?.() || 12) || 12) * 1.15))));
+        }
+      }
+    }
     node.setAttr("workspaceSelectable", true);
     if (typeof node.draggable === "function") node.draggable(true);
     if (typeof node.on === "function") {
+      node.on("transformstart", () => {
+        const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+        if (kind === "priceGroup") {
+          try { node.setAttr("badgeAutoLayout", false); } catch (_err) {}
+          return;
+        }
+        if (isBadgeWorkspaceKind(kind)) captureBadgePriceLayoutState(node);
+      });
+      node.on("dragstart", () => {
+        const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+        if (kind === "priceGroup") {
+          try { node.setAttr("badgeAutoLayout", false); } catch (_err) {}
+          return;
+        }
+        if (isBadgeWorkspaceKind(kind)) captureBadgePriceLayoutState(node);
+      });
+      node.on("dragmove", () => {
+        const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+        if (!isBadgeWorkspaceKind(kind)) return;
+        if (syncPriceGroupToBadgeNode(node, { useStoredLayout: true })) {
+          ws.layer.batchDraw();
+        }
+      });
+      node.on("dragend", () => {
+        const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+        if (!isBadgeWorkspaceKind(kind)) return;
+        if (syncPriceGroupToBadgeNode(node, { useStoredLayout: true })) {
+          ws.layer.batchDraw();
+        }
+      });
       node.on("transformend", () => {
         normalizeScalableNode(node);
+        const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+        if (isBadgeWorkspaceKind(kind)) {
+          void refreshBadgeNodeAfterGeometryChange(node, { syncPrice: true, useStoredLayout: true });
+          return;
+        }
         ws.layer.batchDraw();
       });
     }
@@ -1357,18 +2283,24 @@
       fontSize: nextFontSize,
       fontFamily: "Arial",
       fill: "#e5eefb",
-      width: Math.round(stageW * 0.86),
-      wrap: "word",
-      lineHeight: 0.96,
+      wrap: "none",
+      lineHeight: 1,
       draggable: true
     });
     text.setAttr("workspaceLabel", "Tekst");
+    text.setAttr("workspaceKind", "userText");
     fitTextNodeIntoWorkspace(text, {
-      maxWidth: Math.round(stageW * 0.92),
-      preferredWidth: Math.round(stageW * 0.86),
+      maxWidth: Math.round(stageW * 0.52),
+      preferredWidth: Math.round(stageW * 0.34),
       fontSize: nextFontSize,
       minFontSize: Math.max(12, Math.min(nextFontSize, 18)),
-      forceWidth: true
+      wrap: false
+    });
+    syncWorkspaceTextLayout(text, {
+      wrapMode: "none",
+      tightWidth: true,
+      maxWidth: Math.round(stageW * 0.52),
+      minHeight: Math.max(24, Math.ceil(nextFontSize * 1.15))
     });
     addWorkspaceNode(text);
   }
@@ -1578,6 +2510,7 @@
     group.setAttr("workspaceLabel", isCircle ? "Badge kolo" : "Badge prostokat");
     group.setAttr("workspaceKind", isCircle ? "badgeCircle" : "badgeRect");
     addWorkspaceNode(group);
+    void applySelectedBadgeStyleToWorkspace(String(state.activeBuilderTab || BUILDER_TAB_PRODUCT));
   }
 
   function addPriceGroupNode() {
@@ -1630,6 +2563,7 @@
     group.add(unitText);
     group.setAttr("workspaceLabel", "Cena");
     group.setAttr("workspaceKind", "priceGroup");
+    group.setAttr("badgeAutoLayout", !!getWorkspaceBadgeNode());
     layoutPriceGroup(group, { majorSize: 64, ratios: defaultRatios });
     addWorkspaceNode(group);
   }
@@ -1743,7 +2677,7 @@
     if (!node || typeof node.getClassName !== "function") return null;
     const className = String(node.getClassName() || "");
     const customAttrs = {};
-    ["priceRole", "priceMinorRatio", "priceUnitRatio"].forEach((key) => {
+    ["priceRole", "priceMinorRatio", "priceUnitRatio", "badgeAutoLayout"].forEach((key) => {
       const value = node.getAttr?.(key);
       if (value === undefined || value === null || value === "") return;
       customAttrs[key] = value;
@@ -1910,6 +2844,7 @@
     } else {
       clearWorkspaceScene();
     }
+    await applySelectedBadgeStyleToWorkspace(tab);
     selectWorkspaceNode(null);
     ws.layer.batchDraw();
     return true;
@@ -1970,6 +2905,8 @@
     normalizeWorkspaceForSave();
     const stageW = Math.max(1, Number(ws.stage.width() || 1));
     const stageH = Math.max(1, Number(ws.stage.height() || 1));
+    const selectedPriceBadge = getPriceBadgeStyleMeta(getSelectedPriceBadgeStyleId(BUILDER_TAB_PRODUCT));
+    const selectedPriceBadgeStyleId = String(selectedPriceBadge?.id || "solid");
 
     const imageNode = findWorkspaceNodeByKind("productImage");
     const nameNode = findWorkspaceNodeByKind("nameText");
@@ -2129,6 +3066,9 @@
         priceShape: usesRoundedRectBadge ? "roundedRect" : (usesCircleBadge ? "" : "none"),
         priceTextAlign: "left",
         priceTextOffsetMode: "absolute",
+        priceBadgeStyleId: selectedPriceBadgeStyleId,
+        priceBadgeStylePath: String(selectedPriceBadge?.path || ""),
+        priceBadgeStyleUrl: String(selectedPriceBadge?.url || ""),
         priceBgColor: badgeBgColor || priceBgColor,
         priceBgRadius: usesRoundedRectBadge ? (badgeBgRadius || priceBgRadius) : 0,
         dividerColor,
@@ -2140,6 +3080,9 @@
         hideBarcode,
         hideFlag
       },
+      priceBadgeStyleId: selectedPriceBadgeStyleId,
+      priceBadgeStylePath: String(selectedPriceBadge?.path || ""),
+      priceBadgeStyleUrl: String(selectedPriceBadge?.url || ""),
       __editorSnapshot: editorSnapshot
     };
   }
@@ -2464,6 +3407,7 @@
       ws.layer.add(node);
     }
 
+    await applySelectedBadgeStyleToWorkspace(BUILDER_TAB_PRODUCT);
     selectWorkspaceNode(null);
     ws.layer.batchDraw();
     return true;
@@ -2477,6 +3421,9 @@
     const safe = styleDef && typeof styleDef === "object" ? styleDef : null;
     const cfg = safe?.config && typeof safe.config === "object" ? safe.config : null;
     if (!cfg) return false;
+    const badgeMeta = getStyleConfigPriceBadgeStyleMeta(cfg);
+    ensureBadgeStyleMetaAvailable(badgeMeta);
+    refreshPriceBadgeSelect(BUILDER_TAB_PRODUCT, badgeMeta.id);
     const ws = ensureWorkspaceEditor();
     if (!ws?.stage || !ws?.layer) return false;
     const stageW = Math.max(1, Number(ws.stage.width() || MODULE_BASE_WIDTH));
@@ -2490,6 +3437,7 @@
       const restored = await restoreWorkspaceFromSnapshot(snapshot, loadStamp);
       if (!isWorkspaceLoadStampActive(loadStamp)) return false;
       if (restored) {
+        await applySelectedBadgeStyleToWorkspace(BUILDER_TAB_PRODUCT);
         ws.layer.batchDraw();
         return true;
       }
@@ -2647,6 +3595,7 @@
       }
     }
 
+    await applySelectedBadgeStyleToWorkspace(BUILDER_TAB_PRODUCT);
     ws.layer.batchDraw();
     return true;
   }
@@ -2721,6 +3670,13 @@
       ? cloneJsonSnapshot(priceStyleDef.snapshot)
       : null;
     if (!hasSnapshotNodes(snapshot)) return false;
+    const badgeMeta = {
+      id: String(priceStyleDef?.badgeStyleId || "").trim() || "solid",
+      path: String(priceStyleDef?.badgeStylePath || "").trim(),
+      url: String(priceStyleDef?.badgeStyleUrl || "").trim()
+    };
+    ensureBadgeStyleMetaAvailable(badgeMeta);
+    refreshPriceBadgeSelect(BUILDER_TAB_PRICE, badgeMeta.id);
     setDraftSnapshotForTab(BUILDER_TAB_PRICE, snapshot);
     if (String(state.activeBuilderTab || "") === BUILDER_TAB_PRICE) {
       return await restoreWorkspaceForBuilderTab(BUILDER_TAB_PRICE);
@@ -2733,6 +3689,13 @@
       ? cloneJsonSnapshot(priceStyleDef.snapshot)
       : null;
     if (!hasSnapshotNodes(snapshot)) return false;
+    const badgeMeta = {
+      id: String(priceStyleDef?.badgeStyleId || "").trim() || "solid",
+      path: String(priceStyleDef?.badgeStylePath || "").trim(),
+      url: String(priceStyleDef?.badgeStyleUrl || "").trim()
+    };
+    ensureBadgeStyleMetaAvailable(badgeMeta);
+    refreshPriceBadgeSelect(BUILDER_TAB_PRODUCT, badgeMeta.id);
     return await appendSnapshotNodesToWorkspace(snapshot, {
       replacePriceStyle: true,
       markPriceStyle: true
@@ -3097,10 +4060,12 @@
         setDraftSnapshotForTab(BUILDER_TAB_PRICE, null);
         const priceNameInput = document.getElementById(PRICE_STYLE_NAME_ID);
         if (priceNameInput) priceNameInput.value = "";
+        refreshPriceBadgeSelect(BUILDER_TAB_PRICE, "solid");
       } else {
         activeLoadedStyleId = "";
         refreshSavedStylesSelect("");
         setDraftSnapshotForTab(BUILDER_TAB_PRODUCT, null);
+        refreshPriceBadgeSelect(BUILDER_TAB_PRODUCT, "solid");
       }
       await resetWorkspaceToBlankState({
         clearName: String(state.activeBuilderTab || "") !== BUILDER_TAB_PRICE,
@@ -3190,6 +4155,9 @@
         id: styleId,
         label: rawName,
         updatedAt,
+        badgeStyleId: getSelectedPriceBadgeStyleId(BUILDER_TAB_PRICE),
+        badgeStylePath: String(getPriceBadgeStyleMeta(getSelectedPriceBadgeStyleId(BUILDER_TAB_PRICE))?.path || ""),
+        badgeStyleUrl: String(getPriceBadgeStyleMeta(getSelectedPriceBadgeStyleId(BUILDER_TAB_PRICE))?.url || ""),
         snapshot
       };
       setSaveStatus(`Zapisywanie stylu ceny: ${rawName}...`, "default");
@@ -3688,6 +4656,117 @@
         min-height: 12px;
       }
 
+      #${MODAL_ID} .new-style-badge-library {
+        position: fixed;
+        inset: 0;
+        z-index: 1000004;
+        background: rgba(2, 6, 23, 0.64);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+
+      #${MODAL_ID} .new-style-badge-library[hidden] {
+        display: none !important;
+      }
+
+      #${MODAL_ID} .new-style-badge-library__panel {
+        width: min(1200px, calc(100vw - 48px));
+        max-height: min(76vh, 760px);
+        overflow: auto;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 18px;
+        background: rgba(6, 10, 18, 0.96);
+        box-shadow: 0 30px 80px rgba(0, 0, 0, 0.42);
+        padding: 14px;
+      }
+
+      #${MODAL_ID} .new-style-badge-library__toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      #${MODAL_ID} .new-style-badge-library__title {
+        font-size: 13px;
+        font-weight: 800;
+        color: #f8fbff;
+      }
+
+      #${MODAL_ID} .new-style-badge-library__empty {
+        padding: 10px 8px;
+        color: #8ea4c2;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      #${MODAL_ID} .new-style-badge-library__grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+        gap: 10px;
+      }
+
+      #${MODAL_ID} .new-style-badge-card {
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 14px;
+        background: rgba(8, 15, 30, 0.72);
+        color: #dbe7f6;
+        cursor: pointer;
+        padding: 8px;
+        display: grid;
+        gap: 8px;
+        text-align: left;
+      }
+
+      #${MODAL_ID} .new-style-badge-card:hover {
+        border-color: rgba(103, 232, 249, 0.5);
+        transform: translateY(-1px);
+      }
+
+      #${MODAL_ID} .new-style-badge-card.is-active {
+        border-color: rgba(34, 211, 238, 0.72);
+        box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.2);
+        background: rgba(8, 145, 178, 0.12);
+      }
+
+      #${MODAL_ID} .new-style-badge-card__preview {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 82px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.96);
+        padding: 8px;
+        overflow: hidden;
+      }
+
+      #${MODAL_ID} .new-style-badge-card__img {
+        width: 100%;
+        height: 72px;
+        object-fit: contain;
+        display: block;
+      }
+
+      #${MODAL_ID} .new-style-badge-card__solid {
+        width: 64px;
+        height: 64px;
+        border-radius: 999px;
+        background: #d71920;
+        box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.28);
+      }
+
+      #${MODAL_ID} .new-style-badge-card__label {
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1.35;
+        color: #dbe7f6;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
       #${MODAL_ID} .new-style-canvas {
         position: relative;
         width: auto;
@@ -4001,6 +5080,11 @@
                   ${getSavedStylesOptionsHtml("")}
                 </select>
                 <button type="button" class="new-style-tool-btn" data-tool="load-style">Wczytaj styl</button>
+                <span class="new-style-text-tools-label">Badge ceny:</span>
+                <select id="${PRODUCT_BADGE_SELECT_ID}" class="new-style-save-input">
+                  ${getPriceBadgeOptionsHtml("solid")}
+                </select>
+                <button type="button" class="new-style-tool-btn" id="${PRODUCT_BADGE_LIBRARY_TOGGLE_ID}">Wybierz badge</button>
                 <select id="${PRICE_STYLE_APPLY_SELECT_ID}" class="new-style-save-input">
                   ${getSavedPriceStylesOptionsHtml("")}
                 </select>
@@ -4014,6 +5098,11 @@
                   ${getSavedPriceStylesOptionsHtml("")}
                 </select>
                 <button type="button" class="new-style-tool-btn" data-tool="load-price-style">Wczytaj styl ceny</button>
+                <span class="new-style-text-tools-label">Badge ceny:</span>
+                <select id="${PRICE_BADGE_STYLE_SELECT_ID}" class="new-style-save-input">
+                  ${getPriceBadgeOptionsHtml("solid")}
+                </select>
+                <button type="button" class="new-style-tool-btn" id="${PRICE_BADGE_LIBRARY_TOGGLE_ID}">Wybierz badge</button>
                 <button type="button" class="new-style-tool-btn" data-tool="clear-style">Wyczysc</button>
                 <input id="${PRICE_STYLE_NAME_ID}" class="new-style-save-input" type="text" placeholder="Nazwa stylu ceny">
                 <button type="button" class="new-style-tool-btn" data-tool="save-price-style">Zapisz styl ceny</button>
@@ -4033,6 +5122,8 @@
             </div>
           </section>
         </div>
+        <div id="${PRODUCT_BADGE_LIBRARY_ID}" class="new-style-badge-library" hidden></div>
+        <div id="${PRICE_BADGE_LIBRARY_ID}" class="new-style-badge-library" hidden></div>
       </div>
     `;
 
@@ -4083,6 +5174,9 @@
     document.getElementById(TEXT_SIZE_ID)?.addEventListener("change", () => {
       applyTextStyleToSelected();
     });
+    document.getElementById(CURRENCY_SELECT_ID)?.addEventListener("change", () => {
+      applySelectedCurrencyToWorkspace();
+    });
     document.getElementById(STYLE_NAME_ID)?.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
@@ -4100,6 +5194,41 @@
     document.getElementById(PRICE_STYLE_LOAD_SELECT_ID)?.addEventListener("change", (event) => {
       const value = String(event?.target?.value || "").trim();
       if (!value) activeLoadedPriceStyleId = "";
+    });
+    [BUILDER_TAB_PRODUCT, BUILDER_TAB_PRICE].forEach((tab) => {
+      const select = document.getElementById(getBadgeSelectIdForTab(tab));
+      const toggle = document.getElementById(getBadgeLibraryToggleIdForTab(tab));
+      const container = document.getElementById(getBadgeLibraryIdForTab(tab));
+      select?.addEventListener("change", () => {
+        ensureBadgeSelectionVisibleInWorkspace(tab);
+        syncBadgeLibrarySelection(tab);
+        void applySelectedBadgeStyleToWorkspace(tab);
+      });
+      toggle?.addEventListener("click", async () => {
+        if (!container) return;
+        const nextOpen = !!container.hidden;
+        container.hidden = !nextOpen;
+        toggle.classList.toggle("is-active", nextOpen);
+        if (nextOpen) {
+          await renderBadgeLibrary(tab, { forceReload: true });
+        }
+      });
+      container?.addEventListener("click", (event) => {
+        if (event.target === container || event.target?.closest?.("[data-badge-library-close]")) {
+          container.hidden = true;
+          toggle?.classList.remove("is-active");
+          return;
+        }
+        const card = event.target?.closest?.("[data-badge-style-id]");
+        if (!card) return;
+        const nextId = String(card.getAttribute("data-badge-style-id") || "").trim() || "solid";
+        refreshPriceBadgeSelect(tab, nextId);
+        ensureBadgeSelectionVisibleInWorkspace(tab);
+        syncBadgeLibrarySelection(tab);
+        void applySelectedBadgeStyleToWorkspace(tab);
+        container.hidden = true;
+        toggle?.classList.remove("is-active");
+      });
     });
     document.addEventListener("keydown", onDocumentKeydown);
 
@@ -4285,10 +5414,23 @@
     state.activeBuilderTab = BUILDER_TAB_PRODUCT;
     state.productWorkspaceDraft = null;
     state.priceWorkspaceDraft = null;
+    state.badgeLibrary = {
+      loadingPromise: null,
+      items: [],
+      error: ""
+    };
     await syncCustomStylesFromRemoteStorage();
     await syncCustomPriceStylesFromRemoteStorage();
     refreshSavedStylesSelect();
     refreshSavedPriceStylesSelect();
+    refreshPriceBadgeSelect(BUILDER_TAB_PRODUCT, "solid");
+    refreshPriceBadgeSelect(BUILDER_TAB_PRICE, "solid");
+    [BUILDER_TAB_PRODUCT, BUILDER_TAB_PRICE].forEach((tab) => {
+      const container = document.getElementById(getBadgeLibraryIdForTab(tab));
+      const toggle = document.getElementById(getBadgeLibraryToggleIdForTab(tab));
+      if (container) container.hidden = true;
+      if (toggle) toggle.classList.remove("is-active");
+    });
     const priceStyleNameInput = document.getElementById(PRICE_STYLE_NAME_ID);
     if (priceStyleNameInput) priceStyleNameInput.value = "";
     updateBuilderTabUi();

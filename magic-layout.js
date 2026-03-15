@@ -7,6 +7,7 @@
   const CUSTOM_STYLES_REMOTE_PATH = "styles/styles.json";
   const LAST_SELECTED_MODULE_STYLE_STORAGE_KEY = "styl_wlasny_last_module_layout_style_v1";
   const CUSTOM_STYLES_BUCKET = "gs://pdf-creator-f7a8b.firebasestorage.app";
+  const STORAGE_MEDIA_BASE_URL = "https://firebasestorage.googleapis.com/v0/b/pdf-creator-f7a8b.firebasestorage.app/o/";
   const LOCKED_SYSTEM_STYLE_IDS = new Set(["styl-numer-1", "styl-numer-2", "styl-numer-3"]);
 
   let customStylesSyncPromise = null;
@@ -903,6 +904,45 @@
     };
   }
 
+  function normalizeBadgeStyleId(value) {
+    const source = String(value || "").trim();
+    if (!source) return "solid";
+    const safe = source
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return safe ? `firebase-badge-${safe}` : "solid";
+  }
+
+  function buildStorageMediaUrl(objectPath) {
+    const safePath = String(objectPath || "").trim();
+    if (!safePath) return "";
+    return `${STORAGE_MEDIA_BASE_URL}${encodeURIComponent(safePath)}?alt=media`;
+  }
+
+  function getDesiredProductStylePayload(styleId) {
+    const styleDef = getModuleStyleDefinition(styleId);
+    const cfg = (styleDef?.config && typeof styleDef.config === "object") ? styleDef.config : {};
+    const textCfg = (cfg?.text && typeof cfg.text === "object") ? cfg.text : {};
+    const hidePriceBadge = !!textCfg.hidePriceBadge;
+    const noPriceCircle = !!textCfg.noPriceCircle;
+    const rawBadgeStyleId = String(cfg.priceBadgeStyleId || textCfg.priceBadgeStyleId || "").trim();
+    const badgePath = String(cfg.priceBadgeStylePath || textCfg.priceBadgeStylePath || "").trim();
+    const badgeUrl = String(cfg.priceBadgeStyleUrl || textCfg.priceBadgeStyleUrl || "").trim()
+      || buildStorageMediaUrl(badgePath);
+    const resolvedBadgeStyleId = rawBadgeStyleId || ((badgePath || badgeUrl) ? normalizeBadgeStyleId(badgePath || badgeUrl) : "solid");
+    const shouldClearBadgeImage = hidePriceBadge || noPriceCircle || resolvedBadgeStyleId === "solid";
+    return {
+      styleDef,
+      priceTextColor: String(textCfg.priceColor || "").trim() || (noPriceCircle ? "#d71920" : "#ffffff"),
+      priceBgColor: String(textCfg.priceBgColor || "").trim(),
+      priceBgStyleId: shouldClearBadgeImage ? "solid" : resolvedBadgeStyleId,
+      priceBgImageUrl: shouldClearBadgeImage ? "" : badgeUrl
+    };
+  }
+
   function getCurrentPageStyleIds(page) {
     if (!Array.isArray(page?.products)) return [];
     return Array.from(new Set(
@@ -956,38 +996,52 @@
     return sourceStyleId !== String(targetStyleId || "").trim();
   }
 
+  function shouldRefreshProductStylePayload(product, targetStyleId) {
+    if (!product || typeof product !== "object") return false;
+    const desired = getDesiredProductStylePayload(targetStyleId);
+    const currentBadgeStyleId = String(product.PRICE_BG_STYLE_ID || "solid").trim() || "solid";
+    const currentBadgeUrl = String(product.PRICE_BG_IMAGE_URL || "").trim();
+    const currentTextColor = String(product.PRICE_TEXT_COLOR || "").trim();
+    const currentBgColor = String(product.PRICE_BG_COLOR || "").trim();
+    if (currentBadgeStyleId !== desired.priceBgStyleId) return true;
+    if (currentBadgeUrl !== desired.priceBgImageUrl) return true;
+    if (currentTextColor !== desired.priceTextColor) return true;
+    if (desired.priceBgColor && currentBgColor !== desired.priceBgColor) return true;
+    return false;
+  }
+
   function applyStyleDefaultsToProduct(product, styleId, options = {}) {
     if (!product || typeof product !== "object") return product;
     const currentStyleId = String(product.MODULE_LAYOUT_STYLE_ID || "default").trim() || "default";
     const forceSnapshotRefresh = !!options.forceSnapshotRefresh;
-    const styleDef = getModuleStyleDefinition(styleId);
-    const textCfg = (styleDef.config?.text && typeof styleDef.config.text === "object") ? styleDef.config.text : {};
+    const desired = getDesiredProductStylePayload(styleId);
+    const textCfg = (desired.styleDef.config?.text && typeof desired.styleDef.config.text === "object") ? desired.styleDef.config.text : {};
     const noPriceCircle = !!textCfg.noPriceCircle;
-    const priceColor = String(textCfg.priceColor || "").trim() || (noPriceCircle ? "#d71920" : "#ffffff");
-    const priceBgColor = String(textCfg.priceBgColor || "").trim();
-    const next = { ...product, MODULE_LAYOUT_STYLE_ID: styleDef.id };
+    const next = { ...product, MODULE_LAYOUT_STYLE_ID: desired.styleDef.id };
 
-    next.PRICE_TEXT_COLOR = priceColor;
-    if (priceBgColor) {
-      next.PRICE_BG_COLOR = priceBgColor;
+    next.PRICE_TEXT_COLOR = desired.priceTextColor;
+    next.PRICE_BG_STYLE_ID = desired.priceBgStyleId;
+    next.PRICE_BG_IMAGE_URL = desired.priceBgImageUrl;
+    if (desired.priceBgColor) {
+      next.PRICE_BG_COLOR = desired.priceBgColor;
     }
     if (noPriceCircle) {
       next.PRICE_BG_STYLE_ID = "solid";
       next.PRICE_BG_IMAGE_URL = "";
     }
-    if (currentStyleId !== styleDef.id && shouldDropInlineSnapshotForStyleChange(product, styleDef.id)) {
+    if (currentStyleId !== desired.styleDef.id && shouldDropInlineSnapshotForStyleChange(product, desired.styleDef.id)) {
       delete next.MODULE_LAYOUT_EDITOR_SNAPSHOT;
       delete next.MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID;
       delete next.MODULE_LAYOUT_EDITOR_SOURCE_STYLE_ID;
     }
-    if (next.MODULE_LAYOUT_EDITOR_SNAPSHOT && styleHasEditorSnapshot(styleDef.id)) {
+    if (next.MODULE_LAYOUT_EDITOR_SNAPSHOT && styleHasEditorSnapshot(desired.styleDef.id)) {
       const currentSourceStyleId = getInlineModuleLayoutSnapshotSourceStyleId(product);
-      if (currentStyleId !== styleDef.id) {
-        next.MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID = currentSourceStyleId && currentSourceStyleId !== styleDef.id
+      if (currentStyleId !== desired.styleDef.id) {
+        next.MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID = currentSourceStyleId && currentSourceStyleId !== desired.styleDef.id
           ? currentSourceStyleId
           : currentStyleId;
       } else if (forceSnapshotRefresh) {
-        next.MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID = currentSourceStyleId && currentSourceStyleId !== styleDef.id
+        next.MODULE_LAYOUT_EDITOR_SNAPSHOT_SOURCE_STYLE_ID = currentSourceStyleId && currentSourceStyleId !== desired.styleDef.id
           ? currentSourceStyleId
           : "__magic-layout-stale-inline__";
       }
@@ -1104,7 +1158,8 @@
         styleId = pickRandomItem(pool.length ? pool : next.mixedStyleIds) || currentStyle;
       }
       const needsSnapshotRefresh = shouldRefreshProductInlineSnapshot(product, styleId);
-      if (!styleId || (styleId === currentStyle && !needsSnapshotRefresh)) return product;
+      const needsStylePayloadRefresh = shouldRefreshProductStylePayload(product, styleId);
+      if (!styleId || (styleId === currentStyle && !needsSnapshotRefresh && !needsStylePayloadRefresh)) return product;
       changed = true;
       return applyStyleDefaultsToProduct(product, styleId, {
         forceSnapshotRefresh: needsSnapshotRefresh
