@@ -48,6 +48,30 @@ function scheduleVisiblePageEditSync() {
   setTimeout(run, 0);
 }
 
+function dismissPageEditBlockingOverlays() {
+  const closeSafely = (fn) => {
+    try {
+      if (typeof fn === 'function') fn();
+    } catch (_e) {}
+  };
+
+  closeSafely(window.NewStyleUI?.close);
+  closeSafely(window.CustomStyleCreatorUI?.close);
+  closeSafely(window.CustomStyleDraftTrayUI?.close);
+
+  const newStyleModal = document.getElementById('newStyleModal');
+  if (newStyleModal) newStyleModal.style.display = 'none';
+
+  const customStyleModal = document.getElementById('customStyleModal');
+  if (customStyleModal) customStyleModal.style.display = 'none';
+
+  const magicLayoutBackdrop = document.getElementById('magicLayoutBackdrop');
+  if (magicLayoutBackdrop) {
+    magicLayoutBackdrop.classList.remove('is-open');
+    magicLayoutBackdrop._magicLayoutContext = null;
+  }
+}
+
 if (!window.__pageEditActivePageSyncBound) {
   window.__pageEditActivePageSyncBound = true;
   window.addEventListener('canvasModified', () => {
@@ -1069,6 +1093,7 @@ function applyPageEditStylesToPage(page, styles, selectedCurrency, options = {})
 
 window.openPageEdit = function(page) {
   if (!page || page.isCover) return false;
+  dismissPageEditBlockingOverlays();
   try {
     window.closeBackgroundSidePanel?.({ restorePageEditor: false, resetToolbarState: true });
   } catch (_e) {}

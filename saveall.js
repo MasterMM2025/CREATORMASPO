@@ -31,6 +31,7 @@ function showAppToast(message, type = "success") {
             right: 24px;
             bottom: 24px;
             z-index: 10000000;
+            pointer-events: none;
             padding: 14px 18px;
             border-radius: 12px;
             font-family: Arial;
@@ -42,6 +43,7 @@ function showAppToast(message, type = "success") {
         `;
         document.body.appendChild(toast);
     }
+    toast.style.pointerEvents = "none";
     let bottomOffset = 24;
     const footerBar = document.getElementById("appFooterBar");
     if (footerBar && typeof footerBar.getBoundingClientRect === "function") {
@@ -2496,6 +2498,34 @@ function collectSavedUserProductGroupsForPage(page) {
     }).filter(Boolean));
 }
 
+function isMeaningfulLiveNodeForProjectSave(node) {
+    if (!node || !window.Konva) return false;
+    const nodeName = (typeof node.name === "function") ? node.name() : "";
+    const isHelperNode = !!(node.getAttr && (
+        nodeName === "selectionOutline" ||
+        nodeName === "selectionRect" ||
+        node.getAttr("isBgBlur") ||
+        node.getAttr("isFxHelper") ||
+        node.getAttr("isPriceHitArea")
+    ));
+    if (isHelperNode) return false;
+    if (node instanceof Konva.Label) return false;
+    return true;
+}
+
+function canReuseDeferredHydrationPayloadForSave(page) {
+    const deferredPayload = page && page.__deferredHydrationPayload;
+    if (!(deferredPayload && typeof deferredPayload === "object" && Array.isArray(deferredPayload.objects))) {
+        return false;
+    }
+    const layer = page && page.layer;
+    if (!layer || typeof layer.getChildren !== "function") return true;
+    const children = typeof layer.getChildren().toArray === "function"
+        ? layer.getChildren().toArray()
+        : Array.from(layer.getChildren() || []);
+    return !children.some((node) => isMeaningfulLiveNodeForProjectSave(node));
+}
+
 function collectProjectData() {
 
     const project = {
@@ -2515,14 +2545,20 @@ function collectProjectData() {
 
     window.pages.forEach(page => {
         const deferredPayload = page && page.__deferredHydrationPayload;
-        if (deferredPayload && typeof deferredPayload === "object" && Array.isArray(deferredPayload.objects)) {
+        if (canReuseDeferredHydrationPayloadForSave(page)) {
             let deferredObjects = deferredPayload.objects;
             const deferredUserProductGroups = normalizeSavedUserProductGroups(
-                deferredPayload.userProductGroups || deferredPayload.groupedProductKeys
+                page?.__savedUserProductGroups ||
+                deferredPayload.userProductGroups ||
+                deferredPayload.groupedProductKeys
             );
-            const deferredProducts = cloneSavedPageProducts(deferredPayload.products || page.products);
+            const deferredProducts = cloneSavedPageProducts(
+                Array.isArray(page?.products) ? page.products : deferredPayload.products
+            );
             const deferredSettings = cloneProjectSerializable(
-                deferredPayload.settings || page.settings || {},
+                (page && typeof page.settings === "object" ? page.settings : null) ||
+                deferredPayload.settings ||
+                {},
                 {}
             );
             try {
