@@ -20,9 +20,20 @@ function getActiveEditablePage() {
   );
 }
 
+function shouldSuspendAutoPageEditSync() {
+  try {
+    if (window.__customPlacementActive) return true;
+    if (window.CustomStyleDraftTrayUI && typeof window.CustomStyleDraftTrayUI.isOpen === 'function') {
+      return !!window.CustomStyleDraftTrayUI.isOpen();
+    }
+  } catch (_e) {}
+  return false;
+}
+
 function syncVisiblePageEditToActivePage() {
   if (pageEditSyncInProgress) return false;
   if (!(window.isPageEditPanelVisible && window.isPageEditPanelVisible())) return false;
+  if (shouldSuspendAutoPageEditSync()) return false;
   const nextPage = getActiveEditablePage();
   if (!nextPage || nextPage === currentPage) return false;
   pageEditSyncInProgress = true;
