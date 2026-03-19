@@ -1921,7 +1921,11 @@ function activateNewImageCropSelection(page, img, options = {}) {
             try { page.transformer.nodes([img]); } catch (_e) {}
         }
     }
-    try { page.transformer?.forceUpdate?.(); } catch (_e) {}
+    if (typeof window.applyTransformerProfileForSelection === "function") {
+        try { window.applyTransformerProfileForSelection(page); } catch (_e) {}
+    } else {
+        try { page.transformer?.forceUpdate?.(); } catch (_e) {}
+    }
 
     try {
         const outlines = (page.layer && typeof page.layer.find === "function")
@@ -5424,6 +5428,10 @@ stage.container().addEventListener('drop', async (e) => {
 
   const file = e.dataTransfer.files[0];
   if (!file || !file.type.startsWith("image/")) return;
+
+  if (typeof window.ensurePageHydrated === "function") {
+      try { await window.ensurePageHydrated(page, { reason: "drop-image" }); } catch (_e) {}
+  }
 
   let variants = null;
   try {
@@ -12317,10 +12325,13 @@ function enableAddTextModeFallback() {
     pages.forEach(page => {
         const c = page.stage.container();
         c.style.cursor = 'text';
-        const handler = (e) => {
+        const handler = async (e) => {
             if (!addTextFallback || e.evt.button !== 0) return;
             const pos = page.stage.getPointerPosition();
             if (pos) {
+                if (typeof window.ensurePageHydrated === "function") {
+                    try { await window.ensurePageHydrated(page, { reason: "add-text" }); } catch (_e) {}
+                }
                 const text = new Konva.Text({
                     text: "Kliknij, aby edytować",
                     x: pos.x,
@@ -12371,6 +12382,9 @@ function enableAddImageModeFallback() {
             input.onchange = async (ev) => {
                 const file = ev.target.files && ev.target.files[0];
                 if (!file) return;
+                if (typeof window.ensurePageHydrated === "function") {
+                    try { await window.ensurePageHydrated(page, { reason: "add-image" }); } catch (_e) {}
+                }
                 let variants = null;
                 try {
                     if (typeof window.createImageVariantsFromFile === "function") {
@@ -12437,6 +12451,7 @@ function enableAddImageModeFallback() {
                     const armSelection = () => {
                         try { page.selectedNodes = [img]; } catch (_e) {}
                         try { page.transformer?.nodes?.([img]); } catch (_e) {}
+                        try { window.applyTransformerProfileForSelection?.(page); } catch (_e) {}
                         try { page.transformer?.forceUpdate?.(); } catch (_e) {}
                         try { page.layer?.batchDraw?.(); } catch (_e) {}
                         try { page.transformerLayer?.batchDraw?.(); } catch (_e) {}

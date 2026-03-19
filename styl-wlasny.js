@@ -2798,7 +2798,33 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   }
 
   function getSnapshotNodeKind(def) {
-    return String(getSnapshotNodeAttrs(def).workspaceKind || "").trim();
+    const attrs = getSnapshotNodeAttrs(def);
+    const customAttrs = getSnapshotNodeCustomAttrs(def);
+    const explicitKind = String(attrs.workspaceKind || customAttrs.workspaceKind || "").trim();
+    if (explicitKind) return explicitKind;
+
+    const hasLegacyFlag = (flagName) => !!(attrs?.[flagName] || customAttrs?.[flagName]);
+    if (hasLegacyFlag("isName")) return "nameText";
+    if (hasLegacyFlag("isIndex")) return "indexText";
+    if (hasLegacyFlag("isCustomPackageInfo")) return "packageText";
+    if (hasLegacyFlag("isPriceGroup")) return "priceGroup";
+    if (hasLegacyFlag("isProductImage")) return "productImage";
+    if (hasLegacyFlag("isBarcode")) return "ean";
+    if (hasLegacyFlag("isCountryBadge")) return "flag";
+    if (hasLegacyFlag("isLayoutDivider")) return "divider";
+
+    const normalizedLabel = normalizeText(String(attrs.workspaceLabel || customAttrs.workspaceLabel || "").trim());
+    if (normalizedLabel.includes("nazwa")) return "nameText";
+    if (normalizedLabel.includes("indeks")) return "indexText";
+    if (normalizedLabel.includes("opak")) return "packageText";
+    if (normalizedLabel.includes("waluta")) return "currencySymbol";
+    if (normalizedLabel.includes("cena")) return "priceGroup";
+    if (normalizedLabel.includes("flaga")) return "flag";
+    if (normalizedLabel.includes("divider") || normalizedLabel.includes("linia")) return "divider";
+
+    const textSeed = getSnapshotTextSeed(def);
+    if (looksLikeSnapshotPriceUnitText(textSeed)) return "currencySymbol";
+    return "";
   }
 
   function getSnapshotTextSeed(def) {
@@ -6665,7 +6691,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         if (!node || !node.getAttr) return false;
         if (!window.Konva || !(node instanceof window.Konva.Text)) return false;
         if (isIndexLikeNode(node)) return true;
-        return !!node.getAttr("isName");
+        if (node.getAttr("isName")) return true;
+        return !!node.getAttr("isCustomPackageInfo");
       };
 
       const bindNoopEditFontGuardNode = (node) => {
@@ -7404,7 +7431,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         page.layer.find((n) =>
           n && n.getAttr &&
           n.getAttr("slotIndex") === targetSlot &&
-          (n.getAttr("isName") || isIndexLikeNode(n))
+          (n.getAttr("isName") || isIndexLikeNode(n) || n.getAttr("isCustomPackageInfo"))
         ).forEach(bindNoopEditFontGuardNode);
 
         const grouped = page.layer.find((n) =>
@@ -7416,7 +7443,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         );
         grouped.forEach((g) => {
           if (!g || !g.find) return;
-          g.find((n) => n && n.getAttr && (n.getAttr("isName") || isIndexLikeNode(n))).forEach(bindNoopEditFontGuardNode);
+          g.find((n) => n && n.getAttr && (n.getAttr("isName") || isIndexLikeNode(n) || n.getAttr("isCustomPackageInfo"))).forEach(bindNoopEditFontGuardNode);
         });
       };
 
@@ -7425,7 +7452,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         page.layer.find((n) =>
           n && n.getAttr &&
           n.getAttr("slotIndex") === targetSlot &&
-          (n.getAttr("isName") || isIndexLikeNode(n))
+          (n.getAttr("isName") || isIndexLikeNode(n) || n.getAttr("isCustomPackageInfo"))
         ).forEach(bindSafeInlineTextEditNode);
 
         const grouped = page.layer.find((n) =>
@@ -7437,7 +7464,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         );
         grouped.forEach((g) => {
           if (!g || !g.find) return;
-          g.find((n) => n && n.getAttr && (n.getAttr("isName") || isIndexLikeNode(n))).forEach(bindSafeInlineTextEditNode);
+          g.find((n) => n && n.getAttr && (n.getAttr("isName") || isIndexLikeNode(n) || n.getAttr("isCustomPackageInfo"))).forEach(bindSafeInlineTextEditNode);
         });
       };
 

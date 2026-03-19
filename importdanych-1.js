@@ -22,6 +22,50 @@ const ELEMENTS_FOLDER_ALIASES = new Map([
 const ELEMENTS_THUMB_MAX_EDGE = 100;
 const ELEMENTS_EDITOR_MAX_EDGE = 560;
 const ELEMENTS_PREVIEW_VARIANT_TIMEOUT_MS = 420;
+const ELEMENTS_IMPORTED_FILE_PREFIX = "__upload__-";
+function setElementsActiveTab(folderPath) {
+  const targetFolder = String(folderPath || "").trim();
+  document.querySelectorAll('.tabBtn').forEach((btn) => {
+    btn.classList.toggle('active', String(btn.dataset.folder || "").trim() === targetFolder);
+  });
+}
+function invalidateElementsFolderCache(folderPath = "") {
+  const normalized = String(folderPath || "").trim();
+  if (!normalized) {
+    ELEMENTS_FOLDER_ITEMS_CACHE.clear();
+    ELEMENTS_URL_CACHE.clear();
+    return;
+  }
+  ELEMENTS_FOLDER_ITEMS_CACHE.delete(normalized);
+  Array.from(ELEMENTS_URL_CACHE.keys()).forEach((key) => {
+    const fullPath = String(key || "").trim();
+    if (fullPath.startsWith(`${normalized}/`)) {
+      ELEMENTS_URL_CACHE.delete(key);
+    }
+  });
+}
+function isImportedMaspoElementName(name) {
+  const normalized = String(name || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.startsWith(ELEMENTS_IMPORTED_FILE_PREFIX) ||
+    /^(\d{4})(\d{2})(\d{2})-\d{9,}/.test(normalized)
+  );
+}
+function sortElementsItemsForFolder(items, folderPath) {
+  const normalizedFolder = String(folderPath || "").trim().toLowerCase();
+  const list = Array.isArray(items) ? items.slice() : [];
+  if (normalizedFolder !== "szablony maspo") return list;
+  return list.sort((left, right) => {
+    const leftImported = isImportedMaspoElementName(left?.name) ? 1 : 0;
+    const rightImported = isImportedMaspoElementName(right?.name) ? 1 : 0;
+    if (leftImported !== rightImported) return rightImported - leftImported;
+    return String(right?.name || "").localeCompare(String(left?.name || ""), undefined, {
+      numeric: true,
+      sensitivity: "base"
+    });
+  });
+}
 function applyFontPreviewToSelect(selectEl, fallback = "Arial") {
   if (!selectEl) return;
   const setFace = (el, family) => {
@@ -60,7 +104,7 @@ let elementsPendingRows = [];
 let elementsUrlWorkersActive = 0;
 let elementsSearchDebounce = null;
 let elementsScrollRaf = 0;
-const ELEMENTS_URL_CONCURRENCY = 4;
+const ELEMENTS_URL_CONCURRENCY = 8;
 
 // === AUTO-CROP — usuwa przezroczyste marginesy z PNG ===
 function autoCropKonvaImage(kImg) {
@@ -1125,6 +1169,14 @@ function openElementsPanel() {
   toggleBtn.style.display = "flex";
   toggleBtn.innerHTML = "⟨";
 }
+function hideElementsPanel() {
+  panelVisible = false;
+  applyElementsPanelLayout();
+  toggleBtn.innerHTML = '⟩';
+  setTimeout(() => {
+    if (!panelVisible) toggleBtn.style.display = 'none';
+  }, 300);
+}
 // === 🔥 Funkcja otwierająca panel elementów z czyszczeniem zawartości ===
 function showElementsPanel() {
     const panel = document.getElementById('elementsPanel');
@@ -1147,6 +1199,25 @@ toggleBtn.innerHTML = '⟩';
 applyElementsPanelLayout();
 window.addEventListener('resize', applyElementsPanelLayout);
 
+window.invalidateElementsFolderCache = invalidateElementsFolderCache;
+window.refreshElementsFolderLibrary = async function(folderPath = "") {
+  const normalized = String(folderPath || currentFolder || "").trim();
+  if (!normalized) return;
+  currentFolder = normalized;
+  setElementsActiveTab(currentFolder);
+  await loadFirebaseFolder(currentFolder);
+};
+window.openElementsFolderLibrary = async function(folderPath = "") {
+  const normalized = String(folderPath || currentFolder || "").trim();
+  if (!normalized) return;
+  currentFolder = normalized;
+  setElementsActiveTab(currentFolder);
+  openElementsPanel();
+  await loadFirebaseFolder(currentFolder);
+};
+window.hideElementsLibraryPanel = hideElementsPanel;
+window.placeElementsLibraryImage = enablePageClickForImage;
+
 toggleBtn.addEventListener('click', () => {
   // 🔹 Przełącz widoczność panelu
   panelVisible = !panelVisible;
@@ -1157,13 +1228,7 @@ toggleBtn.addEventListener('click', () => {
     toggleBtn.innerHTML = '⟨';
   } else {
     // === SCHOWAJ PANEL ===
-    applyElementsPanelLayout();
-    toggleBtn.innerHTML = '⟩';
-    
-    // 🔥 Po krótkiej animacji (0.3s) ukryj przycisk całkowicie
-    setTimeout(() => {
-      toggleBtn.style.display = 'none';
-    }, 300);
+    hideElementsPanel();
   }
 });
 
@@ -1265,8 +1330,10 @@ async function loadFirebaseFolder(folderPath) {
   if (!items) {
     const folderRef = storageApi.ref(storage, folderPath);
     const result = await storageApi.listAll(folderRef);
-    items = Array.isArray(result?.items) ? result.items : [];
+    items = sortElementsItemsForFolder(Array.isArray(result?.items) ? result.items : [], folderPath);
     ELEMENTS_FOLDER_ITEMS_CACHE.set(folderPath, items);
+  } else {
+    items = sortElementsItemsForFolder(items, folderPath);
   }
 
   if (mySession !== loadSessionId) return;
