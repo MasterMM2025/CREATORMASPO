@@ -1276,6 +1276,7 @@
     const fallbackValue = getPreferredMagicLayoutStyleMode(page);
     aiSelect.value = allowedValues.has(safeValue) ? safeValue : (allowedValues.has(fallbackValue) ? fallbackValue : "style:default");
     syncMagicLayoutCustomSelect(aiSelect);
+    if (safeValue.startsWith("style:")) rememberFixedStyleMode(safeValue);
   }
 
   function syncMainStyleModeFromAi() {
@@ -1820,6 +1821,25 @@
       applyAiMagicLayout(backdrop._magicLayoutContext);
     };
     backdrop.classList.add("is-open");
+  }
+
+  function buildMagicLayoutContext(page) {
+    if (!page || !page.layer || !page.stage) {
+      return { error: "Brak aktywnej strony do ulozenia." };
+    }
+    const modules = buildModulesFromPage(page);
+    if (!modules.length) {
+      return { error: "Brak produktow do automatycznego ulozenia na tej stronie." };
+    }
+    return {
+      page,
+      modules,
+      totalProducts: modules.length,
+      pageWidth: Number(page.stage.width?.() || 0),
+      pageHeight: Number(page.stage.height?.() || 0),
+      pageLabel: getPageLabel(page),
+      selectionLabel: resolveSelectionLabel(page)
+    };
   }
 
   function readRows(productCount) {
@@ -3587,25 +3607,28 @@
     return pickWeightedRandomPreset(pool);
   }
 
-  async function applyAiMagicLayout(context) {
+  async function runAiMagicLayout(context, options = {}) {
     if (!context || !context.page) return;
     const bestPreset = findAiPreset(context);
     if (!bestPreset) {
-      showError("AI nie znalazlo jeszcze dobrego ukladu dla tej strony. Sprobuj losowego ukladu albo zmniejsz odstepy.");
-      return;
+      return { error: "AI nie znalazlo jeszcze dobrego ukladu dla tej strony. Sprobuj losowego ukladu albo zmniejsz odstepy." };
     }
-    const requestedStyleMode = getSelectedStyleMode();
-    const options = {
+    const requestedStyleMode = String(options.styleMode || getSelectedStyleMode() || "keep").trim() || "keep";
+    const layoutOptions = {
       ...bestPreset.options,
       styleMode: requestedStyleMode
     };
-    writeRowsToInputs(bestPreset.rows);
-    writeOptionsToInputs(options);
-    await applyModuleStylesToPage(context, options.styleMode || "keep");
-    const result = layoutModules(context, bestPreset.rows, options);
+    if (options.writeUi !== false) {
+      writeRowsToInputs(bestPreset.rows);
+      writeOptionsToInputs(layoutOptions);
+    }
+    if (requestedStyleMode.startsWith("style:")) {
+      rememberFixedStyleMode(requestedStyleMode);
+    }
+    await applyModuleStylesToPage(context, layoutOptions.styleMode || "keep");
+    const result = layoutModules(context, bestPreset.rows, layoutOptions);
     if (result.error) {
-      showError(result.error);
-      return;
+      return { error: result.error };
     }
     const familyKey = getLayoutFamilyKey(bestPreset);
     const shapeKey = getLayoutShapeKey(bestPreset);
@@ -3617,8 +3640,61 @@
     context.page._magicLayoutAiRecentShapes = [shapeKey, ...recentShapes.filter((item) => item !== shapeKey)].slice(0, 8);
     context.page._magicLayoutLastAiSignature = bestPreset.signature;
     context.page._magicLayoutLastRandomSignature = bestPreset.signature;
-    showError("");
-    closeModalWithMagicEffect(context, "ai");
+    if (options.showError !== false) showError("");
+    if (options.closeModal) {
+      closeModalWithMagicEffect(context, "ai");
+    } else if (options.effect !== false) {
+      triggerMagicPageEffect(context, "ai");
+    }
+    return { ok: true, preset: bestPreset };
+  }
+
+  async function applyAiMagicLayout(context) {
+    if (!context || !context.page) return;
+    const result = await runAiMagicLayout(context, {
+      styleMode: getSelectedStyleMode(),
+      writeUi: true,
+      closeModal: true,
+      showError: true,
+      effect: true
+    });
+    if (result?.error) {
+      showError(result.error);
+    }
+  }
+
+  async function applyQuickAiMagicLayoutForPage(page, opts = {}) {
+    try {
+      await ensureMagicLayoutCustomStylesReady();
+    } catch (_err) {}
+    const context = buildMagicLayoutContext(page);
+    if (context?.error) {
+      if (typeof window.showAppToast === "function") {
+        window.showAppToast(context.error, "error");
+      } else {
+        alert(context.error);
+      }
+      return false;
+    }
+    const result = await runAiMagicLayout(context, {
+      styleMode: String(opts.styleMode || getPreferredMagicLayoutStyleMode(page) || "style:default").trim(),
+      writeUi: false,
+      closeModal: false,
+      showError: false,
+      effect: true
+    });
+    if (result?.error) {
+      if (typeof window.showAppToast === "function") {
+        window.showAppToast(result.error, "error");
+      } else {
+        alert(result.error);
+      }
+      return false;
+    }
+    if (typeof window.showAppToast === "function") {
+      window.showAppToast("AI zmienilo uklad strony na bazie wybranego stylu.", "success");
+    }
+    return true;
   }
 
   async function applyRandomMagicLayout(context) {
@@ -3702,30 +3778,18 @@
   }
 
   async function openMagicLayoutForPage(page) {
-    if (!page || !page.layer || !page.stage) {
-      alert("Brak aktywnej strony do ulozenia.");
-      return false;
-    }
     try {
       await ensureMagicLayoutCustomStylesReady();
     } catch (_err) {}
-    const modules = buildModulesFromPage(page);
-    if (!modules.length) {
-      alert("Brak produktow do automatycznego ulozenia na tej stronie.");
+    const context = buildMagicLayoutContext(page);
+    if (context?.error) {
+      alert(context.error);
       return false;
     }
-    const context = {
-      page,
-      modules,
-      totalProducts: modules.length,
-      pageWidth: Number(page.stage.width?.() || 0),
-      pageHeight: Number(page.stage.height?.() || 0),
-      pageLabel: getPageLabel(page),
-      selectionLabel: resolveSelectionLabel(page)
-    };
     openModal(context);
     return true;
   }
 
   window.openMagicLayoutForPage = openMagicLayoutForPage;
+  window.applyQuickAiMagicLayoutForPage = applyQuickAiMagicLayoutForPage;
 })();

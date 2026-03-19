@@ -4093,9 +4093,11 @@ if (document.readyState === "loading") {
 
 // === GLOBALNY CLIPBOARD + PASTE MODE ===
 window.globalClipboard = null;
+window.globalClipboardKind = null;
 window.globalPasteMode = false;
 window.globalStyleClipboard = null;
 window.globalStylePasteMode = false;
+const INTERNAL_NODE_CLIPBOARD_MARKER = "__WF_NODE_COPY__";
 
 const STYLE_KEYS = [
     "fill",
@@ -4687,6 +4689,7 @@ function buildPageShellLocal(n) {
 
       <div class="page-tools">
 <button class="page-btn magic-layout" data-tip="Magiczny uklad"><i class="fas fa-wand-magic-sparkles"></i></button>
+<button class="page-btn magic-layout-ai" data-tip="AI szybki uklad"><i class="fas fa-cube"></i></button>
 <button class="page-btn move-up" data-tip="Przenieś stronę wyżej">⬆</button>
 <button class="page-btn move-down" data-tip="Przenieś stronę niżej">⬇</button>
 <button class="page-btn duplicate" data-tip="Powiel stronę">⧉</button>
@@ -6644,6 +6647,7 @@ const btnGrid     = toolbar.querySelector(".grid");
 const btnDelete   = toolbar.querySelector(".delete");
 const btnSettings = toolbar.querySelector(".settings");
 const btnMagicLayout = toolbar.querySelector(".magic-layout");
+const btnMagicLayoutAi = toolbar.querySelector(".magic-layout-ai");
 const canvasWrapperEl = div.querySelector(".canvas-wrapper");
 
 const setGridVisible = (visible) => {
@@ -6687,6 +6691,24 @@ if (btnMagicLayout) {
         }
 
         if (typeof window.openMagicLayoutForPage === "function") {
+            window.openMagicLayoutForPage(page);
+        } else {
+            alert("Brak modulu magic-layout.js");
+        }
+    };
+}
+
+if (btnMagicLayoutAi) {
+    btnMagicLayoutAi.onclick = async (e) => {
+        e.stopPropagation();
+
+        if (typeof window.ensurePageHydrated === "function") {
+            try { await window.ensurePageHydrated(page, { reason: "magic-layout-ai" }); } catch (_e) {}
+        }
+
+        if (typeof window.applyQuickAiMagicLayoutForPage === "function") {
+            await window.applyQuickAiMagicLayoutForPage(page);
+        } else if (typeof window.openMagicLayoutForPage === "function") {
             window.openMagicLayoutForPage(page);
         } else {
             alert("Brak modulu magic-layout.js");
@@ -7577,14 +7599,7 @@ if (!obj) return;
 
     const nodes = normalizeSelection(page.selectedNodes);
 
-    window.globalClipboard = nodes.map(n => {
-        const clone = n.clone({ draggable: true, listening: true });
-        clone.getChildren?.().forEach(c => c.listening(true));
-        return clone;
-    });
-    window.globalClipboardPasteCount = 0;
-
-    window.globalPasteMode = true;
+    setGlobalNodeClipboardFromNodes(nodes, { pasteMode: true });
     pages.forEach(p => p.stage.container().style.cursor = 'copy');
 }
 
@@ -7606,14 +7621,7 @@ if (!obj) return;
               if (action === 'cut') {
     if (page.selectedNodes.length > 0) {
         // 📌 zapisujemy WSZYSTKIE zaznaczone obiekty do schowka
-        window.globalClipboard = page.selectedNodes.map(n => {
-    const clone = n.clone({ listening: true, draggable: true });
-    clone.getChildren?.().forEach(c => c.listening(true));
-    return clone;
-});
-        window.globalClipboardPasteCount = 0;
-
-        window.globalPasteMode = true;
+        setGlobalNodeClipboardFromNodes(page.selectedNodes, { pasteMode: true });
 
         // 📌 kasujemy wszystkie zaznaczone elementy na stronie
         page.selectedNodes.forEach(n => {
@@ -7623,8 +7631,7 @@ if (!obj) return;
         page.selectedNodes = [];
     } else if (obj) {
         // fallback gdy przypadkiem jest tylko jeden obiekt
-        window.globalClipboard = [obj.clone()];
-        window.globalClipboardPasteCount = 0;
+        setGlobalNodeClipboardFromNodes([obj], { pasteMode: true });
         clearCatalogSlotStateForNode(page, obj);
         obj.destroy();
     }
@@ -9877,12 +9884,28 @@ pageToolbarStyle.textContent = `
     font-size: 15px;
 }
 
+.page-btn.magic-layout-ai {
+    width: 40px;
+    color: #f7fbff;
+    background: linear-gradient(135deg, #0f5bd7 0%, #12a4ff 100%);
+    border-color: rgba(18,164,255,0.34);
+    box-shadow: 0 10px 22px rgba(18,164,255,0.18);
+}
+
+.page-btn.magic-layout-ai i {
+    font-size: 15px;
+}
+
 .page-btn:hover {
     background: #e2e2e2;
 }
 
 .page-btn.magic-layout:hover {
     background: linear-gradient(135deg, #e3ff58 0%, #c8f333 100%);
+}
+
+.page-btn.magic-layout-ai:hover {
+    background: linear-gradient(135deg, #2f74e8 0%, #3cb6ff 100%);
 }
 
 .page-btn.grid.active {
@@ -11392,6 +11415,30 @@ function getActivePage() {
     return pages.find(p => p.stage === stage) || pages[0] || null;
 }
 
+function setGlobalNodeClipboardFromNodes(nodes, options = {}) {
+    const normalized = normalizeSelection(Array.isArray(nodes) ? nodes : []);
+    if (!normalized.length) return [];
+    window.globalClipboard = normalized.map((node) => {
+        const clone = node.clone({ draggable: true, listening: true });
+        clone.getChildren?.().forEach((child) => child.listening(true));
+        return clone;
+    });
+    window.globalClipboardKind = "nodes";
+    window.globalClipboardPasteCount = 0;
+    if (Object.prototype.hasOwnProperty.call(options, "pasteMode")) {
+        window.globalPasteMode = !!options.pasteMode;
+    }
+    return window.globalClipboard;
+}
+
+function hasInternalNodeClipboard() {
+    return !!(
+        window.globalClipboardKind === "nodes" &&
+        Array.isArray(window.globalClipboard) &&
+        window.globalClipboard.length > 0
+    );
+}
+
 window.toggleActivePageSettingsMenu = function(anchorEl) {
     void anchorEl;
     const page = getActivePage();
@@ -11761,16 +11808,9 @@ document.addEventListener('keydown', (e) => {
     }
 
     if (isCtrl && key === 'c') {
-        e.preventDefault();
         const nodes = normalizeSelection(page.selectedNodes);
         if (!nodes.length) return;
-        window.globalClipboard = nodes.map(n => {
-            const clone = n.clone({ draggable: true, listening: true });
-            clone.getChildren?.().forEach(c => c.listening(true));
-            return clone;
-        });
-        window.globalClipboardPasteCount = 0;
-        window.globalPasteMode = false;
+        setGlobalNodeClipboardFromNodes(nodes, { pasteMode: false });
         return;
     }
 
@@ -11778,12 +11818,7 @@ document.addEventListener('keydown', (e) => {
         e.preventDefault();
         const nodes = normalizeSelection(page.selectedNodes);
         if (!nodes.length) return;
-        window.globalClipboard = nodes.map(n => {
-            const clone = n.clone({ draggable: true, listening: true });
-            clone.getChildren?.().forEach(c => c.listening(true));
-            return clone;
-        });
-        window.globalClipboardPasteCount = 0;
+        setGlobalNodeClipboardFromNodes(nodes, { pasteMode: false });
         nodes.forEach(n => n.destroy());
         page.selectedNodes = [];
         page.transformer.nodes([]);
@@ -11825,6 +11860,27 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
+document.addEventListener('copy', (e) => {
+    if (window.isEditingText) return;
+    const tag = document.activeElement?.tagName?.toLowerCase();
+    if (tag === "input" || tag === "textarea" || document.activeElement?.isContentEditable) return;
+
+    const page = getActivePage();
+    if (!page) return;
+
+    const nodes = normalizeSelection(page.selectedNodes);
+    if (!nodes.length) return;
+
+    setGlobalNodeClipboardFromNodes(nodes, { pasteMode: false });
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+        e.clipboardData?.clearData?.();
+        e.clipboardData?.setData("text/plain", INTERNAL_NODE_CLIPBOARD_MARKER);
+        e.clipboardData?.setData("application/x-worldfood-node-copy", INTERNAL_NODE_CLIPBOARD_MARKER);
+    } catch (_err) {}
+});
+
 document.addEventListener('paste', async (e) => {
     if (window.isEditingText) return;
     const tag = document.activeElement?.tagName?.toLowerCase();
@@ -11832,6 +11888,20 @@ document.addEventListener('paste', async (e) => {
 
     const page = getActivePage();
     if (!page) return;
+
+    const marker = String(
+        e.clipboardData?.getData("application/x-worldfood-node-copy") ||
+        e.clipboardData?.getData("text/plain") ||
+        ""
+    ).trim();
+    if (hasInternalNodeClipboard() && marker === INTERNAL_NODE_CLIPBOARD_MARKER) {
+        e.preventDefault();
+        e.stopPropagation();
+        const pointer = getClipboardPastePointer(page, "keyboard");
+        pasteClipboardToPage(page, pointer);
+        window.globalClipboardPasteCount = Math.max(0, Number(window.globalClipboardPasteCount || 0)) + 1;
+        return;
+    }
 
     const imageFile = getSystemClipboardImageFile(e.clipboardData);
     if (imageFile) {
@@ -11846,7 +11916,7 @@ document.addEventListener('paste', async (e) => {
         return;
     }
 
-    if (window.globalClipboard && window.globalClipboard.length > 0) {
+    if (hasInternalNodeClipboard()) {
         e.preventDefault();
         e.stopPropagation();
         const pointer = getClipboardPastePointer(page, "keyboard");

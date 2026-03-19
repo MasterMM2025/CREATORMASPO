@@ -14,6 +14,7 @@
 
       <div class="page-tools">
 <button class="page-btn magic-layout" data-tip="Magiczny uklad"><i class="fas fa-wand-magic-sparkles"></i></button>
+<button class="page-btn magic-layout-ai" data-tip="AI szybki uklad"><i class="fas fa-cube"></i></button>
 <button class="page-btn move-up" data-tip="Przenieś stronę wyżej">⬆</button>
 <button class="page-btn move-down" data-tip="Przenieś stronę niżej">⬇</button>
 <button class="page-btn duplicate" data-tip="Powiel stronę">⧉</button>
