@@ -197,7 +197,7 @@
       }
       .ml-hero {
         position: relative;
-        overflow: hidden;
+        overflow: visible;
         border-radius: 22px;
         border: 1px solid rgba(119, 156, 255, 0.18);
         background:
@@ -213,6 +213,7 @@
         content: "";
         position: absolute;
         inset: 0;
+        border-radius: inherit;
         background:
           linear-gradient(115deg, transparent 0%, rgba(255,255,255,0.03) 38%, transparent 52%),
           linear-gradient(180deg, rgba(255,255,255,0.02), transparent 30%);
@@ -299,15 +300,6 @@
       .ml-ai-style-select {
         flex: 0 0 220px;
         min-height: 54px;
-        border-radius: 16px;
-        border: 1px solid rgba(255,255,255,0.1);
-        background:
-          linear-gradient(180deg, rgba(22, 31, 49, 0.96) 0%, rgba(13, 19, 31, 0.98) 100%);
-        color: #f5f8ff;
-        font-size: 14px;
-        font-weight: 700;
-        padding: 0 14px;
-        box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
       }
       .ml-orb {
         width: 122px;
@@ -557,6 +549,106 @@
         font-size: 15px;
         box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
       }
+      .ml-native-select {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+        width: 0;
+        height: 0;
+        min-height: 0;
+        padding: 0;
+        border: 0;
+      }
+      .ml-custom-select {
+        position: relative;
+        width: 100%;
+      }
+      .ml-custom-select__trigger {
+        width: 100%;
+        min-height: 44px;
+        padding: 10px 14px;
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: linear-gradient(90deg, rgba(31,39,56,0.96) 0%, rgba(26,33,49,0.96) 100%);
+        color: #f5f8ff;
+        font-size: 15px;
+        font-weight: 700;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        text-align: left;
+        cursor: pointer;
+      }
+      .ml-custom-select__trigger:focus-visible {
+        outline: 2px solid rgba(127, 226, 255, 0.72);
+        outline-offset: 2px;
+      }
+      .ml-custom-select__label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .ml-custom-select__chevron {
+        flex: 0 0 auto;
+        color: #9bb2d0;
+        font-size: 12px;
+        transition: transform 160ms ease;
+      }
+      .ml-custom-select.is-open .ml-custom-select__chevron {
+        transform: rotate(180deg);
+      }
+      .ml-custom-select__menu {
+        position: absolute;
+        top: calc(100% + 8px);
+        left: 0;
+        right: 0;
+        z-index: 20;
+        display: none;
+        max-height: 260px;
+        overflow: auto;
+        padding: 8px;
+        border-radius: 16px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background:
+          radial-gradient(320px 140px at 0% 0%, rgba(58, 168, 255, 0.12), transparent 60%),
+          linear-gradient(180deg, rgba(18, 26, 42, 0.98) 0%, rgba(10, 15, 26, 0.98) 100%);
+        box-shadow: 0 20px 48px rgba(0,0,0,0.36);
+      }
+      .ml-custom-select.is-open .ml-custom-select__menu {
+        display: grid;
+        gap: 6px;
+      }
+      .ml-custom-select__option {
+        width: 100%;
+        border: 0;
+        border-radius: 12px;
+        background: rgba(255,255,255,0.03);
+        color: #eaf1ff;
+        padding: 11px 12px;
+        font-size: 14px;
+        font-weight: 700;
+        text-align: left;
+        cursor: pointer;
+      }
+      .ml-custom-select__option:hover,
+      .ml-custom-select__option:focus-visible {
+        outline: none;
+        background: rgba(127,226,255,0.14);
+      }
+      .ml-custom-select__option.is-selected {
+        background: linear-gradient(135deg, rgba(216,255,31,0.18) 0%, rgba(127,226,255,0.14) 100%);
+        color: #fbffdd;
+      }
+      .ml-ai-style-select + .ml-custom-select .ml-custom-select__trigger {
+        min-height: 54px;
+        border-radius: 16px;
+        border-color: rgba(255,255,255,0.1);
+        background: linear-gradient(180deg, rgba(22, 31, 49, 0.96) 0%, rgba(13, 19, 31, 0.98) 100%);
+        font-size: 14px;
+      }
       .ml-hint {
         font-size: 12px;
         line-height: 1.45;
@@ -631,6 +723,7 @@
           flex-direction: column;
         }
         .ml-ai-style-select,
+        .ml-ai-style-select + .ml-custom-select,
         .ml-ai-cta {
           flex: 1 1 auto;
           width: 100%;
@@ -680,7 +773,7 @@
                 <div class="ml-orb" aria-hidden="true"></div>
                 <div class="ml-ai-controls">
                   <button type="button" class="ml-ai-cta" data-action="ai-apply"><i class="fas fa-wand-magic-sparkles"></i><span>AI uloz cala strone</span></button>
-                  <select id="magicLayoutAiStyleMode" class="ml-ai-style-select" aria-label="Styl AI"></select>
+                  <select id="magicLayoutAiStyleMode" class="ml-ai-style-select ml-native-select" aria-label="Styl AI"></select>
                 </div>
                 <div class="ml-ai-note">Wybierz, czy AI ma mieszac style, czy trzymac jeden konkretny styl na calej stronie.</div>
               </div>
@@ -729,14 +822,14 @@
               </div>
               <div class="ml-field">
                 <label for="magicLayoutMarginMode">Marginesy</label>
-                <select id="magicLayoutMarginMode" class="ml-select">
+                <select id="magicLayoutMarginMode" class="ml-select ml-native-select">
                   <option value="auto">Dopasuj automatycznie</option>
                   <option value="manual">Uzyj wpisanych wartosci</option>
                 </select>
               </div>
               <div class="ml-field">
                 <label for="magicLayoutAlign">Wyrownanie rzedu</label>
-                <select id="magicLayoutAlign" class="ml-select">
+                <select id="magicLayoutAlign" class="ml-select ml-native-select">
                   <option value="center">Wycentruj</option>
                   <option value="left">Do lewej</option>
                   <option value="right">Do prawej</option>
@@ -744,14 +837,14 @@
               </div>
               <div class="ml-field">
                 <label for="magicLayoutScale">Skalowanie</label>
-                <select id="magicLayoutScale" class="ml-select">
+                <select id="magicLayoutScale" class="ml-select ml-native-select">
                   <option value="fit">Dopasuj automatycznie</option>
                   <option value="keep">Zachowaj obecny rozmiar</option>
                 </select>
               </div>
               <div class="ml-field">
                 <label for="magicLayoutStyleMode">Styl modułów</label>
-                <select id="magicLayoutStyleMode" class="ml-select"></select>
+                <select id="magicLayoutStyleMode" class="ml-select ml-native-select"></select>
               </div>
             </div>
             <div class="ml-hint">Przy auto marginesach wpisane wartosci sa traktowane jako baza, a system sam rozklada wolne miejsce i delikatnie dopasowuje uklad do strony.</div>
@@ -773,8 +866,21 @@
       btn.addEventListener("click", closeModal);
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && backdrop.classList.contains("is-open")) closeModal();
+      if (!backdrop.classList.contains("is-open")) return;
+      if (event.key === "Escape") {
+        if (document.querySelector(".ml-custom-select.is-open")) {
+          closeAllMagicLayoutCustomSelects();
+          return;
+        }
+        closeModal();
+      }
     });
+    document.addEventListener("click", (event) => {
+      if (!backdrop.classList.contains("is-open")) return;
+      if (event.target instanceof Element && event.target.closest(".ml-custom-select")) return;
+      closeAllMagicLayoutCustomSelects();
+    });
+    refreshMagicLayoutCustomSelects();
     return backdrop;
   }
 
@@ -783,6 +889,7 @@
     if (!backdrop) return;
     backdrop.classList.remove("is-open");
     backdrop._magicLayoutContext = null;
+    closeAllMagicLayoutCustomSelects();
   }
 
   function showError(message) {
@@ -834,6 +941,82 @@
       chip.innerHTML = `<i class="${tag.icon}"></i><span>${tag.label}</span>`;
       container.appendChild(chip);
     });
+  }
+
+  function closeAllMagicLayoutCustomSelects(except = null) {
+    document.querySelectorAll(".ml-custom-select.is-open").forEach((root) => {
+      if (except && root === except) return;
+      root.classList.remove("is-open");
+      const trigger = root.querySelector(".ml-custom-select__trigger");
+      if (trigger) trigger.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function syncMagicLayoutCustomSelect(select) {
+    const root = select?._magicLayoutCustomSelect || select?.nextElementSibling;
+    if (!select || !root || !root.classList?.contains("ml-custom-select")) return;
+    const label = root.querySelector(".ml-custom-select__label");
+    const menu = root.querySelector(".ml-custom-select__menu");
+    const selectedOption = Array.from(select.options || []).find((option) => option.value === select.value)
+      || select.options?.[0]
+      || null;
+    if (label) {
+      label.textContent = selectedOption ? selectedOption.textContent : "Wybierz opcje";
+    }
+    if (menu) {
+      menu.innerHTML = "";
+      Array.from(select.options || []).forEach((option) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "ml-custom-select__option";
+        if (option.value === select.value) item.classList.add("is-selected");
+        item.textContent = option.textContent || "";
+        item.setAttribute("role", "option");
+        item.setAttribute("aria-selected", option.value === select.value ? "true" : "false");
+        item.addEventListener("click", () => {
+          if (select.value !== option.value) {
+            select.value = option.value;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+          syncMagicLayoutCustomSelect(select);
+          closeAllMagicLayoutCustomSelects();
+        });
+        menu.appendChild(item);
+      });
+    }
+  }
+
+  function ensureMagicLayoutCustomSelect(select) {
+    if (!select || select._magicLayoutCustomSelect) {
+      if (select) syncMagicLayoutCustomSelect(select);
+      return;
+    }
+    const root = document.createElement("div");
+    root.className = "ml-custom-select";
+    root.innerHTML = `
+      <button type="button" class="ml-custom-select__trigger" aria-haspopup="listbox" aria-expanded="false">
+        <span class="ml-custom-select__label"></span>
+        <i class="fas fa-chevron-down ml-custom-select__chevron" aria-hidden="true"></i>
+      </button>
+      <div class="ml-custom-select__menu" role="listbox"></div>
+    `;
+    select.insertAdjacentElement("afterend", root);
+    select._magicLayoutCustomSelect = root;
+    const trigger = root.querySelector(".ml-custom-select__trigger");
+    trigger.addEventListener("click", () => {
+      const nextOpen = !root.classList.contains("is-open");
+      closeAllMagicLayoutCustomSelects(nextOpen ? root : null);
+      root.classList.toggle("is-open", nextOpen);
+      trigger.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+    });
+    select.addEventListener("change", () => syncMagicLayoutCustomSelect(select));
+    syncMagicLayoutCustomSelect(select);
+  }
+
+  function refreshMagicLayoutCustomSelects() {
+    const modal = document.getElementById(MODAL_ID);
+    if (!modal) return;
+    modal.querySelectorAll("select.ml-native-select").forEach((select) => ensureMagicLayoutCustomSelect(select));
   }
 
   function getAvailableModuleStyleOptions() {
@@ -1064,6 +1247,7 @@
       option.textContent = item.label;
       select.appendChild(option);
     });
+    syncMagicLayoutCustomSelect(select);
   }
 
   function fillAiStyleModeOptions() {
@@ -1080,6 +1264,7 @@
         option.textContent = item.label;
         select.appendChild(option);
       });
+    syncMagicLayoutCustomSelect(select);
   }
 
   function syncAiStyleModeFromMain(page = null) {
@@ -1090,6 +1275,7 @@
     const allowedValues = new Set(Array.from(aiSelect.options || []).map((option) => String(option.value || "")));
     const fallbackValue = getPreferredMagicLayoutStyleMode(page);
     aiSelect.value = allowedValues.has(safeValue) ? safeValue : (allowedValues.has(fallbackValue) ? fallbackValue : "style:default");
+    syncMagicLayoutCustomSelect(aiSelect);
   }
 
   function syncMainStyleModeFromAi() {
@@ -1097,6 +1283,7 @@
     const aiSelect = document.getElementById("magicLayoutAiStyleMode");
     if (!mainSelect || !aiSelect) return;
     if (mainSelect.value !== aiSelect.value) mainSelect.value = aiSelect.value;
+    syncMagicLayoutCustomSelect(mainSelect);
     rememberFixedStyleMode(aiSelect.value);
   }
 
@@ -1588,6 +1775,7 @@
 
   function openModal(context) {
     const backdrop = ensureModal();
+    refreshMagicLayoutCustomSelects();
     backdrop._magicLayoutContext = context;
     document.getElementById("magicLayoutProductCount").textContent = String(context.totalProducts || context.modules.length);
     document.getElementById("magicLayoutPageSize").textContent = context.pageLabel || `${Math.round(context.pageWidth)} x ${Math.round(context.pageHeight)}`;
@@ -1615,6 +1803,7 @@
     const defaultStyleMode = getPreferredMagicLayoutStyleMode(context.page);
     document.getElementById("magicLayoutStyleMode").value = defaultStyleMode;
     syncAiStyleModeFromMain(context.page);
+    refreshMagicLayoutCustomSelects();
     fillRowInputs(context.modules.length);
     showError("");
     const applyBtn = backdrop.querySelector("[data-action='apply']");

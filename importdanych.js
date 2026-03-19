@@ -11492,6 +11492,157 @@ function getClipboardPastePointer(page, mode = "keyboard") {
     };
 }
 
+function getSystemClipboardImageFile(clipboardData) {
+    const items = Array.from(clipboardData?.items || []);
+    for (const item of items) {
+        if (String(item?.type || "").toLowerCase().startsWith("image/")) {
+            const file = item.getAsFile?.();
+            if (file) return file;
+        }
+    }
+    const files = Array.from(clipboardData?.files || []);
+    return files.find((file) => String(file?.type || "").toLowerCase().startsWith("image/")) || null;
+}
+
+function getClipboardImagePastePointer(page) {
+    if (!page || !page.stage) return { x: 100, y: 100 };
+    const stage = page.stage;
+    const pointer = stage.getPointerPosition?.();
+    if (pointer) return pointer;
+    const stageW = Number(stage.width?.() || W || 0);
+    const stageH = Number(stage.height?.() || H || 0);
+    return {
+        x: Math.round(stageW * 0.5) || 100,
+        y: Math.round(stageH * 0.38) || 100
+    };
+}
+
+async function pasteSystemClipboardImageToPage(page, file, options = {}) {
+    if (!page || !page.stage || !page.layer || !file || !window.Konva?.Image) return false;
+
+    if (typeof window.ensurePageHydrated === "function") {
+        try { await window.ensurePageHydrated(page, { reason: "paste-clipboard-image" }); } catch (_e) {}
+    }
+
+    let variants = null;
+    try {
+        if (typeof window.createImageVariantsFromFile === "function") {
+            variants = await window.createImageVariantsFromFile(file, {
+                cacheKey: `clipboard:${file.name || "image"}:${file.size || 0}:${file.lastModified || 0}`
+            });
+        }
+    } catch (_e) {}
+
+    if (!variants) {
+        try {
+            const fallback = await (new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result || ""));
+                reader.onerror = () => reject(new Error("clipboard_image_read_error"));
+                reader.readAsDataURL(file);
+            }));
+            variants = (typeof window.normalizeImageVariantPayload === "function")
+                ? window.normalizeImageVariantPayload(fallback)
+                : { original: fallback, editor: fallback, thumb: fallback };
+        } catch (_e) {
+            return false;
+        }
+    }
+
+    const originalSrc = (typeof window.getImageVariantSource === "function")
+        ? window.getImageVariantSource(variants, "original")
+        : String(variants?.original || "");
+    const editorSrc = (typeof window.getImageVariantSource === "function")
+        ? window.getImageVariantSource(variants, "editor")
+        : String(variants?.editor || originalSrc);
+    const thumbSrc = (typeof window.getImageVariantSource === "function")
+        ? window.getImageVariantSource(variants, "thumb")
+        : String(variants?.thumb || editorSrc || originalSrc);
+    if (!editorSrc) return false;
+
+    const pointer = options.pointer || getClipboardImagePastePointer(page);
+
+    return await new Promise((resolve) => {
+        Konva.Image.fromURL(editorSrc, (img) => {
+            if (!img) {
+                resolve(false);
+                return;
+            }
+
+            const stageW = Number(page.stage?.width?.() || W || img.width?.() || 1);
+            const stageH = Number(page.stage?.height?.() || H || img.height?.() || 1);
+            const maxWidth = Math.max(120, stageW * 0.6);
+            const scale = Math.min(maxWidth / Math.max(1, Number(img.width?.() || 1)), 1);
+            const scaledW = Math.max(1, Math.round(Number(img.width?.() || 1) * scale));
+            const scaledH = Math.max(1, Math.round(Number(img.height?.() || 1) * scale));
+            const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+            const posX = clamp(
+                Math.round((Number(pointer?.x) || 0) - scaledW / 2),
+                0,
+                Math.max(0, stageW - scaledW)
+            );
+            const posY = clamp(
+                Math.round((Number(pointer?.y) || 0) - scaledH / 2),
+                0,
+                Math.max(0, stageH - scaledH)
+            );
+
+            img.x(posX);
+            img.y(posY);
+            img.scale({ x: scale, y: scale });
+            img.draggable(true);
+            img.listening(true);
+            img.setAttrs({
+                isProductImage: false,
+                isUserImage: true,
+                isSidebarImage: true,
+                slotIndex: null,
+                preservedSlotIndex: null
+            });
+
+            if (typeof window.applyImageVariantsToKonvaNode === "function") {
+                window.applyImageVariantsToKonvaNode(img, {
+                    original: originalSrc || editorSrc,
+                    editor: editorSrc,
+                    thumb: thumbSrc || editorSrc
+                });
+            } else {
+                img.setAttr("originalSrc", originalSrc || editorSrc);
+                img.setAttr("editorSrc", editorSrc);
+                img.setAttr("thumbSrc", thumbSrc || editorSrc);
+            }
+
+            page.layer.add(img);
+            setupProductImageDrag(img, page.layer);
+            page.layer.batchDraw();
+
+            if (typeof window.activateNewImageCropSelection === "function") {
+                try { window.activateNewImageCropSelection(page, img, { autoCrop: false }); } catch (_e) {}
+            }
+
+            const armSelection = () => {
+                try { page.selectedNodes = [img]; } catch (_e) {}
+                try { page.transformer?.nodes?.([img]); } catch (_e) {}
+                try { window.applyTransformerProfileForSelection?.(page); } catch (_e) {}
+                try { page.transformer?.forceUpdate?.(); } catch (_e) {}
+                try { page.layer?.batchDraw?.(); } catch (_e) {}
+                try { page.transformerLayer?.batchDraw?.(); } catch (_e) {}
+            };
+            armSelection();
+            requestAnimationFrame(() => {
+                armSelection();
+                requestAnimationFrame(() => armSelection());
+            });
+
+            document.activeStage = page.stage;
+            try {
+                dispatchCanvasModified(page.stage, { historyMode: 'immediate', historySource: 'clipboard-image' });
+            } catch (_e) {}
+            resolve(true);
+        });
+    });
+}
+
 document.addEventListener('keydown', (e) => {
     if (window.isEditingText) return;
     const tag = document.activeElement?.tagName?.toLowerCase();
@@ -11602,11 +11753,6 @@ document.addEventListener('keydown', (e) => {
     }
 
     if (isCtrl && key === 'v') {
-        e.preventDefault();
-        if (!window.globalClipboard || window.globalClipboard.length === 0) return;
-        const pointer = getClipboardPastePointer(page, "keyboard");
-        pasteClipboardToPage(page, pointer);
-        window.globalClipboardPasteCount = Math.max(0, Number(window.globalClipboardPasteCount || 0)) + 1;
         return;
     }
 
@@ -11637,6 +11783,37 @@ document.addEventListener('keydown', (e) => {
         window.projectDirty = true;
     }
 });
+
+document.addEventListener('paste', async (e) => {
+    if (window.isEditingText) return;
+    const tag = document.activeElement?.tagName?.toLowerCase();
+    if (tag === "input" || tag === "textarea" || document.activeElement?.isContentEditable) return;
+
+    const page = getActivePage();
+    if (!page) return;
+
+    const imageFile = getSystemClipboardImageFile(e.clipboardData);
+    if (imageFile) {
+        e.preventDefault();
+        e.stopPropagation();
+        const inserted = await pasteSystemClipboardImageToPage(page, imageFile, {
+            pointer: getClipboardImagePastePointer(page)
+        });
+        if (!inserted && typeof window.showAppToast === "function") {
+            window.showAppToast("Nie udało się wkleić obrazu ze schowka.", "error");
+        }
+        return;
+    }
+
+    if (window.globalClipboard && window.globalClipboard.length > 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        const pointer = getClipboardPastePointer(page, "keyboard");
+        pasteClipboardToPage(page, pointer);
+        window.globalClipboardPasteCount = Math.max(0, Number(window.globalClipboardPasteCount || 0)) + 1;
+    }
+});
+
 window.movePage = function(page, direction) {
     if (window.PageActions && typeof window.PageActions.movePage === "function") {
         return window.PageActions.movePage(page, direction);

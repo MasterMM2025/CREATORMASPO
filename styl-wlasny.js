@@ -1672,28 +1672,62 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     const cIndex = findCol(0, ["indeks", "index", "kod", "sku"]);
     const cBrand = findCol(1, ["marka", "brand"]);
-    const cPrice = findCol(2, ["cena", "price", "netto"]);
+    const cPrice = findCol(2, ["cena", "price", "netto", "cena netto", "cena netto fv"]);
     const cTnz = findCol(3, ["tnz", "oznaczenie tnz", "znacznik tnz"]);
     const cGroup = findCol(4, ["grupa produktow", "grupa produktów", "grupa", "rodzina", "group"]);
+    const cName = findCol(-1, ["nazwa towaru", "nazwa", "name"]);
+    const cPackageValue = findCol(-1, ["il opk zb", "il_opk_zb", "ilosc w opakowaniu zbiorczym", "ilość w opakowaniu zbiorczym", "pakiet"]);
+    const cPackageUnit = findCol(-1, ["jm", "jednostka miary", "jednostka", "pakiet jm", "pakiet_jm"]);
+    const cEan = findCol(-1, ["kod kreskowy", "kod_kreskowy", "ean"]);
+
+    const readCellAt = (cells, idx) => (
+      Number.isInteger(idx) && idx >= 0
+        ? readExcelCellAsText(cells[idx])
+        : ""
+    );
 
     return rows.slice(1).map((row, rowIdx) => {
       const cells = Array.isArray(row) ? row : [];
-      const indexRaw = readExcelCellAsText(cells[cIndex]);
+      const indexRaw = readCellAt(cells, cIndex);
       const index = normalizeImportIndex(indexRaw);
-      const brand = readExcelCellAsText(cells[cBrand]);
-      const price = readExcelCellAsText(cells[cPrice]);
-      const tnzRaw = readExcelCellAsText(cells[cTnz]);
-      const groupRaw = readExcelCellAsText(cells[cGroup]);
+      const brand = readCellAt(cells, cBrand);
+      const price = readCellAt(cells, cPrice);
+      const tnzRaw = readCellAt(cells, cTnz);
+      const groupRaw = readCellAt(cells, cGroup);
+      const name = readCellAt(cells, cName);
+      const packageValue = readCellAt(cells, cPackageValue);
+      const packageUnit = readCellAt(cells, cPackageUnit);
+      const ean = readCellAt(cells, cEan);
+      const excelRowObject = {};
+      headerRow.forEach((header, idx) => {
+        const key = String(header || "").trim();
+        if (!key) return;
+        if (Object.prototype.hasOwnProperty.call(excelRowObject, key)) return;
+        excelRowObject[key] = cells[idx];
+      });
+      if (!readExcelCellAsText(excelRowObject.INDEKS)) excelRowObject.INDEKS = indexRaw;
+      if (!readExcelCellAsText(excelRowObject.NAZWA_TOWARU)) excelRowObject.NAZWA_TOWARU = name;
+      if (!readExcelCellAsText(excelRowObject.IL_OPK_ZB)) excelRowObject.IL_OPK_ZB = packageValue;
+      if (!readExcelCellAsText(excelRowObject.JM)) excelRowObject.JM = packageUnit;
+      if (!readExcelCellAsText(excelRowObject.KOD_KRESKOWY)) excelRowObject.KOD_KRESKOWY = ean;
+      if (!readExcelCellAsText(excelRowObject.CENA_NETTO_FV)) excelRowObject.CENA_NETTO_FV = price;
+      if (!readExcelCellAsText(excelRowObject.MARKA)) excelRowObject.MARKA = brand;
+      const excelProduct = normalizeProduct(excelRowObject, rowIdx);
       return {
         rowNo: rowIdx + 2,
         indexRaw,
         index,
+        name,
         brand,
         price,
+        packageValue,
+        packageUnit,
+        ean,
         tnzRaw,
         tnz: isTnzFlagValue(tnzRaw),
         groupRaw,
-        groupKey: normalizeImportedGroupKey(groupRaw)
+        groupKey: normalizeImportedGroupKey(groupRaw),
+        excelProduct
       };
     }).filter((item) => !!item.index);
   }
@@ -7877,21 +7911,54 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       return (idx) => idxMap.get(normalizeImportIndex(idx)) || [];
     })();
 
+    const firstNonEmptyText = (...values) => {
+      for (const value of values) {
+        const text = readExcelCellAsText(value);
+        if (text) return text;
+      }
+      return "";
+    };
+
     const buildImportedProductVariant = (baseProduct, row, seqNo) => {
-      const base = baseProduct || {};
-      const id = `imp-${String(base.id || "product")}-${Date.now()}-${seqNo}`;
-      const nextNetto = row?.price ? String(row.price).trim() : String(base.netto || "").trim();
-      const nextRaw = Object.assign({}, base.raw || {}, {
+      const base = baseProduct || null;
+      const excelProduct = row?.excelProduct || null;
+      const idSeed = firstNonEmptyText(base?.id, excelProduct?.id, row?.index, "product");
+      const id = `imp-${String(idSeed)}-${Date.now()}-${seqNo}`;
+      const nextIndex = firstNonEmptyText(base?.index, row?.index, excelProduct?.index);
+      const nextName = firstNonEmptyText(base?.name, row?.name, excelProduct?.name);
+      const nextPackageValue = firstNonEmptyText(base?.packageValue, row?.packageValue, excelProduct?.packageValue);
+      const nextPackageUnit = firstNonEmptyText(base?.packageUnit, row?.packageUnit, excelProduct?.packageUnit);
+      const nextEan = firstNonEmptyText(base?.ean, row?.ean, excelProduct?.ean);
+      const nextNetto = firstNonEmptyText(row?.price, base?.netto, excelProduct?.netto, "0.00");
+      const nextBrand = firstNonEmptyText(base?.brand, row?.brand, excelProduct?.brand);
+      const nextRaw = Object.assign({}, excelProduct?.raw || {}, base?.raw || {}, {
+        INDEKS: nextIndex,
+        NAZWA_TOWARU: nextName,
+        IL_OPK_ZB: nextPackageValue,
+        JM: nextPackageUnit,
+        KOD_KRESKOWY: nextEan,
+        CENA_NETTO_FV: nextNetto,
         IMPORT_BRAND: String(row?.brand || "").trim(),
         IMPORT_TNZ: String(row?.tnzRaw || "").trim(),
-        IMPORT_GROUP: String(row?.groupRaw || "").trim()
+        IMPORT_GROUP: String(row?.groupRaw || "").trim(),
+        IMPORT_SOURCE: base ? "database" : "excel-fallback"
       });
-      return Object.assign({}, base, {
+      return Object.assign({}, excelProduct || {}, base || {}, {
         id,
-        netto: nextNetto || String(base.netto || "0.00"),
+        index: nextIndex,
+        name: nextName,
+        packageValue: nextPackageValue,
+        packageUnit: nextPackageUnit,
+        ean: nextEan,
+        netto: nextNetto || String(base?.netto || excelProduct?.netto || "0.00"),
+        brand: nextBrand,
+        indexNorm: normalizeText(nextIndex),
+        nameNorm: normalizeText(nextName),
         raw: nextRaw,
         IMPORTED_BRAND: String(row?.brand || "").trim(),
-        IMPORTED_GROUP_KEY: String(row?.groupKey || "").trim()
+        IMPORTED_GROUP_KEY: String(row?.groupKey || "").trim(),
+        IMPORTED_SOURCE: base ? "database" : "excel-fallback",
+        IMPORTED_MISSING_IN_DB: !base
       });
     };
 
@@ -7903,28 +7970,31 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       }
       showCustomImportProgress("Analiza pliku Excel...", 6);
 
-      const missingIndexes = [];
+      const fallbackIndexes = [];
+      const unresolvedIndexes = [];
       const matched = [];
       let importSeq = 0;
       parsedRows.forEach((row) => {
         const base = getProductByExcelIndex(row.index);
-        if (!base) {
-          missingIndexes.push(row.index);
+        const variant = buildImportedProductVariant(base, row, importSeq + 1);
+        if (!variant) {
+          unresolvedIndexes.push(row.index);
           return;
         }
         importSeq += 1;
-        const variant = buildImportedProductVariant(base, row, importSeq);
+        if (!base) fallbackIndexes.push(row.index);
         productsById.set(String(variant.id), variant);
         matched.push({
           row,
-          product: variant
+          product: variant,
+          fromExcelFallback: !base
         });
       });
-      showCustomImportProgress("Dopasowano indeksy do bazy produktów...", 18);
+      showCustomImportProgress("Dopasowano indeksy i przygotowano fallback z Excela...", 18);
 
       if (!matched.length) {
         hideCustomImportProgress();
-        showExcelImportMessage("Nie znaleziono żadnego indeksu z Excela w bazie produktów.", "error");
+        showExcelImportMessage("Nie udało się przygotować żadnej pozycji z Excela.", "error");
         return;
       }
 
@@ -8119,14 +8189,16 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       await waitMs(120);
       hideCustomImportProgress();
 
-      const missingCount = missingIndexes.length;
+      const fallbackCount = fallbackIndexes.length;
+      const unresolvedCount = unresolvedIndexes.length;
+      const matchedInDatabaseCount = Math.max(0, matched.length - fallbackCount);
       const limitInfo = skippedByLimit
         ? ` Osiągnięto limit kolejki ${CUSTOM_DRAFT_MODULE_LIMIT}. Pominięto ${skippedByLimit} moduł(y).`
         : "";
-      const summary = `Zaimportowano ${createdDrafts.length} moduł(y). Dopasowano indeksów: ${matched.length}.${missingCount ? ` Brak w bazie: ${missingCount}.` : ""}${limitInfo}`;
-      showExcelImportMessage(summary, missingCount ? "info" : "success");
+      const summary = `Zaimportowano ${createdDrafts.length} moduł(y). Z bazy: ${matchedInDatabaseCount}.${fallbackCount ? ` Z Excela awaryjnie: ${fallbackCount}.` : ""}${unresolvedCount ? ` Nieprzetworzonych: ${unresolvedCount}.` : ""}${limitInfo}`;
+      showExcelImportMessage(summary, (fallbackCount || unresolvedCount) ? "info" : "success");
       if (typeof window.showAppToast === "function") {
-        window.showAppToast(summary, missingCount ? "info" : "success");
+        window.showAppToast(summary, (fallbackCount || unresolvedCount) ? "info" : "success");
       }
     };
 
