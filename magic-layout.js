@@ -2044,6 +2044,9 @@
     context.page.layer?.batchDraw?.();
     context.page.transformerLayer?.batchDraw?.();
     try {
+      window.__skipDirectModuleStabilityPassOnce = true;
+    } catch (_err) {}
+    try {
       window.dispatchEvent(new CustomEvent("canvasModified", { detail: context.page.stage }));
     } catch (_err) {}
     return { ok: true };

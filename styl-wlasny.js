@@ -2162,15 +2162,61 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return `direct-module-${Date.now()}-${customDirectModuleSeq}`;
   }
 
+  function captureNodeAbsoluteTransform(node) {
+    if (!node) return null;
+    const absPos = typeof node.getAbsolutePosition === "function"
+      ? node.getAbsolutePosition()
+      : null;
+    const absScale = typeof node.getAbsoluteScale === "function"
+      ? node.getAbsoluteScale()
+      : {
+          x: Number(node.scaleX?.() || 1),
+          y: Number(node.scaleY?.() || 1)
+        };
+    const absRotation = typeof node.getAbsoluteRotation === "function"
+      ? Number(node.getAbsoluteRotation() || 0)
+      : Number(node.rotation?.() || 0);
+    return { absPos, absScale, absRotation };
+  }
+
+  function restoreNodeAbsoluteTransform(node, parent, snapshot) {
+    if (!node || !snapshot) return;
+    const absPos = snapshot.absPos;
+    if (absPos && typeof node.absolutePosition === "function") {
+      node.absolutePosition(absPos);
+    } else if (absPos && typeof node.setAbsolutePosition === "function") {
+      node.setAbsolutePosition(absPos);
+    }
+
+    const parentAbsScale = typeof parent?.getAbsoluteScale === "function"
+      ? parent.getAbsoluteScale()
+      : { x: 1, y: 1 };
+    const parentScaleX = Number(parentAbsScale?.x);
+    const parentScaleY = Number(parentAbsScale?.y);
+    const safeParentScaleX = Math.abs(parentScaleX) > 0.0001 ? parentScaleX : 1;
+    const safeParentScaleY = Math.abs(parentScaleY) > 0.0001 ? parentScaleY : 1;
+    const absScaleX = Number(snapshot.absScale?.x);
+    const absScaleY = Number(snapshot.absScale?.y);
+    if (Number.isFinite(absScaleX) && typeof node.scaleX === "function") {
+      node.scaleX(absScaleX / safeParentScaleX);
+    }
+    if (Number.isFinite(absScaleY) && typeof node.scaleY === "function") {
+      node.scaleY(absScaleY / safeParentScaleY);
+    }
+
+    const parentAbsRotation = typeof parent?.getAbsoluteRotation === "function"
+      ? Number(parent.getAbsoluteRotation() || 0)
+      : 0;
+    if (Number.isFinite(snapshot.absRotation) && typeof node.rotation === "function") {
+      node.rotation(snapshot.absRotation - parentAbsRotation);
+    }
+  }
+
   function moveNodeToParentPreserveAbsolute(node, parent) {
     if (!node || !parent || typeof node.moveTo !== "function") return;
-    const abs = typeof node.getAbsolutePosition === "function" ? node.getAbsolutePosition() : null;
+    const snapshot = captureNodeAbsoluteTransform(node);
     node.moveTo(parent);
-    if (abs && typeof node.absolutePosition === "function") {
-      node.absolutePosition(abs);
-    } else if (abs && typeof node.setAbsolutePosition === "function") {
-      node.setAbsolutePosition(abs);
-    }
+    restoreNodeAbsoluteTransform(node, parent, snapshot);
   }
 
   function applySmallTextEasyHitArea(node) {
@@ -2396,6 +2442,27 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return null;
   }
 
+  function findDirectPriceBadgeNode(layer, parentGroup, directModuleId, slotIndex, kind = "circle") {
+    if (!layer || typeof layer.find !== "function") return null;
+    const flags = kind === "rect"
+      ? ["isDirectPriceRectBg", "isDirectPriceRectBgContainer"]
+      : ["isDirectPriceCircleBgContainer", "isDirectPriceCircleBg"];
+    const matches = layer.find((node) => {
+      if (!node || !node.getAttr) return false;
+      if (!flags.some((flag) => !!node.getAttr(flag))) return false;
+      if (String(node.getAttr("directModuleId") || "").trim() !== String(directModuleId || "").trim()) return false;
+      if (readDirectSlotAttrIndex(node, "slotIndex") !== slotIndex) return false;
+      if (parentGroup) {
+        const topGroup = getTopUserGroupAncestor(node);
+        if (topGroup && topGroup !== parentGroup) return false;
+        if (!topGroup && node.getParent && node.getParent() !== parentGroup) return false;
+      }
+      return true;
+    });
+    const list = Array.isArray(matches) ? matches : [];
+    return list[0] || null;
+  }
+
   function isManagedDirectSlotNode(node) {
     if (!node || !node.getAttr) return false;
     return !!(
@@ -2425,12 +2492,13 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
   function moveNodeToGroupPreserveAbsolute(node, group) {
     if (!node || !group || typeof node.moveTo !== "function") return;
-    const abs = typeof node.getAbsolutePosition === "function"
-      ? node.getAbsolutePosition()
-      : { x: Number(node.x?.() || 0), y: Number(node.y?.() || 0) };
+    const snapshot = captureNodeAbsoluteTransform(node) || {
+      absPos: { x: Number(node.x?.() || 0), y: Number(node.y?.() || 0) },
+      absScale: { x: Number(node.scaleX?.() || 1), y: Number(node.scaleY?.() || 1) },
+      absRotation: Number(node.rotation?.() || 0)
+    };
     node.moveTo(group);
-    if (typeof node.absolutePosition === "function") node.absolutePosition(abs);
-    else if (typeof node.setAbsolutePosition === "function") node.setAbsolutePosition(abs);
+    restoreNodeAbsoluteTransform(node, group, snapshot);
   }
 
   function readDirectSlotAttrIndex(node, attrName) {
@@ -2619,6 +2687,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (directModuleUngroupProtectionInstalled) return;
     directModuleUngroupProtectionInstalled = true;
     window.addEventListener("canvasModified", () => {
+      if (window.__skipDirectModuleStabilityPassOnce) {
+        window.__skipDirectModuleStabilityPassOnce = false;
+        return;
+      }
       if (directModuleStabilityWorkInProgress) return;
       directModuleStabilityWorkInProgress = true;
       try {
@@ -3223,10 +3295,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const profile = {
       scaleBoost: isSingleLayout ? 1.18 : 1.18,
       previewBgSize: isSingleLayout ? "118%" : "118%",
-      contentNudgeX: 0,
+      contentNudgeX: isSingleLayout ? 0.8 : 0.6,
       contentNudgeY: 0,
-      extraPadX: 0,
-      mainScale: 1
+      extraPadX: 1,
+      mainScale: isSingleLayout ? 0.97 : 0.98
     };
     if (!safeId || safeId === "solid") return profile;
     if (safeId.includes("tnz")) {
@@ -3274,7 +3346,16 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
   function getCirclePriceMajorOpticalBiasX(value, options = {}) {
     const digits = String(value == null ? "" : value).replace(/\D+/g, "");
-    if (digits.length <= 1) return 0;
+    if (digits.length <= 1) {
+      const badgeProfile = getPriceBadgeCircleProfile(options?.styleId, !!options?.isSingleLayout);
+      const singleDigitImageBias = !!options?.isImageBadge
+        ? Math.min(
+            2.2,
+            (Number(badgeProfile.contentNudgeX || 0) * 0.6) + (!!options?.isSingleLayout ? 0.65 : 0.45)
+          )
+        : 0;
+      return Number(singleDigitImageBias.toFixed(2));
+    }
     const onesCount = (digits.match(/1/g) || []).length;
     const digitBias = Math.min(1.8, (digits.length - 1) * 0.85);
     const onesBias = Math.min(0.6, onesCount * 0.2);
@@ -3695,6 +3776,29 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         node.setAttr("isCountryBadge", true);
         node.setAttr("isOverlayElement", true);
       }
+      if (kind === "badgeCircle") {
+        node.setAttr("isDirectPriceCircleBg", true);
+        node.setAttr("isOverlayElement", true);
+        node.setAttr("selectable", false);
+        if (typeof node.draggable === "function") node.draggable(false);
+        if (typeof node.listening === "function") node.listening(false);
+      }
+      return;
+    }
+
+    if (node instanceof window.Konva.Circle && kind === "badgeCircle") {
+      node.setAttr("isDirectPriceCircleBg", true);
+      node.setAttr("isOverlayElement", true);
+      node.setAttr("selectable", false);
+      if (typeof node.draggable === "function") node.draggable(false);
+      if (typeof node.listening === "function") node.listening(false);
+      return;
+    }
+
+    if (node instanceof window.Konva.Rect && kind === "badgeRect") {
+      node.setAttr("isDirectPriceRectBg", true);
+      node.setAttr("isOverlayElement", true);
+      node.setAttr("selectable", true);
       return;
     }
 
@@ -3705,6 +3809,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     }
 
     if (node instanceof window.Konva.Group) {
+      if (kind === "badgeCircle") {
+        node.setAttr("isDirectPriceCircleBgContainer", true);
+        node.setAttr("isOverlayElement", true);
+        node.setAttr("selectable", false);
+        if (typeof node.draggable === "function") node.draggable(false);
+        if (typeof node.listening === "function") node.listening(false);
+      }
+      if (kind === "badgeRect") {
+        node.setAttr("isDirectPriceRectBgContainer", true);
+        node.setAttr("isOverlayElement", true);
+      }
       if (kind === "priceGroup") {
         node.setAttr("isPriceGroup", true);
         node.setAttr("isPrice", true);
@@ -3744,6 +3859,169 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         }
       });
     }
+  }
+
+  function syncSnapshotDirectPriceBadgeMeta(nodes, context, page) {
+    if (!Array.isArray(nodes) || !nodes.length || !window.Konva) return;
+    const catalogEntry = context?.catalogEntry && typeof context.catalogEntry === "object" ? context.catalogEntry : {};
+    const selectedLayoutStyleId = String(
+      context?.selectedLayoutStyleId ||
+      catalogEntry?.MODULE_LAYOUT_STYLE_ID ||
+      customModuleLayoutStyleId ||
+      "default"
+    ).trim() || "default";
+    const priceBadgeStyleId = String(
+      catalogEntry?.PRICE_BG_STYLE_ID ||
+      customPriceBadgeStyleId ||
+      "solid"
+    ).trim() || "solid";
+    const isElegantDefault = isElegantDefaultStyle(selectedLayoutStyleId);
+    const topLevelNodes = nodes.filter(Boolean);
+    const allNodes = [];
+    topLevelNodes.forEach((node) => {
+      if (!node) return;
+      allNodes.push(node);
+      if (typeof node.find === "function") {
+        const descendants = node.find(() => true);
+        (Array.isArray(descendants) ? descendants : []).forEach((child) => {
+          if (child) allNodes.push(child);
+        });
+      }
+    });
+    const priceGroups = topLevelNodes.filter((node) =>
+      node instanceof window.Konva.Group &&
+      node.getAttr &&
+      node.getAttr("isPriceGroup")
+    );
+
+    priceGroups.forEach((priceGroup) => {
+      const parent = priceGroup.getParent ? priceGroup.getParent() : null;
+      const circleBg = allNodes.find((node) =>
+        node &&
+        node !== priceGroup &&
+        node.getAttr &&
+        (node.getAttr("isDirectPriceCircleBgContainer") || node.getAttr("isDirectPriceCircleBg"))
+      ) || null;
+      const rectBg = allNodes.find((node) =>
+        node &&
+        node !== priceGroup &&
+        node.getAttr &&
+        (node.getAttr("isDirectPriceRectBgContainer") || node.getAttr("isDirectPriceRectBg"))
+      ) || null;
+      const main = priceGroup.findOne?.((node) => node && node.getAttr && node.getAttr("pricePart") === "main");
+
+      priceGroup.setAttr("isDirectSinglePriceLayout", true);
+      priceGroup.setAttr("priceBadgeStyleId", priceBadgeStyleId);
+      priceGroup.setAttr("isImagePriceBadge", !!circleBg && priceBadgeStyleId !== "solid");
+      priceGroup.setAttr("priceTextAlign", normalizeAlignOption(priceGroup.getAttr?.("priceTextAlign") || "left", "left"));
+      priceGroup.setAttr("priceNoOpticalShift", !!isElegantDefault);
+      if (isElegantDefault) {
+        priceGroup.setAttr("isElegantDefaultPriceLayout", true);
+      }
+
+      if (circleBg && typeof circleBg.getClientRect === "function") {
+        const circleRect = circleBg.getClientRect({ relativeTo: parent || page?.layer });
+        const circleSize = Math.max(1, Number(circleRect?.width || 0), Number(circleRect?.height || 0));
+        const localX = Number(circleRect?.x || 0) - Number(priceGroup.x?.() || 0);
+        const localY = Number(circleRect?.y || 0) - Number(priceGroup.y?.() || 0);
+        priceGroup.setAttr("priceCircleSize", Number(circleSize.toFixed(2)));
+        priceGroup.setAttr("priceCircleLocalX", Number(localX.toFixed(2)));
+        priceGroup.setAttr("priceCircleLocalY", Number(localY.toFixed(2)));
+        priceGroup.setAttr("priceTextOffsetAbsolute", false);
+        priceGroup.setAttr("priceTextOffsetX", 0);
+        if (main && typeof main.y === "function") {
+          priceGroup.setAttr("priceTextOffsetY", Number((Number(main.y() || 0)).toFixed(2)));
+        }
+      } else if (rectBg && typeof rectBg.getClientRect === "function") {
+        const rect = rectBg.getClientRect({ relativeTo: parent || page?.layer });
+        priceGroup.setAttr("priceShapeRoundedRect", true);
+        priceGroup.setAttr("priceBgOffsetX", Number((Number(rect?.x || 0) - Number(priceGroup.x?.() || 0)).toFixed(2)));
+        priceGroup.setAttr("priceBgOffsetY", Number((Number(rect?.y || 0) - Number(priceGroup.y?.() || 0)).toFixed(2)));
+        priceGroup.setAttr("priceBgWidth", Number((Number(rect?.width || 0)).toFixed(2)));
+        priceGroup.setAttr("priceBgHeight", Number((Number(rect?.height || 0)).toFixed(2)));
+        priceGroup.setAttr("priceCircleSize", Number((Math.max(1, Number(rect?.width || 0))).toFixed(2)));
+      }
+
+      bindDirectPriceGroupEditor(priceGroup, page);
+    });
+  }
+
+  function refreshDirectPriceBadgeLayoutOnPage(page) {
+    if (!page?.layer || !window.Konva) return 0;
+    const layer = page.layer;
+    const priceGroups = layer.find((node) =>
+      node instanceof window.Konva.Group &&
+      node.getAttr &&
+      node.getAttr("isPriceGroup") &&
+      String(node.getAttr("directModuleId") || "").trim()
+    );
+    let refreshed = 0;
+
+    (Array.isArray(priceGroups) ? priceGroups : []).forEach((priceGroup) => {
+      const directModuleId = String(priceGroup.getAttr?.("directModuleId") || "").trim();
+      if (!directModuleId) return;
+      const slotIndex = readDirectSlotAttrIndex(priceGroup, "slotIndex");
+      const productEntry = Number.isFinite(slotIndex) && Array.isArray(page.products)
+        ? page.products[slotIndex]
+        : null;
+      const selectedLayoutStyleId = String(
+        productEntry?.MODULE_LAYOUT_STYLE_ID ||
+        customModuleLayoutStyleId ||
+        "default"
+      ).trim() || "default";
+      const priceBadgeStyleId = String(
+        productEntry?.PRICE_BG_STYLE_ID ||
+        priceGroup.getAttr?.("priceBadgeStyleId") ||
+        customPriceBadgeStyleId ||
+        "solid"
+      ).trim() || "solid";
+      const parent = priceGroup.getParent ? priceGroup.getParent() : null;
+      const circleBg = findDirectPriceBadgeNode(layer, parent, directModuleId, slotIndex, "circle");
+      const rectBg = findDirectPriceBadgeNode(layer, parent, directModuleId, slotIndex, "rect");
+      const main = priceGroup.findOne?.((node) => node && node.getAttr && node.getAttr("pricePart") === "main");
+      const isElegantDefault = isElegantDefaultStyle(selectedLayoutStyleId);
+
+      if (circleBg) priceGroup.setAttr("isDirectSinglePriceLayout", true);
+      priceGroup.setAttr("priceBadgeStyleId", priceBadgeStyleId);
+      priceGroup.setAttr("isImagePriceBadge", !!circleBg && priceBadgeStyleId !== "solid");
+      priceGroup.setAttr("priceTextAlign", normalizeAlignOption(priceGroup.getAttr?.("priceTextAlign") || "left", "left"));
+      priceGroup.setAttr("priceNoOpticalShift", !!isElegantDefault);
+      if (isElegantDefault) {
+        priceGroup.setAttr("isElegantDefaultPriceLayout", true);
+      }
+
+      if (circleBg && typeof circleBg.getClientRect === "function") {
+        const circleRect = circleBg.getClientRect({ relativeTo: parent || layer });
+        const circleSize = Math.max(1, Number(circleRect?.width || 0), Number(circleRect?.height || 0));
+        const localX = Number(circleRect?.x || 0) - Number(priceGroup.x?.() || 0);
+        const localY = Number(circleRect?.y || 0) - Number(priceGroup.y?.() || 0);
+        priceGroup.setAttr("priceCircleSize", Number(circleSize.toFixed(2)));
+        priceGroup.setAttr("priceCircleLocalX", Number(localX.toFixed(2)));
+        priceGroup.setAttr("priceCircleLocalY", Number(localY.toFixed(2)));
+        if (!priceGroup.getAttr?.("priceTextOffsetAbsolute")) {
+          priceGroup.setAttr("priceTextOffsetX", 0);
+          if (main && typeof main.y === "function") {
+            priceGroup.setAttr("priceTextOffsetY", Number((Number(main.y() || 0)).toFixed(2)));
+          }
+        }
+      } else if (rectBg && typeof rectBg.getClientRect === "function") {
+        const rect = rectBg.getClientRect({ relativeTo: parent || layer });
+        priceGroup.setAttr("priceShapeRoundedRect", true);
+        priceGroup.setAttr("priceBgOffsetX", Number((Number(rect?.x || 0) - Number(priceGroup.x?.() || 0)).toFixed(2)));
+        priceGroup.setAttr("priceBgOffsetY", Number((Number(rect?.y || 0) - Number(priceGroup.y?.() || 0)).toFixed(2)));
+        priceGroup.setAttr("priceBgWidth", Number((Number(rect?.width || 0)).toFixed(2)));
+        priceGroup.setAttr("priceBgHeight", Number((Number(rect?.height || 0)).toFixed(2)));
+      }
+
+      bindDirectPriceGroupEditor(priceGroup, page);
+      refreshed += 1;
+    });
+
+    if (refreshed) {
+      layer.batchDraw?.();
+      page.transformerLayer?.batchDraw?.();
+    }
+    return refreshed;
   }
 
   async function createDirectModuleNodesFromEditorSnapshot(page, snapshot, context) {
@@ -3786,6 +4064,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       createdNodes.push(node);
     });
 
+    syncSnapshotDirectPriceBadgeMeta(createdNodes, context, page);
+
     try { root.destroy(); } catch (_err) {}
     return createdNodes;
   }
@@ -3819,6 +4099,59 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     node.scaleY(nextSY);
     node.x(cx - (rawW * nextSX) / 2);
     node.y(cy - (rawH * nextSY) / 2);
+  }
+
+  function layoutDirectPriceCircleBgNode(node, x, y, diameter, options = {}) {
+    if (!node || !window.Konva) return;
+    const safeDiameter = Math.max(1, Number(diameter || 0) || 1);
+    const scaleBoost = Math.max(0.5, Number(options.scaleBoost || 1) || 1);
+    if (node instanceof window.Konva.Group) {
+      const parent = node.getParent ? node.getParent() : null;
+      const beforeRect = typeof node.getClientRect === "function"
+        ? node.getClientRect({ relativeTo: parent || node.getLayer?.() })
+        : null;
+      const currentSize = Math.max(1, Number(beforeRect?.width || 0), Number(beforeRect?.height || 0));
+      const factor = safeDiameter / currentSize;
+      if (Number.isFinite(factor) && factor > 0 && Math.abs(factor - 1) > 0.001) {
+        node.scaleX((Number(node.scaleX?.() || 1) || 1) * factor);
+        node.scaleY((Number(node.scaleY?.() || 1) || 1) * factor);
+      }
+      const afterRect = typeof node.getClientRect === "function"
+        ? node.getClientRect({ relativeTo: parent || node.getLayer?.() })
+        : beforeRect;
+      const targetCenterX = Number(x) + (safeDiameter / 2);
+      const targetCenterY = Number(y) + (safeDiameter / 2);
+      const currentCenterX = Number(afterRect?.x || 0) + (Number(afterRect?.width || 0) / 2);
+      const currentCenterY = Number(afterRect?.y || 0) + (Number(afterRect?.height || 0) / 2);
+      const dx = targetCenterX - currentCenterX;
+      const dy = targetCenterY - currentCenterY;
+      if (typeof node.x === "function") node.x(Number((Number(node.x?.() || 0) + dx).toFixed(2)));
+      if (typeof node.y === "function") node.y(Number((Number(node.y?.() || 0) + dy).toFixed(2)));
+      return;
+    }
+    if (node instanceof window.Konva.Image) {
+      layoutImageNodeContain(node, x, y, safeDiameter, safeDiameter);
+      if (Math.abs(scaleBoost - 1) > 0.001) {
+        scaleNodeAroundCenter(node, scaleBoost);
+      }
+      return;
+    }
+    if (node instanceof window.Konva.Circle) {
+      const radius = safeDiameter / 2;
+      if (typeof node.radius === "function") node.radius(radius);
+      if (typeof node.x === "function") node.x(Number((x + radius).toFixed(2)));
+      if (typeof node.y === "function") node.y(Number((y + radius).toFixed(2)));
+      return;
+    }
+    if (node instanceof window.Konva.Rect) {
+      if (typeof node.x === "function") node.x(Number(x.toFixed(2)));
+      if (typeof node.y === "function") node.y(Number(y.toFixed(2)));
+      if (typeof node.width === "function") node.width(safeDiameter);
+      if (typeof node.height === "function") node.height(safeDiameter);
+      return;
+    }
+    if (typeof node.x === "function") node.x(Number(x.toFixed(2)));
+    if (typeof node.y === "function") node.y(Number(y.toFixed(2)));
   }
 
   function bindDirectPriceRectEditor(priceRect, page) {
@@ -3901,28 +4234,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const parentGroup = priceGroup.getParent ? priceGroup.getParent() : null;
     const directModuleId = String(priceGroup.getAttr?.("directModuleId") || "");
     const slotIndex = readDirectSlotAttrIndex(priceGroup, "slotIndex");
-    const rectBgSibling = layer && typeof layer.findOne === "function"
-      ? layer.findOne((n) => {
-          if (!n || !n.getAttr) return false;
-          if (!n.getAttr("isDirectPriceRectBg")) return false;
-          if (n === priceGroup) return false;
-          if (n.getParent && n.getParent() !== parentGroup) return false;
-          if (String(n.getAttr("directModuleId") || "") !== directModuleId) return false;
-          if (readDirectSlotAttrIndex(n, "slotIndex") !== slotIndex) return false;
-          return true;
-        })
-      : null;
-    const circleBg = layer && typeof layer.findOne === "function"
-      ? layer.findOne((n) => {
-          if (!n || !n.getAttr) return false;
-          if (!n.getAttr("isDirectPriceCircleBg")) return false;
-          if (n === priceGroup) return false;
-          if (n.getParent && n.getParent() !== parentGroup) return false;
-          if (String(n.getAttr("directModuleId") || "") !== directModuleId) return false;
-          if (readDirectSlotAttrIndex(n, "slotIndex") !== slotIndex) return false;
-          return true;
-        })
-      : null;
+    const rectBgSibling = findDirectPriceBadgeNode(layer, parentGroup, directModuleId, slotIndex, "rect");
+    const circleBg = findDirectPriceBadgeNode(layer, parentGroup, directModuleId, slotIndex, "circle");
     const rectBgChild = children.find((n) => n && n.getAttr && n.getAttr("isDirectPriceRectBg"));
     let rectBg = rectBgSibling || rectBgChild || null;
     if (!rectBg && layer && parentGroup && typeof layer.find === "function" && typeof parentGroup.getChildren === "function") {
@@ -4169,10 +4482,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         if (circleBg) {
           const bgX = Number(((priceGroup.x?.() || 0) + nextCircleLocalX).toFixed(2));
           const bgY = Number(((priceGroup.y?.() || 0) + nextCircleLocalY).toFixed(2));
-          layoutImageNodeContain(circleBg, bgX, bgY, circleMetrics.diameter, circleMetrics.diameter);
-          if (isImageBadge) {
-            scaleNodeAroundCenter(circleBg, getImageBadgeCircleScaleBoost(priceBadgeStyleId, isDirectSingle));
-          }
+          layoutDirectPriceCircleBgNode(circleBg, bgX, bgY, circleMetrics.diameter, {
+            scaleBoost: isImageBadge ? getImageBadgeCircleScaleBoost(priceBadgeStyleId, isDirectSingle) : 1
+          });
         }
       }
       updateHitArea();
@@ -4340,6 +4652,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         y,
         moduleW,
         moduleH,
+        selectedLayoutStyleId,
         catalogEntry,
         imageUrl: String(options.effectiveImageUrl || imageUrls[0] || "").trim()
       });
@@ -9541,6 +9854,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   window.CustomStyleDirectHooks = Object.assign({}, window.CustomStyleDirectHooks || {}, {
     applyImageFillToShapeNode,
     bindDirectPriceGroupEditor,
+    refreshDirectPriceBadgeLayoutOnPage,
     restoreDirectModuleNodeSelectabilityOnPage,
     rebuildDirectModuleLayoutsOnPage
   });

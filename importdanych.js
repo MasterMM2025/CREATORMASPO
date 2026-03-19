@@ -985,11 +985,30 @@ function isDirectModuleEditableTextNode(node) {
 }
 window.isDirectModuleEditableTextNode = isDirectModuleEditableTextNode;
 
+function findUserGroupAncestor(node) {
+    let current = node;
+    while (current && current.getParent) {
+        const parent = current.getParent();
+        if (!(parent instanceof Konva.Group)) break;
+        if (parent.getAttr && parent.getAttr("isUserGroup")) return parent;
+        current = parent;
+    }
+    return null;
+}
+
+function isGroupedCropCapableImageNode(node) {
+    return !!(
+        node instanceof Konva.Image &&
+        isCropCapableImageNode(node) &&
+        findUserGroupAncestor(node)
+    );
+}
+
 function normalizeSelection(nodes) {
     if (!Array.isArray(nodes)) return [];
 
     const toGroupRoot = (node) => {
-        if (isDirectModuleEditableTextNode(node)) return node;
+        if (isDirectModuleEditableTextNode(node) || isGroupedCropCapableImageNode(node)) return node;
         let current = node;
         let lockedToPriceGroup = false;
         while (
@@ -1409,14 +1428,10 @@ const TRANSFORMER_ANCHORS_CROP = [
 
 function isCropAnchorName(anchor) {
     return (
-        anchor === 'top-left' ||
         anchor === 'middle-left' ||
-        anchor === 'top-right' ||
         anchor === 'middle-right' ||
         anchor === 'top-center' ||
-        anchor === 'bottom-left' ||
-        anchor === 'bottom-center' ||
-        anchor === 'bottom-right'
+        anchor === 'bottom-center'
     );
 }
 
@@ -1868,7 +1883,11 @@ function enableCropMode(page, img) {
         const s = img._cropState;
         // Po zakończeniu wracamy do proporcjonalnego skalowania narożnikami.
         page.transformer.keepRatio(true);
-        if (!s || !s.isCropping) return;
+        if (!s) return;
+        if (!s.isCropping) {
+            img._cropState = null;
+            return;
+        }
         if (img._cropVisualSyncRaf) {
             cancelAnimationFrame(img._cropVisualSyncRaf);
             img._cropVisualSyncRaf = 0;
@@ -5682,6 +5701,7 @@ stage.on('mousedown.userGroupDrag touchstart.userGroupDrag', (e) => {
     if (window.isEditingText) return;
     if (e.evt && e.evt.shiftKey) return;
     document.activeStage = stage;
+    page._selectionBeforePointerDown = Array.isArray(page.selectedNodes) ? page.selectedNodes.slice() : [];
 
     if (typeof window.isDirectModuleEditableTextNode === "function" && window.isDirectModuleEditableTextNode(e.target)) {
         return;
@@ -8017,6 +8037,9 @@ stage.on("mousedown.pickSmallest", (e) => {
     if (!page) return;
 
     const rawTarget = e && e.target ? e.target : null;
+    if (!findUserGroupAncestor(rawTarget)) {
+        page._selectionBeforePointerDown = Array.isArray(page.selectedNodes) ? page.selectedNodes.slice() : [];
+    }
     if (rawTarget && rawTarget.getAttr) {
         if (rawTarget.getAttr("isDirectPriceRectBg")) {
             page._priorityClickTarget = rawTarget;
@@ -8128,9 +8151,14 @@ stage.on("click tap", (e) => {
     document.activeStage = stage;
 
     const rawTarget = e.target;
+    const pointerDownSelection = Array.isArray(page._selectionBeforePointerDown)
+        ? page._selectionBeforePointerDown.slice()
+        : (Array.isArray(page.selectedNodes) ? page.selectedNodes.slice() : []);
+    page._selectionBeforePointerDown = null;
     const rawTargetIsDirectEditableText =
         typeof window.isDirectModuleEditableTextNode === "function" &&
         window.isDirectModuleEditableTextNode(rawTarget);
+    const rawTargetIsGroupedCropImage = isGroupedCropCapableImageNode(rawTarget);
     const isPriceLikeNode = (n) => !!(n && n.getAttr && (n.getAttr("isPriceGroup") || n.getAttr("isDirectPriceRectBg")));
     const getUserGroupAncestor = (n) => {
         let cur = n;
@@ -8292,7 +8320,7 @@ stage.on("click tap", (e) => {
         return;
     }
 
-	    const previousSelection = normalizeSelection(Array.isArray(page.selectedNodes) ? page.selectedNodes.slice() : []);
+	    const previousSelection = normalizeSelection(pointerDownSelection);
 	    const wasSelected =
 	        previousSelection.includes(rawTarget) ||
 	        (rawTarget && rawTarget.getParent && previousSelection.includes(rawTarget.getParent()));
@@ -8303,6 +8331,17 @@ stage.on("click tap", (e) => {
 	            (rawTarget && rawTarget.getParent && previousSelection[0] === rawTarget.getParent())
 	        )
 	    );
+    const rawTargetGroupAncestor = rawTargetIsGroupedCropImage ? getUserGroupAncestor(rawTarget) : null;
+    const wasGroupAncestorSelectedBeforeClick = !!(
+        rawTargetGroupAncestor &&
+        previousSelection.length === 1 &&
+        previousSelection[0] === rawTargetGroupAncestor
+    );
+    const shouldPreferDirectGroupedImageSelection = !!(
+        rawTargetIsGroupedCropImage &&
+        !e.evt.shiftKey &&
+        (wasSingleSelectedBeforeClick || wasGroupAncestorSelectedBeforeClick)
+    );
 
     const canInlineEdit =
         rawTarget instanceof Konva.Text &&
@@ -8331,6 +8370,8 @@ stage.on("click tap", (e) => {
         }
         if (forcedDirectPriceTarget && isSelectableTarget(forcedDirectPriceTarget)) {
             page.selectedNodes = [forcedDirectPriceTarget];
+        } else if (shouldPreferDirectGroupedImageSelection) {
+            page.selectedNodes = [rawTarget];
         } else {
             const isDirectCropImage = !!(
                 autoTarget instanceof Konva.Image &&
@@ -8359,7 +8400,7 @@ stage.on("click tap", (e) => {
     const cropSelectionActive = !!(selectedImage && page._cropMode && page._cropTarget === selectedImage);
 	    const shouldEnterCropOnSecondClick = !!(
 	        selectedImage &&
-	        wasSingleSelectedBeforeClick &&
+	        (wasSingleSelectedBeforeClick || wasGroupAncestorSelectedBeforeClick) &&
 	        !e.evt.shiftKey &&
 	        rawTarget === selectedImage &&
 	        !cropSelectionActive &&
