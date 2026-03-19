@@ -193,6 +193,9 @@
         max-width: 100%;
         max-height: 100%;
         object-fit: contain;
+        pointer-events: none;
+        user-select: none;
+        -webkit-user-drag: none;
       }
       #${TRAY_ID} .custom-style-draft-tray__thumb-empty {
         font-size: 9px;
@@ -295,7 +298,7 @@
       if (familyThumbs.length > 1) {
         const cells = familyThumbs.map((src) => `
           <div class="custom-style-draft-tray__thumb-cell">
-            <img src="${escapeHtml(src)}" alt="">
+            <img src="${escapeHtml(src)}" alt="" draggable="false">
           </div>
         `).join("");
         return `
@@ -307,7 +310,7 @@
       const singleThumb = familyThumbs[0] || String(draft?.previewImageUrl || "").trim();
       return `
         <div class="custom-style-draft-tray__thumb">
-          ${singleThumb ? `<img src="${escapeHtml(singleThumb)}" alt="">` : `<span class="custom-style-draft-tray__thumb-empty">brak</span>`}
+          ${singleThumb ? `<img src="${escapeHtml(singleThumb)}" alt="" draggable="false">` : `<span class="custom-style-draft-tray__thumb-empty">brak</span>`}
         </div>
       `;
     };
@@ -328,6 +331,13 @@
     }).join("");
 
     list.querySelectorAll("[data-draft-id]").forEach((item) => {
+      item.querySelectorAll("img").forEach((img) => {
+        img.setAttribute("draggable", "false");
+        img.addEventListener("dragstart", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        });
+      });
       item.addEventListener("dragstart", (e) => {
         dragDraftId = String(item.getAttribute("data-draft-id") || "");
         item.style.opacity = "0.55";
