@@ -1595,6 +1595,60 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return plain || raw.replace(/\s+/g, "");
   }
 
+  function getImportIndexLookupKeys(value) {
+    const raw = readExcelCellAsText(value);
+    if (!raw) return [];
+    const compact = raw.replace(/\s+/g, "");
+    const normalized = normalizeImportIndex(raw);
+    const numericLike = compact.replace(",", ".");
+    const isPlainNumericLike = /^\d+(?:\.\d+)?$/.test(numericLike);
+    const out = new Set();
+
+    const add = (candidate) => {
+      const text = String(candidate || "").trim();
+      if (!text) return;
+      out.add(text);
+      if (/^\d+$/.test(text)) {
+        const withoutLeadingZeros = text.replace(/^0+(?=\d)/, "");
+        if (withoutLeadingZeros) out.add(withoutLeadingZeros);
+      }
+    };
+
+    add(compact);
+    if (!isPlainNumericLike) add(normalized);
+
+    if (isPlainNumericLike) {
+      const numericValue = Number(numericLike);
+      if (Number.isFinite(numericValue)) {
+        const numericText = Number.isInteger(numericValue)
+          ? String(Math.trunc(numericValue))
+          : String(numericValue).replace(/\.0+$/, "");
+        add(numericText);
+      }
+    }
+
+    const integerDecimalMatch = compact.match(/^0*(\d+)[.,]0+$/);
+    if (integerDecimalMatch && integerDecimalMatch[1]) add(integerDecimalMatch[1]);
+
+    return Array.from(out);
+  }
+
+  function getMappedValueByImportIndex(map, value) {
+    if (!(map instanceof Map)) return "";
+    const keys = getImportIndexLookupKeys(value);
+    for (const key of keys) {
+      if (map.has(key)) return map.get(key) || "";
+    }
+    return "";
+  }
+
+  function setMappedValueByImportIndex(map, value, mappedValue) {
+    if (!(map instanceof Map)) return;
+    getImportIndexLookupKeys(value).forEach((key) => {
+      if (key) map.set(key, mappedValue);
+    });
+  }
+
   function readFileAsDataUrl(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -1609,8 +1663,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (!base) return [];
     const out = new Set();
     const add = (v) => {
-      const key = normalizeImportIndex(v);
-      if (key) out.add(key);
+      getImportIndexLookupKeys(v).forEach((key) => {
+        if (key) out.add(key);
+      });
     };
     add(base);
     const firstToken = base.split(/[\s_\-;|,]+/).find(Boolean);
@@ -3044,7 +3099,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       priceArea: {
         x: n(single?.priceArea?.x, 3.5),
         y: n(single?.priceArea?.y, 57),
-        s: n(single?.priceArea?.s, hasImagePriceBadge ? 27.5 : 24),
+        s: n(single?.priceArea?.s, hasImagePriceBadge ? 22 : 24),
         w: n(single?.priceArea?.w, 0),
         h: n(single?.priceArea?.h, 0),
         r: n(single?.priceArea?.r, 0)
@@ -3144,6 +3199,227 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (Number.isFinite(measuredH) && measuredH > 0 && typeof node.height === "function") {
       node.height(Math.max(minHeight, Math.ceil(measuredH + strokePad + Math.min(2, extraPad))));
     }
+  }
+
+  function getCirclePriceOpticalCenterX(parts = []) {
+    const validParts = Array.isArray(parts)
+      ? parts.filter((part) => part && Number.isFinite(Number(part.x)) && Number.isFinite(Number(part.width)) && Number(part.width) > 0)
+      : [];
+    if (!validParts.length) return 0;
+    const totalWeight = validParts.reduce((sum, part) => sum + Math.max(0.1, Number(part.weight) || 0), 0);
+    if (!(totalWeight > 0)) {
+      const left = Math.min(...validParts.map((part) => Number(part.x)));
+      const right = Math.max(...validParts.map((part) => Number(part.x) + Number(part.width)));
+      return (left + right) / 2;
+    }
+    return validParts.reduce((sum, part) => {
+      const center = Number(part.x) + (Number(part.width) / 2);
+      return sum + (center * Math.max(0.1, Number(part.weight) || 0));
+    }, 0) / totalWeight;
+  }
+
+  function getPriceBadgeCircleProfile(styleId, isSingleLayout = false) {
+    const safeId = String(styleId || "").trim().toLowerCase();
+    const profile = {
+      scaleBoost: isSingleLayout ? 1.18 : 1.18,
+      previewBgSize: isSingleLayout ? "118%" : "118%",
+      contentNudgeX: 0,
+      contentNudgeY: 0,
+      extraPadX: 0,
+      mainScale: 1
+    };
+    if (!safeId || safeId === "solid") return profile;
+    if (safeId.includes("tnz")) {
+      return {
+        scaleBoost: isSingleLayout ? 1.22 : 1.20,
+        previewBgSize: isSingleLayout ? "122%" : "120%",
+        contentNudgeX: isSingleLayout ? 1.8 : 1.2,
+        contentNudgeY: isSingleLayout ? 0.2 : 0,
+        extraPadX: 3,
+        mainScale: isSingleLayout ? 0.94 : 0.96
+      };
+    }
+    if (safeId.includes("granatowe") && safeId.includes("bez-ramki")) {
+      return {
+        scaleBoost: isSingleLayout ? 1.24 : 1.26,
+        previewBgSize: isSingleLayout ? "124%" : "126%",
+        contentNudgeX: isSingleLayout ? 1.4 : 1,
+        contentNudgeY: 0,
+        extraPadX: 2,
+        mainScale: isSingleLayout ? 0.96 : 0.98
+      };
+    }
+    if (safeId.includes("granatowe")) {
+      return {
+        scaleBoost: isSingleLayout ? 1.22 : 1.24,
+        previewBgSize: isSingleLayout ? "122%" : "124%",
+        contentNudgeX: isSingleLayout ? 1.2 : 0.8,
+        contentNudgeY: 0,
+        extraPadX: 2,
+        mainScale: isSingleLayout ? 0.96 : 0.98
+      };
+    }
+    if (safeId.includes("badge")) {
+      return {
+        scaleBoost: isSingleLayout ? 1.16 : 1.18,
+        previewBgSize: isSingleLayout ? "116%" : "118%",
+        contentNudgeX: 0.8,
+        contentNudgeY: 0,
+        extraPadX: 1,
+        mainScale: 0.96
+      };
+    }
+    return profile;
+  }
+
+  function getCirclePriceMajorOpticalBiasX(value, options = {}) {
+    const digits = String(value == null ? "" : value).replace(/\D+/g, "");
+    if (digits.length <= 1) return 0;
+    const onesCount = (digits.match(/1/g) || []).length;
+    const digitBias = Math.min(1.8, (digits.length - 1) * 0.85);
+    const onesBias = Math.min(0.6, onesCount * 0.2);
+    const tripleDigitBias = digits.length >= 3 ? 0.45 : 0;
+    const onesHeavyBias = digits.length >= 3 && onesCount >= 2 ? Math.min(0.65, 0.35 + (onesCount - 2) * 0.3) : 0;
+    const leftSpaceBias = digits.length >= 3 ? 1.0 : 0.9;
+    const badgeProfile = getPriceBadgeCircleProfile(options?.styleId, !!options?.isSingleLayout);
+    const styleBias = !!options?.isImageBadge ? Number(badgeProfile.contentNudgeX || 0) : 0;
+    return Number(Math.min(7.2, digitBias + onesBias + tripleDigitBias + onesHeavyBias + leftSpaceBias + styleBias).toFixed(2));
+  }
+
+  function getCirclePriceBadgePadX(baseDiameter, isImageBadge, majorText, styleId = "", isSingleLayout = false) {
+    const base = Math.max(1, Number(baseDiameter || 0) || 0);
+    const digits = String(majorText == null ? "" : majorText).replace(/\D+/g, "");
+    const digitCount = digits.length;
+    if (!isImageBadge) return Math.max(5, Math.round(base * 0.055));
+    const digitBonus = digitCount >= 3 ? 2 : (digitCount >= 2 ? 1 : 0);
+    const badgeProfile = getPriceBadgeCircleProfile(styleId, isSingleLayout);
+    return Math.max(6, Math.round(base * 0.055) + digitBonus + Math.round(Number(badgeProfile.extraPadX || 0)));
+  }
+
+  function getCirclePriceMainScale(majorText, isImageBadge, styleId = "", isSingleLayout = false) {
+    const digits = String(majorText == null ? "" : majorText).replace(/\D+/g, "");
+    if (!isImageBadge) return 1;
+    let scale = 1;
+    if (digits.length >= 4) scale = 0.78;
+    else if (digits.length === 3) scale = 0.84;
+    else if (digits.length === 2) scale = 0.92;
+    const badgeProfile = getPriceBadgeCircleProfile(styleId, isSingleLayout);
+    return Number((scale * Math.max(0.82, Number(badgeProfile.mainScale || 1))).toFixed(3));
+  }
+
+  function getAutoCircleBadgeMetrics(options = {}) {
+    const baseDiameter = Math.max(1, Number(options.baseDiameter || 0) || 0);
+    const contentWidth = Math.max(1, Number(options.contentWidth || 0) || 0);
+    const contentHeight = Math.max(1, Number(options.contentHeight || 0) || 0);
+    const contentLeft = Number(options.contentLeft);
+    const contentRight = Number(options.contentRight);
+    const opticalCenterX = Number(options.opticalCenterX);
+    const isImageBadge = !!options.isImageBadge;
+    const padX = getCirclePriceBadgePadX(
+      baseDiameter,
+      isImageBadge,
+      options.majorText,
+      options.styleId,
+      !!options.isSingleLayout
+    );
+    const padY = Math.max(isImageBadge ? 6 : 5, Math.round(baseDiameter * 0.06));
+    const diameterFromOpticalCenter = Number.isFinite(contentLeft)
+      && Number.isFinite(contentRight)
+      && Number.isFinite(opticalCenterX)
+      ? Math.ceil(Math.max(
+          Math.max(1, opticalCenterX - contentLeft) + padX,
+          Math.max(1, contentRight - opticalCenterX) + padX
+        ) * 2)
+      : 0;
+    const diameter = Math.max(
+      baseDiameter,
+      Math.ceil(contentWidth + padX * 2),
+      Math.ceil(contentHeight + padY * 2),
+      diameterFromOpticalCenter
+    );
+    return {
+      diameter,
+      offsetX: Number.isFinite(opticalCenterX)
+        ? Number(((diameter / 2) - opticalCenterX).toFixed(2))
+        : Math.max(0, Number(((diameter - contentWidth) / 2).toFixed(2))),
+      offsetY: Math.max(0, Number(((diameter - contentHeight) / 2).toFixed(2)))
+    };
+  }
+
+  function applyPreviewAutoCircleBadgeLayout(options = {}) {
+    const priceCircle = options?.priceCircle;
+    const priceRowEl = options?.priceRowEl;
+    if (!(priceCircle instanceof HTMLElement) || !(priceRowEl instanceof HTMLElement)) return null;
+
+    const hostRect = priceCircle.parentElement?.getBoundingClientRect?.();
+    const badgeRect = priceCircle.getBoundingClientRect?.();
+    if (!hostRect || !badgeRect || !(badgeRect.width > 0) || !(badgeRect.height > 0)) return null;
+
+    priceRowEl.style.position = "absolute";
+    priceRowEl.style.left = "0px";
+    priceRowEl.style.top = "0px";
+    priceRowEl.style.width = "auto";
+    priceRowEl.style.maxWidth = "none";
+    priceRowEl.style.padding = "0";
+    priceRowEl.style.transform = "none";
+    priceRowEl.style.justifyContent = "flex-start";
+    priceRowEl.style.gap = `${Math.max(0, Number(options.gapPx) || 0)}px`;
+
+    const rowRect = priceRowEl.getBoundingClientRect?.();
+    if (!rowRect || !(rowRect.width > 0) || !(rowRect.height > 0)) return null;
+    const mainRect = options?.mainEl?.getBoundingClientRect?.();
+    const decRect = options?.decEl?.getBoundingClientRect?.();
+    const unitRect = options?.unitEl?.getBoundingClientRect?.();
+    const badgeProfile = getPriceBadgeCircleProfile(options?.styleId, !!options?.isSingleLayout);
+    const opticalCenterX = getCirclePriceOpticalCenterX([
+      mainRect && rowRect
+        ? { x: mainRect.left - rowRect.left, width: mainRect.width, weight: 1.85 }
+        : null,
+      decRect && rowRect
+        ? { x: decRect.left - rowRect.left, width: decRect.width, weight: 1 }
+        : null,
+      unitRect && rowRect
+        ? { x: unitRect.left - rowRect.left, width: unitRect.width, weight: 0.85 }
+        : null
+    ]);
+    const contentNudgeX = getCirclePriceMajorOpticalBiasX(options?.majorText, {
+      styleId: options?.styleId,
+      isImageBadge: !!options?.isImageBadge,
+      isSingleLayout: !!options?.isSingleLayout
+    });
+
+    const metrics = getAutoCircleBadgeMetrics({
+      baseDiameter: Number(options.baseDiameter || 0),
+      contentWidth: rowRect.width,
+      contentHeight: rowRect.height,
+      contentLeft: 0,
+      contentRight: rowRect.width,
+      opticalCenterX,
+      majorText: options?.majorText,
+      styleId: options?.styleId,
+      isSingleLayout: !!options?.isSingleLayout,
+      isImageBadge: !!options.isImageBadge
+    });
+    const centerX = (badgeRect.left - hostRect.left) + (badgeRect.width / 2);
+    const centerY = (badgeRect.top - hostRect.top) + (badgeRect.height / 2);
+
+    priceCircle.style.width = `${metrics.diameter}px`;
+    priceCircle.style.height = `${metrics.diameter}px`;
+    priceCircle.style.left = `${Number((centerX - (metrics.diameter / 2)).toFixed(2))}px`;
+    priceCircle.style.top = `${Number((centerY - (metrics.diameter / 2)).toFixed(2))}px`;
+    priceCircle.style.borderRadius = "50%";
+
+    priceRowEl.style.left = `${Number((metrics.offsetX + contentNudgeX).toFixed(2))}px`;
+    priceRowEl.style.top = `${Number((metrics.offsetY + Number(badgeProfile.contentNudgeY || 0)).toFixed(2))}px`;
+    return metrics;
+  }
+
+  function getImageBadgeCircleScaleBoost(styleId, isSingleLayout = false) {
+    return getPriceBadgeCircleProfile(styleId, isSingleLayout).scaleBoost;
+  }
+
+  function getPreviewImageBadgeCircleBackgroundSize(styleId, isSingleLayout = false) {
+    return getPriceBadgeCircleProfile(styleId, isSingleLayout).previewBgSize;
   }
 
   function generateBarcodeDataUrl(ean) {
@@ -3636,6 +3912,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           return true;
         })
       : null;
+    const circleBg = layer && typeof layer.findOne === "function"
+      ? layer.findOne((n) => {
+          if (!n || !n.getAttr) return false;
+          if (!n.getAttr("isDirectPriceCircleBg")) return false;
+          if (n === priceGroup) return false;
+          if (n.getParent && n.getParent() !== parentGroup) return false;
+          if (String(n.getAttr("directModuleId") || "") !== directModuleId) return false;
+          if (readDirectSlotAttrIndex(n, "slotIndex") !== slotIndex) return false;
+          return true;
+        })
+      : null;
     const rectBgChild = children.find((n) => n && n.getAttr && n.getAttr("isDirectPriceRectBg"));
     let rectBg = rectBgSibling || rectBgChild || null;
     if (!rectBg && layer && parentGroup && typeof layer.find === "function" && typeof parentGroup.getChildren === "function") {
@@ -3749,6 +4036,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const alignMode = normalizeAlignOption(priceGroup.getAttr?.("priceTextAlign") || "left", "left");
       const circleSize = Number(priceGroup.getAttr?.("priceCircleSize"));
       const circleLocalX = Number(priceGroup.getAttr?.("priceCircleLocalX"));
+      const circleLocalYAttr = Number(priceGroup.getAttr?.("priceCircleLocalY"));
       const isDirectSingle = !!priceGroup.getAttr?.("isDirectSinglePriceLayout");
       const isImageBadge = !!priceGroup.getAttr?.("isImagePriceBadge");
       const isElegantDefault = !!priceGroup.getAttr?.("isElegantDefaultPriceLayout");
@@ -3816,6 +4104,76 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           Math.ceil((measured?.width || 0) + (isDirectSingle ? (noPriceCircleDirect ? 12 : (isRoundedRect ? 8 : 10)) : 6))
         );
         unit.width(targetW);
+      }
+      if (!noPriceCircleDirect && !isRoundedRect && Number.isFinite(circleSize) && Number.isFinite(circleLocalX)) {
+        const circleLocalY = Number.isFinite(circleLocalYAttr)
+          ? circleLocalYAttr
+          : -Math.round(circleSize * (isDirectSingle ? 0.235 : 0.26));
+        const clusterLeft = Math.min(
+          Number(main.x?.() || 0),
+          Number(dec.x?.() || 0),
+          Number(unit.x?.() || 0)
+        );
+        const clusterTop = Math.min(
+          Number(main.y?.() || 0),
+          Number(dec.y?.() || 0),
+          Number(unit.y?.() || 0)
+        );
+        const clusterRight = Math.max(
+          Number(main.x?.() || 0) + Number(main.width?.() || 0),
+          Number(dec.x?.() || 0) + Number(dec.width?.() || 0),
+          Number(unit.x?.() || 0) + Number(unit.width?.() || unitMeasuredW || 0)
+        );
+        const clusterBottom = Math.max(
+          Number(main.y?.() || 0) + Number(main.height?.() || 0),
+          Number(dec.y?.() || 0) + Number(dec.height?.() || 0),
+          Number(unit.y?.() || 0) + Number(unit.height?.() || 0)
+        );
+        const badgeProfile = getPriceBadgeCircleProfile(priceBadgeStyleId, isDirectSingle);
+        const opticalCenterX = getCirclePriceOpticalCenterX([
+          { x: Number(main.x?.() || 0), width: Number(main.width?.() || 0), weight: 1.85 },
+          { x: Number(dec.x?.() || 0), width: Number(dec.width?.() || 0), weight: 1 },
+          { x: Number(unit.x?.() || 0), width: Number(unit.width?.() || unitMeasuredW || 0), weight: 0.85 }
+        ]);
+        const contentNudgeX = getCirclePriceMajorOpticalBiasX(main.text?.(), {
+          styleId: priceBadgeStyleId,
+          isImageBadge,
+          isSingleLayout: isDirectSingle
+        });
+        const circleMetrics = getAutoCircleBadgeMetrics({
+          baseDiameter: circleSize,
+          contentWidth: Math.max(1, clusterRight - clusterLeft),
+          contentHeight: Math.max(1, clusterBottom - clusterTop),
+          contentLeft: clusterLeft,
+          contentRight: clusterRight,
+          opticalCenterX,
+          majorText: main.text?.(),
+          styleId: priceBadgeStyleId,
+          isSingleLayout: isDirectSingle,
+          isImageBadge
+        });
+        const diameterDelta = circleMetrics.diameter - circleSize;
+        const nextCircleLocalX = circleLocalX - (diameterDelta / 2);
+        const nextCircleLocalY = circleLocalY - (diameterDelta / 2);
+        const shiftX = (nextCircleLocalX + (circleMetrics.diameter / 2)) - opticalCenterX + contentNudgeX;
+        const shiftY = (nextCircleLocalY + circleMetrics.offsetY + Number(badgeProfile.contentNudgeY || 0)) - clusterTop;
+        main.x(Number((Number(main.x?.() || 0) + shiftX).toFixed(2)));
+        dec.x(Number((Number(dec.x?.() || 0) + shiftX).toFixed(2)));
+        unit.x(Number((Number(unit.x?.() || 0) + shiftX).toFixed(2)));
+        main.y(Number((Number(main.y?.() || 0) + shiftY).toFixed(2)));
+        dec.y(Number((Number(dec.y?.() || 0) + shiftY).toFixed(2)));
+        unit.y(Number((Number(unit.y?.() || 0) + shiftY).toFixed(2)));
+        priceGroup.setAttr("priceCircleSize", Number(circleMetrics.diameter.toFixed(2)));
+        priceGroup.setAttr("priceCircleLocalX", Number(nextCircleLocalX.toFixed(2)));
+        priceGroup.setAttr("priceCircleLocalY", Number(nextCircleLocalY.toFixed(2)));
+        if (circleBg) {
+          const bgX = Number(((priceGroup.x?.() || 0) + nextCircleLocalX).toFixed(2));
+          const bgY = Number(((priceGroup.y?.() || 0) + nextCircleLocalY).toFixed(2));
+          layoutImageNodeContain(circleBg, bgX, bgY, circleMetrics.diameter, circleMetrics.diameter);
+          if (isImageBadge) {
+            scaleNodeAroundCenter(circleBg, getImageBadgeCircleScaleBoost(priceBadgeStyleId, isDirectSingle));
+          }
+        }
       }
       updateHitArea();
       // Cena i prostokąt tła są niezależne: nie synchronizujemy pozycji prostokąta z ceną.
@@ -4309,11 +4667,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         priceBg.width(priceBg.width?.() || 240);
         priceBg.height(priceBg.height?.() || 240);
         layoutImageNodeContain(priceBg, priceArea.x, priceArea.y, priceArea.s, priceArea.s);
-        if (hasImagePriceBadge && !useSingleLikeDirectLayout) {
-          const familyBadgeBoost = priceBadgeStyleId.includes("tnz")
-            ? 1.14
-            : (priceBadgeStyleId.includes("granatowe") ? 1.24 : 1.16);
-          scaleNodeAroundCenter(priceBg, familyBadgeBoost);
+        if (hasImagePriceBadge) {
+          scaleNodeAroundCenter(priceBg, getImageBadgeCircleScaleBoost(priceBadgeStyleId, useSingleLikeDirectLayout));
         }
         // Klik ma przechodzić do powiększonego hit-area na priceGroup (tekst ceny),
         // dzięki temu łatwiej zaznaczyć cenę, ale dalej można skalować sam tekst.
@@ -4351,6 +4706,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (useAbsolutePriceTextOffset && useCustomSinglePalette) priceGroup.setAttr("priceExactOffset", true);
     priceGroup.setAttr("priceCircleSize", isRoundedRectPriceDirect ? priceArea.w : priceArea.s);
     priceGroup.setAttr("priceCircleLocalX", useAbsolutePriceTextOffset ? 0 : -priceTextOffsetX);
+    priceGroup.setAttr("priceCircleLocalY", useAbsolutePriceTextOffset ? 0 : -priceTextOffsetY);
     if (useAbsolutePriceTextOffset) priceGroup.setAttr("priceTextOffsetAbsolute", true);
     if (useAbsolutePriceTextOffset || isRoundedRectPriceDirect || isElegantDefault) priceGroup.setAttr("priceNoOpticalShift", true);
     if (isElegantDefault) priceGroup.setAttr("isElegantDefaultPriceLayout", true);
@@ -4414,6 +4770,12 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const effectiveElegantPriceScaleBoost = !exactCustomSinglePriceLayout && isElegantDefault && useSingleLikeDirectLayout && !noPriceCircleDirect && !isRoundedRectPriceDirect
       ? elegantPriceScaleBoost
       : 1;
+    const circlePriceMainScale = getCirclePriceMainScale(
+      priceParts.main,
+      isSingleCirclePriceDirect && hasImagePriceBadge,
+      priceBadgeStyleId,
+      useSingleLikeDirectLayout
+    );
     const unitSize = exactCustomSinglePriceLayout
       ? Math.max(1, Math.round(priceBaseSize * unitFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost))
       : Math.max(7, Math.round(priceBaseSize * unitFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost));
@@ -4423,8 +4785,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         ? Math.max(1, Math.round(priceBaseSize * decFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost))
         : Math.max(8, Math.round(priceBaseSize * decFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost)));
     const mainSize = exactCustomSinglePriceLayout
-      ? Math.max(1, Math.round(priceBaseSize * mainFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost))
-      : Math.max(12, Math.round(priceBaseSize * mainFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost));
+      ? Math.max(1, Math.round(priceBaseSize * mainFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost * circlePriceMainScale))
+      : Math.max(12, Math.round(priceBaseSize * mainFactor * effectivePriceScaleDirect * effectiveElegantPriceScaleBoost * circlePriceMainScale));
     const mainNode = new window.Konva.Text({
       x: 0, y: 0, text: priceParts.main, fontSize: mainSize,
       fontStyle: buildKonvaFontStyle({
@@ -6027,37 +6389,11 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         priceRowEl.style.padding = "0 6px";
         priceRowEl.style.transform = "none";
       } else if (isSingleDirectPreview) {
-        const isTnzBadgePreview = previewPriceBadgeStyleId.includes("tnz");
-        const isGranatBadgePreview = previewPriceBadgeStyleId.includes("granatowe");
-        priceRowEl.style.padding = "0 10px 0 10px";
-        if (priceAlign === "right") {
-          priceRowEl.style.transform = isTnzBadgePreview
-            ? "translate(8px, 7px)"
-            : (isGranatBadgePreview ? "translate(4px, 5px)" : (hasImageBadgePreview ? "translate(2px, 5px)" : "translate(0px, 3px)"));
-        } else if (priceAlign === "center") {
-          priceRowEl.style.transform = isTnzBadgePreview
-            ? "translate(19px, 7px)"
-            : (isGranatBadgePreview ? "translate(11px, 5px)" : (hasImageBadgePreview ? "translate(8px, 5px)" : "translate(4px, 3px)"));
-        } else {
-          priceRowEl.style.transform = isTnzBadgePreview
-            ? "translate(28px, 7px)"
-            : (isGranatBadgePreview ? "translate(18px, 5px)" : (hasImageBadgePreview ? "translate(14px, 5px)" : "translate(8px, 3px)"));
-        }
+        priceRowEl.style.padding = hasImageBadgePreview ? "0" : "0 10px";
+        priceRowEl.style.transform = hasImageBadgePreview ? "none" : (priceAlign === "right" ? "translate(0px, 3px)" : (priceAlign === "center" ? "translate(4px, 3px)" : "translate(8px, 3px)"));
       } else {
-        priceRowEl.style.padding = "0 8px";
-        if (hasImageBadgePreview) {
-          const isTnzBadgePreview = previewPriceBadgeStyleId.includes("tnz");
-          const isGranatBadgePreview = previewPriceBadgeStyleId.includes("granatowe");
-          if (priceAlign === "right") {
-            priceRowEl.style.transform = isGranatBadgePreview ? "translate(10px, 3px)" : (isTnzBadgePreview ? "translate(4px, 3px)" : "translate(2px, 2px)");
-          } else if (priceAlign === "center") {
-            priceRowEl.style.transform = isGranatBadgePreview ? "translate(16px, 3px)" : (isTnzBadgePreview ? "translate(8px, 3px)" : "translate(5px, 2px)");
-          } else {
-            priceRowEl.style.transform = isGranatBadgePreview ? "translate(22px, 3px)" : (isTnzBadgePreview ? "translate(12px, 3px)" : "translate(7px, 2px)");
-          }
-        } else {
-          priceRowEl.style.transform = "none";
-        }
+        priceRowEl.style.padding = hasImageBadgePreview ? "0" : "0 8px";
+        priceRowEl.style.transform = hasImageBadgePreview ? "none" : "none";
       }
     }
 
@@ -6126,17 +6462,11 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         priceCircle.style.borderRadius = "50%";
         const badgeBgUrl = String(previewCatalogEntry?.PRICE_BG_IMAGE_URL || "").trim() || getSelectedPriceBadgeBackgroundUrl();
         if (previewPriceBadgeStyleId !== "solid" && badgeBgUrl) {
-          const isGranatBadgePreview = previewPriceBadgeStyleId.includes("granatowe");
-          const isTnzBadgePreview = previewPriceBadgeStyleId.includes("tnz");
           priceCircle.style.background = "transparent";
           priceCircle.style.backgroundImage = `url("${badgeBgUrl}")`;
           priceCircle.style.backgroundRepeat = "no-repeat";
           priceCircle.style.backgroundPosition = "center";
-          if (isSingleDirectPreview) {
-            priceCircle.style.backgroundSize = "contain";
-          } else {
-            priceCircle.style.backgroundSize = isGranatBadgePreview ? "124%" : (isTnzBadgePreview ? "114%" : "116%");
-          }
+          priceCircle.style.backgroundSize = getPreviewImageBadgeCircleBackgroundSize(previewPriceBadgeStyleId, isSingleDirectPreview);
         } else {
           priceCircle.style.backgroundImage = "none";
           priceCircle.style.background = String(previewCatalogEntry?.PRICE_BG_COLOR || customPriceCircleColor || "#d71920");
@@ -6148,6 +6478,12 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         ? Math.max(34, parseInt(priceCircle.style.height || "34", 10))
         : base);
       const customPriceFactorsPreview = useCustomSingleTextPalette ? getStoredCustomPriceTypographyFactors(singleSpec.text) : null;
+      const previewCircleMainScale = getCirclePriceMainScale(
+        price.main,
+        hasImageBadgePreview && isSingleDirectPreview && !hidePriceBadgePreview && !noPriceCirclePreview && !isRoundedRectPricePreview,
+        previewPriceBadgeStyleId,
+        isSingleDirectPreview
+      );
       const previewUnitPx = useCustomSingleTextPalette
         ? Math.max(1, Math.round(previewPriceBase * (customPriceFactorsPreview
           ? customPriceFactorsPreview.unit
@@ -6165,8 +6501,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const previewMainPx = useCustomSingleTextPalette
         ? Math.max(1, Math.round(previewPriceBase * (customPriceFactorsPreview
           ? customPriceFactorsPreview.main
-          : ((hidePriceBadgePreview || noPriceCirclePreview) ? 0.56 : (isRoundedRectPricePreview ? 0.80 : (isSingleDirectPreview ? 0.475 : 0.38)))) * scale))
-        : Math.max(12, Math.round(previewPriceBase * ((hidePriceBadgePreview || noPriceCirclePreview) ? 0.56 : (isRoundedRectPricePreview ? 0.80 : (isSingleDirectPreview ? 0.475 : 0.38))) * scale));
+          : ((hidePriceBadgePreview || noPriceCirclePreview) ? 0.56 : (isRoundedRectPricePreview ? 0.80 : (isSingleDirectPreview ? 0.475 : 0.38)))) * scale * previewCircleMainScale))
+        : Math.max(12, Math.round(previewPriceBase * ((hidePriceBadgePreview || noPriceCirclePreview) ? 0.56 : (isRoundedRectPricePreview ? 0.80 : (isSingleDirectPreview ? 0.475 : 0.38))) * scale * previewCircleMainScale));
       mainEl.style.fontSize = `${previewMainPx}px`;
       decEl.style.fontSize = `${previewDecPx}px`;
       unitEl.style.fontSize = `${previewUnitPx}px`;
@@ -6176,6 +6512,21 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         unitEl.style.transform = "translateY(-1px)";
       } else {
         unitEl.style.transform = "none";
+      }
+      if (!hidePriceBadgePreview && !noPriceCirclePreview && !isRoundedRectPricePreview && priceRowEl) {
+        applyPreviewAutoCircleBadgeLayout({
+          priceCircle,
+          priceRowEl,
+          mainEl,
+          decEl,
+          unitEl,
+          majorText: mainEl?.textContent || "",
+          styleId: previewPriceBadgeStyleId,
+          isSingleLayout: isSingleDirectPreview,
+          baseDiameter: base,
+          isImageBadge: hasImageBadgePreview,
+          gapPx: isSingleDirectPreview ? 4 : 5
+        });
       }
     }
 
@@ -7886,30 +8237,48 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const getProductByExcelIndex = (() => {
       const idxMap = new Map();
       (Array.isArray(products) ? products : []).forEach((p) => {
-        const raw = String(p?.index || "").trim();
-        if (!raw) return;
-        const normA = normalizeImportIndex(raw);
-        const normB = raw.replace(/\s+/g, "");
-        if (normA && !idxMap.has(normA)) idxMap.set(normA, p);
-        if (normB && !idxMap.has(normB)) idxMap.set(normB, p);
+        getImportIndexLookupKeys(p?.index).forEach((key) => {
+          if (key && !idxMap.has(key)) idxMap.set(key, p);
+        });
       });
       return (excelIndex) => {
-        const keyA = normalizeImportIndex(excelIndex);
-        const keyB = String(excelIndex || "").trim().replace(/\s+/g, "");
-        return idxMap.get(keyA) || idxMap.get(keyB) || null;
+        const keys = getImportIndexLookupKeys(excelIndex);
+        for (const key of keys) {
+          const found = idxMap.get(key);
+          if (found) return found;
+        }
+        return null;
       };
     })();
 
-    const getProductsByImageIndex = (() => {
+    const buildProductsByImageIndexMap = () => {
       const idxMap = new Map();
-      (Array.isArray(products) ? products : []).forEach((p) => {
-        const key = normalizeImportIndex(p?.index);
-        if (!key) return;
-        if (!idxMap.has(key)) idxMap.set(key, []);
-        idxMap.get(key).push(p);
+      productsById.forEach((p) => {
+        getImportIndexLookupKeys(p?.index).forEach((key) => {
+          if (!key) return;
+          if (!idxMap.has(key)) idxMap.set(key, []);
+          idxMap.get(key).push(p);
+        });
       });
-      return (idx) => idxMap.get(normalizeImportIndex(idx)) || [];
-    })();
+      return idxMap;
+    };
+
+    const getProductsByImageIndex = (idx, indexMap = null) => {
+      const lookupMap = indexMap instanceof Map ? indexMap : buildProductsByImageIndexMap();
+      const matched = [];
+      const seen = new Set();
+      getImportIndexLookupKeys(idx).forEach((key) => {
+        const items = lookupMap.get(key);
+        if (!Array.isArray(items) || !items.length) return;
+        items.forEach((p) => {
+          const dedupeKey = `${String(p?.id || "")}::${String(p?.index || "")}`;
+          if (seen.has(dedupeKey)) return;
+          seen.add(dedupeKey);
+          matched.push(p);
+        });
+      });
+      return matched;
+    };
 
     const firstNonEmptyText = (...values) => {
       for (const value of values) {
@@ -8504,6 +8873,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         let matchedFiles = 0;
         let mappedProducts = 0;
         let failedReads = 0;
+        const imageIndexMap = buildProductsByImageIndexMap();
         const indexToDataUrl = new Map();
         showCustomImportProgress("Import zdjęć: przygotowanie...", 4);
         try {
@@ -8515,9 +8885,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
             if (!candidates.length) continue;
             let matched = false;
             for (const candidate of candidates) {
-              const productList = getProductsByImageIndex(candidate);
+              const productList = getProductsByImageIndex(candidate, imageIndexMap);
               if (!productList.length) continue;
-              let dataUrl = indexToDataUrl.get(candidate) || "";
+              let dataUrl = getMappedValueByImportIndex(indexToDataUrl, candidate) || "";
               if (!dataUrl) {
                 try {
                   dataUrl = await readFileAsDataUrl(file);
@@ -8526,7 +8896,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
                   dataUrl = "";
                 }
                 if (!dataUrl) break;
-                indexToDataUrl.set(candidate, dataUrl);
+                setMappedValueByImportIndex(indexToDataUrl, candidate, dataUrl);
+                setMappedValueByImportIndex(customResolvedImageUrlsByIndex, candidate, dataUrl);
               }
               productList.forEach((p) => {
                 if (!p?.id) return;
@@ -8546,9 +8917,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           // Synchronizacja dla już utworzonych wariantów/draftów (id z importu excel).
           if (indexToDataUrl.size) {
             for (const p of productsById.values()) {
-              const key = normalizeImportIndex(p?.index);
-              if (!key) continue;
-              const dataUrl = indexToDataUrl.get(key) || "";
+              const dataUrl = getMappedValueByImportIndex(indexToDataUrl, p?.index) || "";
               if (!dataUrl || !p?.id) continue;
               customImageOverrides.set(String(p.id), dataUrl);
               customResolvedImageUrls.set(String(p.id), dataUrl);
@@ -8556,12 +8925,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
             customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).map((draft) => {
               const productId = String(draft?.productId || "");
               const product = productsById.get(productId);
-              const key = normalizeImportIndex(product?.index || draft?.productIndex);
-              const mainUrl = key ? (indexToDataUrl.get(key) || "") : "";
+              const mainUrl = getMappedValueByImportIndex(indexToDataUrl, product?.index || draft?.productIndex) || "";
               const nextFamily = (Array.isArray(draft?.familyProducts) ? draft.familyProducts : []).map((fp) => {
                 const fpProd = productsById.get(String(fp?.productId || ""));
-                const fpKey = normalizeImportIndex(fpProd?.index);
-                const fpUrl = fpKey ? (indexToDataUrl.get(fpKey) || "") : "";
+                const fpUrl = getMappedValueByImportIndex(indexToDataUrl, fpProd?.index) || "";
                 return fpUrl ? { ...fp, url: fpUrl } : fp;
               });
               if (!mainUrl && (!nextFamily.length || nextFamily === draft.familyProducts)) return draft;
