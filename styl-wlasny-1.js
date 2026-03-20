@@ -8,6 +8,77 @@
   let dragDraftId = null;
   let lastRenderedDraftCount = 0;
 
+  function formatProductWord(count) {
+    const safe = Math.max(0, Number(count) || 0);
+    if (safe === 1) return "produkt";
+    if (safe >= 2 && safe <= 4) return "produkty";
+    return "produktów";
+  }
+
+  function isExcelImportedDraft(draft) {
+    return String(draft?.importMeta?.source || "") === "excel";
+  }
+
+  function getAssignedPageNumber(draft) {
+    const raw = Number(draft?.importMeta?.assignedPageNumber);
+    if (!Number.isFinite(raw) || raw <= 0) return null;
+    return Math.max(1, Math.trunc(raw));
+  }
+
+  function getDraftProductCount(draft) {
+    const explicit = Number(draft?.importMeta?.assignedProductCount);
+    if (Number.isFinite(explicit) && explicit > 0) return Math.max(1, Math.trunc(explicit));
+    const familyCount = Array.isArray(draft?.familyProducts) ? draft.familyProducts.length : 0;
+    return Math.max(1, familyCount || 1);
+  }
+
+  function buildAssignedPageStats(drafts) {
+    const perPage = new Map();
+    let unassignedExcelProducts = 0;
+
+    (Array.isArray(drafts) ? drafts : []).forEach((draft) => {
+      if (!isExcelImportedDraft(draft)) return;
+      const productCount = getDraftProductCount(draft);
+      const pageNumber = getAssignedPageNumber(draft);
+      if (!pageNumber) {
+        unassignedExcelProducts += productCount;
+        return;
+      }
+      perPage.set(pageNumber, (perPage.get(pageNumber) || 0) + productCount);
+    });
+
+    const pages = Array.from(perPage.entries())
+      .map(([pageNumber, productCount]) => ({ pageNumber, productCount }))
+      .sort((a, b) => a.pageNumber - b.pageNumber);
+
+    return {
+      totalPages: pages.length,
+      totalProducts: pages.reduce((sum, page) => sum + page.productCount, 0),
+      unassignedExcelProducts,
+      pages
+    };
+  }
+
+  function compareDraftsForDisplay(a, b) {
+    const pageA = getAssignedPageNumber(a);
+    const pageB = getAssignedPageNumber(b);
+    if (pageA !== pageB) {
+      if (pageA === null) return 1;
+      if (pageB === null) return -1;
+      return pageA - pageB;
+    }
+
+    const indexA = String(a?.productIndex || "");
+    const indexB = String(b?.productIndex || "");
+    const byIndex = indexA.localeCompare(indexB, "pl", { numeric: true, sensitivity: "base" });
+    if (byIndex) return byIndex;
+
+    return String(a?.productName || "").localeCompare(String(b?.productName || ""), "pl", {
+      numeric: true,
+      sensitivity: "base"
+    });
+  }
+
   function getBridge() {
     return window.CustomStyleDraftBridge || null;
   }
@@ -106,6 +177,49 @@
         color: #a9b5c8;
         font-size: 11px;
         line-height: 1.45;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-summary {
+        margin: 8px 10px 0;
+        padding: 12px 14px;
+        border: 1px solid rgba(103, 232, 249, 0.18);
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(11, 31, 49, 0.92) 0%, rgba(9, 17, 30, 0.98) 100%);
+        display: none;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-summary-title {
+        font-size: 12px;
+        font-weight: 800;
+        color: #dff7ff;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-summary-copy {
+        margin-top: 4px;
+        font-size: 10px;
+        line-height: 1.45;
+        color: #9fc1d4;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-summary-grid {
+        margin-top: 10px;
+        display: grid;
+        gap: 6px;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-chip {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 10px;
+        border-radius: 12px;
+        background: rgba(15, 23, 42, 0.82);
+        border: 1px solid rgba(148, 163, 184, 0.14);
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-chip strong {
+        font-size: 11px;
+        color: #f5f7fb;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-chip span {
+        font-size: 10px;
+        color: #8df5e2;
+        text-align: right;
       }
       #${TRAY_ID} .custom-style-draft-tray__list {
         flex: 1 1 auto;
@@ -237,6 +351,7 @@
       <div class="custom-style-draft-tray__hint">
         Po upuszczeniu moduł znika z kolejki.
       </div>
+      <div id="${TRAY_ID}_pageSummary" class="custom-style-draft-tray__page-summary"></div>
       <div id="${TRAY_ID}_list" class="custom-style-draft-tray__list">
         <div class="custom-style-draft-tray__empty">Brak elementów.</div>
       </div>
@@ -276,7 +391,32 @@
     const nextCount = currentDrafts.length;
     const countEl = document.getElementById(`${TRAY_ID}_count`);
     if (countEl) {
-      countEl.textContent = `Pozostało: ${nextCount} ${nextCount === 1 ? "produkt" : (nextCount >= 2 && nextCount <= 4 ? "produkty" : "produktów")}`;
+      countEl.textContent = `Pozostało: ${nextCount} ${formatProductWord(nextCount)}`;
+    }
+    const pageSummaryEl = document.getElementById(`${TRAY_ID}_pageSummary`);
+    const pageStats = buildAssignedPageStats(currentDrafts);
+    if (pageSummaryEl) {
+      if (!pageStats.totalPages) {
+        pageSummaryEl.style.display = "none";
+        pageSummaryEl.innerHTML = "";
+      } else {
+        pageSummaryEl.style.display = "block";
+        const chips = pageStats.pages.map((page) => `
+          <div class="custom-style-draft-tray__page-chip">
+            <strong>Strona ${page.pageNumber}</strong>
+            <span>${page.productCount} ${formatProductWord(page.productCount)}</span>
+          </div>
+        `).join("");
+        const extra = pageStats.unassignedExcelProducts
+          ? `<div class="custom-style-draft-tray__page-summary-copy">Bez przypisanej strony: ${pageStats.unassignedExcelProducts} ${formatProductWord(pageStats.unassignedExcelProducts)}.</div>`
+          : "";
+        pageSummaryEl.innerHTML = `
+          <div class="custom-style-draft-tray__page-summary-title">Podsumowanie stron z Excela</div>
+          <div class="custom-style-draft-tray__page-summary-copy">Wykryto ${pageStats.totalPages} ${pageStats.totalPages === 1 ? "stronę" : (pageStats.totalPages >= 2 && pageStats.totalPages <= 4 ? "strony" : "stron")} i ${pageStats.totalProducts} ${formatProductWord(pageStats.totalProducts)} z przypisaniem do stron.</div>
+          <div class="custom-style-draft-tray__page-summary-grid">${chips}</div>
+          ${extra}
+        `;
+      }
     }
     const list = document.getElementById(`${TRAY_ID}_list`);
     if (!list) return;
@@ -314,17 +454,23 @@
         </div>
       `;
     };
-    list.innerHTML = currentDrafts.map((draft) => {
+    const displayDrafts = currentDrafts.slice().sort(compareDraftsForDisplay);
+    list.innerHTML = displayDrafts.map((draft) => {
       const title = String(draft?.nameOverrides?.[draft?.productId] || draft?.productName || "").trim();
       const index = String(draft?.productIndex || "").trim();
       const familyCount = Math.max(1, Array.isArray(draft?.familyProducts) ? draft.familyProducts.length : 1);
       const currency = String(draft?.settings?.customCurrencySymbol || "£");
+      const assignedPageNumber = getAssignedPageNumber(draft);
+      const subtitleParts = [];
+      if (assignedPageNumber) subtitleParts.push(`Strona: ${assignedPageNumber}`);
+      subtitleParts.push(`Rodzina: ${familyCount}`);
+      subtitleParts.push(escapeHtml(currency));
       return `
         <div data-draft-id="${escapeHtml(String(draft.id || ""))}" draggable="true" class="custom-style-draft-tray__card">
           ${buildThumbMarkup(draft)}
           <div class="custom-style-draft-tray__meta">
             <div class="custom-style-draft-tray__meta-title">${escapeHtml(index ? `[${index}] ${title || draft?.productId || ""}` : (title || draft?.productId || ""))}</div>
-            <div class="custom-style-draft-tray__meta-subtitle">Rodzina: ${familyCount} • ${escapeHtml(currency)}</div>
+            <div class="custom-style-draft-tray__meta-subtitle">${subtitleParts.join(" • ")}</div>
           </div>
         </div>
       `;

@@ -414,10 +414,13 @@
   const customIndexOverrides = new Map();
   const customPriceOverrides = new Map();
   const customImageOverrides = new Map();
+  const customImageVariantOverrides = new Map();
   const customResolvedImageUrls = new Map();
   const customResolvedImageUrlsByIndex = new Map();
+  const customResolvedImageVariantsByIndex = new Map();
   const customImageResolvePromisesByIndex = new Map();
   const customImageMetaCache = new Map();
+  const customImageVariantsBySource = new Map();
   const customImageExtensionCache = (() => {
     try {
       const raw = localStorage.getItem(IMAGE_EXT_CACHE_STORAGE_KEY);
@@ -491,10 +494,16 @@
   let currentFamilyProducts = [];
   const CUSTOM_DRAFT_MODULE_LIMIT = 240;
   const CUSTOM_IMPORT_CONCURRENCY = 12;
+  const CUSTOM_LAYOUT_BATCH_PLACEMENT_SIZE = 4;
+  const CUSTOM_STYLE_LAZY_IMAGE_INITIAL_PAGES = 3;
+  const CUSTOM_STYLE_LAZY_IMAGE_VIEWPORT_MARGIN = 420;
   const customPreviewVisibility = {
     showFlag: false,
     showBarcode: false
   };
+  let customStyleLazyPageObserver = null;
+  let customStyleLazyPageRefreshQueued = false;
+  const customStyleLazyPagesByContainer = new WeakMap();
 
   function getElegantPricePreviewScale(styleId) {
     return String(styleId || "default") === "default" ? 0.61 : 1;
@@ -713,6 +722,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
   function waitMs(ms) {
     return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+  }
+
+  function yieldToUiFrame(delayMs = 0) {
+    return new Promise((resolve) => {
+      const finish = () => setTimeout(resolve, Math.max(0, Number(delayMs) || 0));
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => finish());
+        return;
+      }
+      finish();
+    });
   }
 
   function schedulePersistImageExtensionCache() {
@@ -966,6 +986,406 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     );
   }
 
+  function normalizeCustomImageVariantPayload(value) {
+    if (typeof window.normalizeImageVariantPayload === "function") {
+      try {
+        return window.normalizeImageVariantPayload(value);
+      } catch (_err) {}
+    }
+    if (!value) return { original: "", editor: "", thumb: "" };
+    if (typeof value === "string") {
+      const src = String(value || "").trim();
+      return { original: src, editor: src, thumb: src };
+    }
+    const original = String(value.original || value.originalSrc || value.src || value.url || "").trim();
+    const editor = String(value.editor || value.editorSrc || original || "").trim();
+    const thumb = String(value.thumb || value.thumbSrc || editor || original || "").trim();
+    return {
+      original: original || editor || thumb || "",
+      editor: editor || original || thumb || "",
+      thumb: thumb || editor || original || ""
+    };
+  }
+
+  function cloneCustomImageVariants(value) {
+    const normalized = normalizeCustomImageVariantPayload(value);
+    return {
+      original: normalized.original,
+      editor: normalized.editor,
+      thumb: normalized.thumb
+    };
+  }
+
+  function getCustomImageVariantSource(value, kind = "editor") {
+    if (typeof window.getImageVariantSource === "function") {
+      try {
+        return String(window.getImageVariantSource(value, kind) || "").trim();
+      } catch (_err) {}
+    }
+    const normalized = normalizeCustomImageVariantPayload(value);
+    const mode = String(kind || "editor").trim().toLowerCase();
+    if (mode === "original") return normalized.original || normalized.editor || normalized.thumb || "";
+    if (mode === "thumb") return normalized.thumb || normalized.editor || normalized.original || "";
+    return normalized.editor || normalized.original || normalized.thumb || "";
+  }
+
+  function rememberCustomImageVariants(value, options = {}) {
+    const normalized = cloneCustomImageVariants(value);
+    if (!normalized.original && !normalized.editor && !normalized.thumb) return null;
+
+    const sourceKeys = new Set([
+      normalized.original,
+      normalized.editor,
+      normalized.thumb
+    ]);
+    (Array.isArray(options.sources) ? options.sources : []).forEach((source) => {
+      const safe = String(source || "").trim();
+      if (safe) sourceKeys.add(safe);
+    });
+    sourceKeys.forEach((source) => {
+      const safe = String(source || "").trim();
+      if (safe) customImageVariantsBySource.set(safe, normalized);
+    });
+
+    const overrideIds = Array.isArray(options.productOverrideIds)
+      ? options.productOverrideIds
+      : (options.productOverrideId ? [options.productOverrideId] : []);
+    overrideIds.forEach((productId) => {
+      const safeId = String(productId || "").trim();
+      if (safeId) customImageVariantOverrides.set(safeId, normalized);
+    });
+
+    const indexCandidates = Array.isArray(options.indexes) ? options.indexes : [];
+    indexCandidates.forEach((indexValue) => {
+      setMappedValueByImportIndex(customResolvedImageVariantsByIndex, indexValue, normalized);
+    });
+
+    return normalized;
+  }
+
+  function getRememberedCustomImageVariantsBySource(source) {
+    const safeSource = String(source || "").trim();
+    if (!safeSource) return null;
+    const local = customImageVariantsBySource.get(safeSource);
+    if (local) return cloneCustomImageVariants(local);
+    if (typeof window.getImageVariantsFromCache === "function") {
+      try {
+        const cached = window.getImageVariantsFromCache(safeSource);
+        if (cached) {
+          return rememberCustomImageVariants(cached, { sources: [safeSource] });
+        }
+      } catch (_err) {}
+    }
+    return null;
+  }
+
+  function getRememberedCustomImageVariantsForProduct(product) {
+    const productId = String(product?.id || "").trim();
+    if (productId && customImageVariantOverrides.has(productId)) {
+      return cloneCustomImageVariants(customImageVariantOverrides.get(productId));
+    }
+    const byIndex = getMappedValueByImportIndex(customResolvedImageVariantsByIndex, product?.index);
+    if (byIndex && typeof byIndex === "object") {
+      return cloneCustomImageVariants(byIndex);
+    }
+    const knownSource = productId
+      ? String(customImageOverrides.get(productId) || customResolvedImageUrls.get(productId) || "").trim()
+      : "";
+    return knownSource ? getRememberedCustomImageVariantsBySource(knownSource) : null;
+  }
+
+  function shouldAutoPrepareCustomImageVariants(source, options = {}) {
+    const safeSource = String(source || "").trim();
+    if (!safeSource) return false;
+    if (options.forceVariants) return true;
+    return /^data:image\//i.test(safeSource) && safeSource.length > 120000;
+  }
+
+  async function createCustomImageVariantsFromSourceSafe(source, options = {}) {
+    const safeSource = String(source || "").trim();
+    if (!safeSource) return normalizeCustomImageVariantPayload(null);
+
+    const remembered = getRememberedCustomImageVariantsBySource(safeSource);
+    if (remembered) return remembered;
+
+    let variants = null;
+    if (typeof window.createImageVariantsFromSource === "function") {
+      try {
+        variants = await window.createImageVariantsFromSource(safeSource, options);
+      } catch (_err) {
+        variants = null;
+      }
+    }
+    if (!variants) {
+      variants = normalizeCustomImageVariantPayload(safeSource);
+    }
+    return rememberCustomImageVariants(variants, { sources: [safeSource] }) || cloneCustomImageVariants(variants);
+  }
+
+  async function createCustomImageVariantsFromFileSafe(file, options = {}) {
+    if (!(file instanceof File)) {
+      throw new Error("Niepoprawny plik obrazu.");
+    }
+
+    let variants = null;
+    if (typeof window.createImageVariantsFromFile === "function") {
+      try {
+        variants = await window.createImageVariantsFromFile(file, {
+          cacheKey: options.cacheKey || `custom-style:${file.name}:${file.size}:${file.lastModified}`
+        });
+      } catch (_err) {
+        variants = null;
+      }
+    }
+
+    if (!variants) {
+      const fallback = await readFileAsDataUrl(file);
+      variants = normalizeCustomImageVariantPayload({
+        original: fallback,
+        editor: fallback,
+        thumb: fallback
+      });
+    }
+
+    return rememberCustomImageVariants(variants) || cloneCustomImageVariants(variants);
+  }
+
+  function applyCustomImageVariantsToNode(node, variants, fallbackSrc = "") {
+    if (!node || !node.setAttr) return;
+    const normalized = normalizeCustomImageVariantPayload(variants || fallbackSrc);
+    if (typeof window.applyImageVariantsToKonvaNode === "function") {
+      try {
+        window.applyImageVariantsToKonvaNode(node, normalized);
+        return;
+      } catch (_err) {}
+    }
+    if (normalized.original) node.setAttr("originalSrc", normalized.original);
+    if (normalized.editor) node.setAttr("editorSrc", normalized.editor);
+    if (normalized.thumb) node.setAttr("thumbSrc", normalized.thumb);
+  }
+
+  function rememberCustomImageContainFrame(node, frameX, frameY, frameW, frameH) {
+    if (!node || !node.setAttr) return;
+    node.setAttr("customLazyContainFrame", true);
+    node.setAttr("customLazyFrameX", Number(frameX || 0));
+    node.setAttr("customLazyFrameY", Number(frameY || 0));
+    node.setAttr("customLazyFrameWidth", Math.max(1, Number(frameW || 1)));
+    node.setAttr("customLazyFrameHeight", Math.max(1, Number(frameH || 1)));
+  }
+
+  function layoutImageNodeContainAndRememberFrame(node, frameX, frameY, frameW, frameH) {
+    layoutImageNodeContain(node, frameX, frameY, frameW, frameH);
+    rememberCustomImageContainFrame(node, frameX, frameY, frameW, frameH);
+  }
+
+  function getCustomStyleCatalogPagesList() {
+    return (Array.isArray(window.pages) ? window.pages : []).filter((page) => page && !page.isCover);
+  }
+
+  function getCustomStyleCatalogPageOrdinal(page) {
+    if (!page) return 0;
+    const pagesList = getCustomStyleCatalogPagesList();
+    const listIndex = pagesList.indexOf(page);
+    if (listIndex >= 0) return listIndex + 1;
+    const pageNumber = Number(page?.number);
+    return Number.isFinite(pageNumber) && pageNumber > 0 ? Math.trunc(pageNumber) : 0;
+  }
+
+  function isCustomStylePageNearViewport(page) {
+    const container = page?.container;
+    if (!container || typeof container.getBoundingClientRect !== "function") return true;
+    const rect = container.getBoundingClientRect();
+    const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || 0;
+    return rect.bottom >= -CUSTOM_STYLE_LAZY_IMAGE_VIEWPORT_MARGIN &&
+      rect.top <= (viewportHeight + CUSTOM_STYLE_LAZY_IMAGE_VIEWPORT_MARGIN);
+  }
+
+  function shouldDeferCustomStyleImageHydration(page, options = {}) {
+    if (!page?.container) return false;
+    if (options.forceNow) return false;
+    const pageOrdinal = getCustomStyleCatalogPageOrdinal(page);
+    if (pageOrdinal > 0 && pageOrdinal <= CUSTOM_STYLE_LAZY_IMAGE_INITIAL_PAGES) return false;
+    if (page.container.classList?.contains("page-perf-sleep")) return true;
+    return !isCustomStylePageNearViewport(page);
+  }
+
+  function countPendingCustomStyleLazyImages(page) {
+    if (!page?.layer || typeof page.layer.find !== "function") return 0;
+    const pendingImages = page.layer.find((node) => node && node.getAttr && node.getAttr("customLazyImagePending"));
+    const list = Array.isArray(pendingImages)
+      ? pendingImages
+      : (typeof pendingImages?.toArray === "function" ? pendingImages.toArray() : []);
+    return list.length;
+  }
+
+  function ensureCustomStyleLazyPageObserver() {
+    if (customStyleLazyPageObserver || typeof IntersectionObserver !== "function") return customStyleLazyPageObserver;
+    customStyleLazyPageObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry?.isIntersecting) return;
+        const page = customStyleLazyPagesByContainer.get(entry.target);
+        if (!page) return;
+        hydrateDeferredCustomStyleImagesOnPage(page, { forceNow: true }).catch(() => {});
+      });
+    }, {
+      root: null,
+      rootMargin: `${CUSTOM_STYLE_LAZY_IMAGE_VIEWPORT_MARGIN}px 0px ${CUSTOM_STYLE_LAZY_IMAGE_VIEWPORT_MARGIN}px 0px`,
+      threshold: 0.001
+    });
+    return customStyleLazyPageObserver;
+  }
+
+  function registerCustomStyleLazyImagesForPage(page) {
+    if (!page?.container) return;
+    if (!countPendingCustomStyleLazyImages(page)) {
+      try { customStyleLazyPageObserver?.unobserve?.(page.container); } catch (_err) {}
+      return;
+    }
+    customStyleLazyPagesByContainer.set(page.container, page);
+    const observer = ensureCustomStyleLazyPageObserver();
+    if (observer) {
+      try { observer.observe(page.container); } catch (_err) {}
+    }
+    if (!shouldDeferCustomStyleImageHydration(page)) {
+      hydrateDeferredCustomStyleImagesOnPage(page, { forceNow: true }).catch(() => {});
+    }
+  }
+
+  function queueCustomStyleLazyImagesRefresh() {
+    if (customStyleLazyPageRefreshQueued) return;
+    customStyleLazyPageRefreshQueued = true;
+    const schedule = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
+    schedule(() => {
+      customStyleLazyPageRefreshQueued = false;
+      const pagesList = getCustomStyleCatalogPagesList();
+      pagesList.forEach((page) => registerCustomStyleLazyImagesForPage(page));
+    });
+  }
+
+  async function hydrateDeferredCustomStyleImageNode(node, page) {
+    if (!node || !node.getAttr || !node.getAttr("customLazyImagePending")) return false;
+    const editorSrc = String(
+      (typeof window.getNodeImageSource === "function"
+        ? window.getNodeImageSource(node, "editor")
+        : (node.getAttr("editorSrc") || node.getAttr("originalSrc") || node.getAttr("thumbSrc"))
+      ) || ""
+    ).trim();
+    if (!editorSrc) {
+      node.setAttr("customLazyImagePending", false);
+      return false;
+    }
+
+    const imageEl = await loadImageElementFromUrl(editorSrc, 3600);
+    if (!imageEl || (typeof node.isDestroyed === "function" && node.isDestroyed())) return false;
+
+    if (typeof node.image === "function") node.image(imageEl);
+    if (node.getAttr("customLazyContainFrame")) {
+      if (typeof node.width === "function") node.width(Math.max(1, Number(imageEl.naturalWidth || imageEl.width || 1)));
+      if (typeof node.height === "function") node.height(Math.max(1, Number(imageEl.naturalHeight || imageEl.height || 1)));
+      layoutImageNodeContain(
+        node,
+        Number(node.getAttr("customLazyFrameX") || 0),
+        Number(node.getAttr("customLazyFrameY") || 0),
+        Math.max(1, Number(node.getAttr("customLazyFrameWidth") || 1)),
+        Math.max(1, Number(node.getAttr("customLazyFrameHeight") || 1))
+      );
+      const scaleBoost = Number(node.getAttr("customLazyScaleBoost") || 1);
+      if (Math.abs(scaleBoost - 1) > 0.001) {
+        scaleNodeAroundCenter(node, scaleBoost);
+      }
+    }
+
+    node.setAttr("customLazyImagePending", false);
+    return true;
+  }
+
+  async function hydrateDeferredCustomStyleImagesOnPage(page, options = {}) {
+    if (!page?.layer || typeof page.layer.find !== "function") return 0;
+    if (page.__customStyleLazyHydrationPromise) return page.__customStyleLazyHydrationPromise;
+    if (shouldDeferCustomStyleImageHydration(page, options)) {
+      registerCustomStyleLazyImagesForPage(page);
+      return 0;
+    }
+
+    page.__customStyleLazyHydrationPromise = (async () => {
+      const pendingNodes = page.layer.find((node) => node && node.getAttr && node.getAttr("customLazyImagePending"));
+      const nodes = Array.isArray(pendingNodes)
+        ? pendingNodes
+        : (typeof pendingNodes?.toArray === "function" ? pendingNodes.toArray() : []);
+      if (!nodes.length) {
+        try { customStyleLazyPageObserver?.unobserve?.(page.container); } catch (_err) {}
+        return 0;
+      }
+
+      const results = await Promise.allSettled(nodes.map((node) => hydrateDeferredCustomStyleImageNode(node, page)));
+      const hydrated = results.reduce((sum, result) => (
+        sum + (result.status === "fulfilled" && result.value ? 1 : 0)
+      ), 0);
+
+      if (countPendingCustomStyleLazyImages(page)) {
+        registerCustomStyleLazyImagesForPage(page);
+      } else {
+        try { customStyleLazyPageObserver?.unobserve?.(page.container); } catch (_err) {}
+      }
+
+      if (hydrated) {
+        page.layer?.batchDraw?.();
+        page.transformerLayer?.batchDraw?.();
+      }
+      return hydrated;
+    })().finally(() => {
+      page.__customStyleLazyHydrationPromise = null;
+    });
+
+    return page.__customStyleLazyHydrationPromise;
+  }
+
+  async function createCustomStyleKonvaImageNode(url, options = {}) {
+    const source = String(url || "").trim();
+    if (!source) return { node: null, variants: null, renderSrc: "", deferred: false };
+
+    let variants = options.variants ? normalizeCustomImageVariantPayload(options.variants) : null;
+    if (!variants || !getCustomImageVariantSource(variants, "editor")) {
+      variants = getRememberedCustomImageVariantsBySource(source);
+    }
+    if ((!variants || !getCustomImageVariantSource(variants, "editor")) && shouldAutoPrepareCustomImageVariants(source, options)) {
+      variants = await createCustomImageVariantsFromSourceSafe(source, options);
+    }
+
+    const normalizedVariants = variants ? rememberCustomImageVariants(variants, { sources: [source] }) : null;
+    const thumbSrc = getCustomImageVariantSource(normalizedVariants, "thumb");
+    const editorSrc = getCustomImageVariantSource(normalizedVariants, "editor") || source;
+    const deferred = !!(
+      options.lazyHydration &&
+      options.page &&
+      normalizedVariants &&
+      thumbSrc &&
+      editorSrc &&
+      thumbSrc !== editorSrc &&
+      shouldDeferCustomStyleImageHydration(options.page, options)
+    );
+    const renderSrc = deferred ? thumbSrc : editorSrc;
+    const imgNode = await loadKonvaImageFromUrl(renderSrc || source, 3000);
+    if (!imgNode) {
+      return { node: null, variants: normalizedVariants, renderSrc, deferred };
+    }
+
+    applyCustomImageVariantsToNode(imgNode, normalizedVariants || source, source);
+    if (imgNode.setAttr) {
+      imgNode.setAttr("customLazyImagePending", deferred);
+    }
+    if (deferred) {
+      registerCustomStyleLazyImagesForPage(options.page);
+    }
+
+    return {
+      node: imgNode,
+      variants: normalizedVariants,
+      renderSrc,
+      deferred
+    };
+  }
+
   function loadImageElementFromUrl(url, timeoutMs = 2600) {
     const src = String(url || "").trim();
     if (!src) {
@@ -1095,6 +1515,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (typeof shapeNode.fill === "function") shapeNode.fill("transparent");
     if (typeof shapeNode.fillPriority === "function") shapeNode.fillPriority("pattern");
     return true;
+  }
+
+  async function applyImageFillToRectNode(shapeNode, url, fallbackColor = "") {
+    return applyImageFillToShapeNode(shapeNode, url, fallbackColor);
   }
 
   function ensureCustomStyleDarkTheme() {
@@ -1348,6 +1772,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     modal.querySelector("#customExcelImportBtn")?.classList.add("custom-style-btn--primary");
     modal.querySelector("#customAddProductBtn")?.classList.add("custom-style-btn--primary");
     modal.querySelector("#customApplyStyleToImportedBtn")?.classList.add("custom-style-btn--accent");
+    modal.querySelector("#customApplyImportedLayoutBtn")?.classList.add("custom-style-btn--accent");
     modal.querySelector("#customOpenDraftTrayBtn")?.classList.add("custom-style-btn--accent");
     modal.querySelector("#customBulkImageImportBtn")?.classList.add("custom-style-btn--ghost");
     modal.querySelector("#customSaveDraftBtn")?.classList.add("custom-style-btn--ghost");
@@ -1668,8 +2093,18 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       });
     };
     add(base);
-    const firstToken = base.split(/[\s_\-;|,]+/).find(Boolean);
-    if (firstToken) add(firstToken);
+    const compactAlphaNum = base.replace(/[^A-Za-z0-9]+/g, "").trim();
+    if (compactAlphaNum && compactAlphaNum !== base) add(compactAlphaNum);
+    base
+      .replace(/[^A-Za-z0-9]+/g, " ")
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter(Boolean)
+      .forEach((token) => add(token));
+    const mixedCodeMatches = base.match(/[A-Za-z]*\d+[A-Za-z\d]*/g);
+    if (Array.isArray(mixedCodeMatches)) {
+      mixedCodeMatches.forEach((match) => add(match));
+    }
     const digitMatch = base.match(/\d{3,}/g);
     if (Array.isArray(digitMatch)) {
       digitMatch.forEach((d) => add(d));
@@ -1698,6 +2133,28 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       v === "x" ||
       v === "true"
     );
+  }
+
+  function normalizeImportedPageNumber(value) {
+    const raw = readExcelCellAsText(value);
+    if (!raw) return null;
+
+    const compact = raw.replace(/\s+/g, "").replace(",", ".");
+    const numericValue = Number(compact);
+    if (Number.isFinite(numericValue) && numericValue > 0) {
+      const rounded = Math.round(numericValue);
+      if (Math.abs(numericValue - rounded) < 0.000001) return rounded;
+    }
+
+    const tokens = (String(raw).match(/\d+/g) || [])
+      .map((token) => parseInt(token, 10))
+      .filter((token) => Number.isFinite(token) && token > 0);
+    if (!tokens.length) return null;
+
+    const unique = Array.from(new Set(tokens));
+    if (unique.length === 1) return unique[0];
+    if (tokens.length === 1) return tokens[0];
+    return null;
   }
 
   async function parseCustomStyleExcelRows(file) {
@@ -1734,6 +2191,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const cPackageValue = findCol(-1, ["il opk zb", "il_opk_zb", "ilosc w opakowaniu zbiorczym", "ilość w opakowaniu zbiorczym", "pakiet"]);
     const cPackageUnit = findCol(-1, ["jm", "jednostka miary", "jednostka", "pakiet jm", "pakiet_jm"]);
     const cEan = findCol(-1, ["kod kreskowy", "kod_kreskowy", "ean"]);
+    const cAssignedPage = findCol(8, ["strona", "page", "numer strony", "nr strony", "strona katalogu", "strony"]);
 
     const readCellAt = (cells, idx) => (
       Number.isInteger(idx) && idx >= 0
@@ -1753,6 +2211,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const packageValue = readCellAt(cells, cPackageValue);
       const packageUnit = readCellAt(cells, cPackageUnit);
       const ean = readCellAt(cells, cEan);
+      const assignedPageRaw = readCellAt(cells, cAssignedPage);
+      const assignedPageNumber = normalizeImportedPageNumber(assignedPageRaw);
       const excelRowObject = {};
       headerRow.forEach((header, idx) => {
         const key = String(header || "").trim();
@@ -1782,6 +2242,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         tnz: isTnzFlagValue(tnzRaw),
         groupRaw,
         groupKey: normalizeImportedGroupKey(groupRaw),
+        assignedPageRaw,
+        assignedPageNumber,
         excelProduct
       };
     }).filter((item) => !!item.index);
@@ -2010,6 +2472,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     customIndexOverrides.clear();
     customPriceOverrides.clear();
     customImageOverrides.clear();
+    customImageVariantOverrides.clear();
 
     const search = document.getElementById("customStyleSearch");
     if (search) search.value = "";
@@ -2593,6 +3056,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     page.layer?.batchDraw?.();
     page.transformerLayer?.batchDraw?.();
+    queueCustomStyleLazyImagesRefresh();
     return rebuilt;
   }
 
@@ -3536,12 +4000,12 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     });
   }
 
-  async function createKonvaImageNodeFromUrl(url) {
+  async function createKonvaImageNodeFromUrl(url, options = {}) {
     const src = String(url || "").trim();
     if (!src) return null;
-    const img = await loadKonvaImageFromUrl(src, 3000);
-    if (img && img.setAttr) img.setAttr("originalSrc", src);
-    return img || null;
+    const result = await createCustomStyleKonvaImageNode(src, options);
+    if (result?.node) return result.node;
+    return null;
   }
 
   function normalizeSnapshotKonvaNodeGeometry(node) {
@@ -3627,14 +4091,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     } else if (className === "Image") {
       const src = await resolveSnapshotImageUrl(def, context);
       if (!src) return null;
-      node = await createKonvaImageNodeFromUrl(src);
+      node = await createKonvaImageNodeFromUrl(src, {
+        page: context?.page || null,
+        lazyHydration: true
+      });
       if (!node) return null;
       const frameX = Number(attrs.x || 0);
       const frameY = Number(attrs.y || 0);
       const frameW = Math.max(1, Number(attrs.width || node.width() || 1));
       const frameH = Math.max(1, Number(attrs.height || node.height() || 1));
       if (kind === "productImage") {
-        layoutImageNodeContain(node, frameX, frameY, frameW, frameH);
+        layoutImageNodeContainAndRememberFrame(node, frameX, frameY, frameW, frameH);
         node.setAttr("snapshotFrameX", frameX);
         node.setAttr("snapshotFrameY", frameY);
         node.setAttr("snapshotFrameWidth", frameW);
@@ -4130,8 +4597,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       return;
     }
     if (node instanceof window.Konva.Image) {
-      layoutImageNodeContain(node, x, y, safeDiameter, safeDiameter);
+      layoutImageNodeContainAndRememberFrame(node, x, y, safeDiameter, safeDiameter);
       if (Math.abs(scaleBoost - 1) > 0.001) {
+        if (node.setAttr) node.setAttr("customLazyScaleBoost", scaleBoost);
         scaleNodeAroundCenter(node, scaleBoost);
       }
       return;
@@ -4648,6 +5116,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const snapshotNodes = await createDirectModuleNodesFromEditorSnapshot(page, editorSnapshot, {
         directModuleId,
         slotIndex,
+        page,
         x,
         y,
         moduleW,
@@ -4694,6 +5163,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       page.transformer?.nodes?.([moduleGroup]);
       layer.batchDraw();
       page.transformerLayer?.batchDraw?.();
+      queueCustomStyleLazyImagesRefresh();
       return true;
     }
     const pageNameStyle = getDirectPageStyleOverride(page, "name");
@@ -4766,7 +5236,12 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (!hideImageDirect) {
       const layouts = Array.isArray(catalogEntry?.CUSTOM_IMAGE_LAYOUTS) ? catalogEntry.CUSTOM_IMAGE_LAYOUTS : [];
       for (let i = 0; i < Math.min(4, imageUrls.length); i++) {
-        const kImg = await createKonvaImageNodeFromUrl(imageUrls[i]);
+        const sourceUrl = String(imageUrls[i] || "").trim();
+        const kImg = await createKonvaImageNodeFromUrl(sourceUrl, {
+          page,
+          lazyHydration: true,
+          variants: getRememberedCustomImageVariantsBySource(sourceUrl)
+        });
         if (!kImg) continue;
         const layout = layouts[i] || { x: 0.00, y: 0.00, w: 1.00, h: 1.00 };
         const frame = {
@@ -4779,7 +5254,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           // Tylko finalny moduł: w Styl numer 2 (2 produkty) dosuwamy zdjęcia bliżej bloku tekstu/ceny.
           frame.x += imgArea.w * 0.08;
         }
-        layoutImageNodeContain(kImg, frame.x, frame.y, frame.w, frame.h);
+        layoutImageNodeContainAndRememberFrame(kImg, frame.x, frame.y, frame.w, frame.h);
         if (typeof kImg.getClientRect === "function") {
           const drawnRect = kImg.getClientRect({ skipShadow: true, skipStroke: true });
           if (drawnRect && Number.isFinite(drawnRect.x) && Number.isFinite(drawnRect.width)) {
@@ -4929,13 +5404,16 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     if (!hideFlagDirect && String(catalogEntry?.KRAJPOCHODZENIA || "").trim()) {
       const flagUrl = makeStripFlagDataUrl();
-      const flagImg = await createKonvaImageNodeFromUrl(flagUrl);
+      const flagImg = await createKonvaImageNodeFromUrl(flagUrl, {
+        page,
+        lazyHydration: true
+      });
       if (flagImg) {
         flagImg.x(flagArea.x);
         flagImg.y(flagArea.y);
         flagImg.width(flagImg.width?.() || 300);
         flagImg.height(flagImg.height?.() || 28);
-        layoutImageNodeContain(flagImg, flagArea.x, flagArea.y, flagArea.w, flagArea.h);
+        layoutImageNodeContainAndRememberFrame(flagImg, flagArea.x, flagArea.y, flagArea.w, flagArea.h);
         flagImg.draggable(true);
         flagImg.setAttrs({ slotIndex, directModuleId, isCountryBadge: true, isOverlayElement: true });
         addNode(flagImg);
@@ -4973,15 +5451,20 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const priceBadgeStyleId = String(catalogEntry?.PRICE_BG_STYLE_ID || customPriceBadgeStyleId || "solid");
     const priceBadgeImageUrlDirect = String(catalogEntry?.PRICE_BG_IMAGE_URL || "").trim() || getSelectedPriceBadgeBackgroundUrl();
     if (!hidePriceDirect && !hidePriceBadgeDirect && !noPriceCircleDirect && !isRoundedRectPriceDirect) {
-      const priceBg = await createKonvaImageNodeFromUrl(priceBadgeImageUrlDirect);
+      const priceBg = await createKonvaImageNodeFromUrl(priceBadgeImageUrlDirect, {
+        page,
+        lazyHydration: true
+      });
       if (priceBg) {
         priceBg.x(priceArea.x);
         priceBg.y(priceArea.y);
         priceBg.width(priceBg.width?.() || 240);
         priceBg.height(priceBg.height?.() || 240);
-        layoutImageNodeContain(priceBg, priceArea.x, priceArea.y, priceArea.s, priceArea.s);
+        layoutImageNodeContainAndRememberFrame(priceBg, priceArea.x, priceArea.y, priceArea.s, priceArea.s);
         if (hasImagePriceBadge) {
-          scaleNodeAroundCenter(priceBg, getImageBadgeCircleScaleBoost(priceBadgeStyleId, useSingleLikeDirectLayout));
+          const badgeScaleBoost = getImageBadgeCircleScaleBoost(priceBadgeStyleId, useSingleLikeDirectLayout);
+          priceBg.setAttr?.("customLazyScaleBoost", badgeScaleBoost);
+          scaleNodeAroundCenter(priceBg, badgeScaleBoost);
         }
         // Klik ma przechodzić do powiększonego hit-area na priceGroup (tekst ceny),
         // dzięki temu łatwiej zaznaczyć cenę, ale dalej można skalować sam tekst.
@@ -5171,13 +5654,16 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const eanValue = String(catalogEntry?.["KOD EAN"] || "").trim();
     if (!hideBarcodeDirect && eanValue) {
       const barcodeUrl = await generateBarcodeDataUrl(eanValue);
-      const barcodeNode = await createKonvaImageNodeFromUrl(barcodeUrl);
+      const barcodeNode = await createKonvaImageNodeFromUrl(barcodeUrl, {
+        page,
+        lazyHydration: true
+      });
       if (barcodeNode) {
         barcodeNode.x(barcodeArea.x);
         barcodeNode.y(barcodeArea.y);
         barcodeNode.width(barcodeNode.width?.() || 240);
         barcodeNode.height(barcodeNode.height?.() || 90);
-        layoutImageNodeContain(barcodeNode, barcodeArea.x, barcodeArea.y, barcodeArea.w, barcodeArea.h);
+        layoutImageNodeContainAndRememberFrame(barcodeNode, barcodeArea.x, barcodeArea.y, barcodeArea.w, barcodeArea.h);
         barcodeNode.draggable(true);
         barcodeNode.setAttrs({
           slotIndex,
@@ -5222,6 +5708,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     page.transformer?.nodes?.([moduleGroup]);
     layer.batchDraw();
     page.transformerLayer?.batchDraw?.();
+    queueCustomStyleLazyImagesRefresh();
     return true;
   }
 
@@ -5279,13 +5766,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
             <div class="custom-style-panel-toolbar" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid #d7dfec;border-radius:10px;background:#ffffff;margin-bottom:10px;">
               <div style="min-width:0;">
                 <div class="custom-style-heading" style="font-size:11px;font-weight:700;color:#0f172a;">Import danych (Excel)</div>
-                <div class="custom-style-muted" style="font-size:10px;color:#64748b;">Kolumny: Indeks, Marka, Cena, TNZ, Grupa produktów</div>
+                <div class="custom-style-muted" style="font-size:10px;color:#64748b;">Kroki: 1. Importuj Excel ze stronami 2. Importuj zdjęcia 3. Kliknij "Dodaj gotowy layout do katalogu"</div>
               </div>
               <div style="display:flex;gap:8px;align-items:center;">
                 <input id="customExcelImportInput" type="file" accept=".xlsx,.xls,.csv" style="display:none;">
                 <input id="customBulkImageImportInput" type="file" accept="image/*" multiple style="display:none;">
-                <button id="customBulkImageImportBtn" type="button" style="border:1px solid #334155;background:#fff;color:#0f172a;border-radius:8px;padding:6px 10px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Import zdjęć</button>
                 <button id="customExcelImportBtn" type="button" style="border:1px solid #0b8f84;background:#fff;color:#0b8f84;border-radius:8px;padding:6px 10px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Importuj Excel</button>
+                <button id="customBulkImageImportBtn" type="button" style="border:1px solid #334155;background:#fff;color:#0f172a;border-radius:8px;padding:6px 10px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Import zdjęć</button>
+                <button id="customApplyImportedLayoutBtn" type="button" style="border:1px solid #22c55e;background:rgba(34,197,94,.12);color:#14532d;border-radius:8px;padding:6px 10px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Dodaj gotowy layout do katalogu</button>
               </div>
             </div>
             <div id="customExcelImportStatus" class="custom-style-status" style="display:none;margin:-2px 0 10px 0;padding:7px 9px;border:1px solid #d7dfec;border-radius:8px;background:#f8fafc;font-size:10px;color:#334155;"></div>
@@ -5764,6 +6252,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       onReady(null);
       return;
     }
+    const productId = String(product.id || "").trim();
+    if (productId && customImageVariantOverrides.has(productId)) {
+      const overrideVariants = customImageVariantOverrides.get(productId);
+      const overrideEditorSrc = getCustomImageVariantSource(overrideVariants, "editor");
+      if (overrideEditorSrc) {
+        customImageOverrides.set(productId, overrideEditorSrc);
+        customResolvedImageUrls.set(productId, overrideEditorSrc);
+        onReady(overrideEditorSrc);
+        return;
+      }
+    }
     if (customImageOverrides.has(product.id)) {
       onReady(customImageOverrides.get(product.id) || null);
       return;
@@ -5773,6 +6272,15 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       return;
     }
     const indexKey = normalizeImportIndex(product.index);
+    const resolvedVariantsByIndex = getMappedValueByImportIndex(customResolvedImageVariantsByIndex, indexKey);
+    if (resolvedVariantsByIndex && typeof resolvedVariantsByIndex === "object") {
+      const resolvedEditorSrc = getCustomImageVariantSource(resolvedVariantsByIndex, "editor");
+      if (resolvedEditorSrc) {
+        customResolvedImageUrls.set(product.id, resolvedEditorSrc);
+        onReady(resolvedEditorSrc);
+        return;
+      }
+    }
     if (indexKey && customResolvedImageUrlsByIndex.has(indexKey)) {
       const resolved = customResolvedImageUrlsByIndex.get(indexKey) || null;
       customResolvedImageUrls.set(product.id, resolved);
@@ -6901,6 +7409,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const familyIndexes = family
       .map((item) => getDisplayIndex(item && item.product ? item.product : null))
       .filter(Boolean);
+    const familyProductIds = family
+      .map((item) => String(item?.product?.id || "").trim())
+      .filter(Boolean);
     const uniqueFamilyIndexes = Array.from(new Set(familyIndexes));
     const mergedIndex = uniqueFamilyIndexes.length
       ? uniqueFamilyIndexes.join(", ")
@@ -6957,6 +7468,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       TEXT_BOLD: !!customMetaTextBold,
       TEXT_UNDERLINE: !!customMetaTextUnderline,
       TEXT_ALIGN: normalizeAlignOption(customMetaTextAlign, "left"),
+      CUSTOM_SOURCE_PRODUCT_ID: String(base.id || "").trim(),
+      CUSTOM_SOURCE_PRODUCT_INDEX: String(base.index || "").trim(),
+      CUSTOM_FAMILY_PRODUCT_IDS: familyProductIds,
+      CUSTOM_FAMILY_PRODUCT_INDEXES: uniqueFamilyIndexes,
       FAMILY_IMAGE_URLS: familyImageUrls,
       CUSTOM_IMAGE_LAYOUTS: imageLayouts,
       "KOD EAN": includeBarcode ? (ean || "") : "",
@@ -8424,6 +8939,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const imageUploadInput = document.getElementById("customImageUploadInput");
     const bulkImageImportBtn = document.getElementById("customBulkImageImportBtn");
     const bulkImageImportInput = document.getElementById("customBulkImageImportInput");
+    const applyImportedLayoutBtn = document.getElementById("customApplyImportedLayoutBtn");
     const addFamilyProductBtn = document.getElementById("customAddFamilyProductBtn");
     const excelImportBtn = document.getElementById("customExcelImportBtn");
     const excelImportInput = document.getElementById("customExcelImportInput");
@@ -8463,6 +8979,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         if (customIndexOverrides.has(id)) indexOverrides[id] = customIndexOverrides.get(id);
         if (customPriceOverrides.has(id)) priceOverrides[id] = customPriceOverrides.get(id);
       });
+      const activeDraft = Array.isArray(customDraftModules)
+        ? customDraftModules.find((draft) => String(draft?.id || "") === String(customActiveDraftId || ""))
+        : null;
       return {
         id: `draft-${Date.now()}-${++customDraftModuleSeq}`,
         createdAt: Date.now(),
@@ -8499,7 +9018,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           customFamilySpacingTightness,
           showFlag: !!customPreviewVisibility.showFlag,
           showBarcode: !!customPreviewVisibility.showBarcode
-        }
+        },
+        importMeta: activeDraft?.importMeta && typeof activeDraft.importMeta === "object"
+          ? JSON.parse(JSON.stringify(activeDraft.importMeta))
+          : null
       };
     };
     customGetCurrentEditorSnapshot = getCurrentEditorSnapshot;
@@ -8533,6 +9055,365 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       };
     };
 
+    const normalizeAssignedPageForDraft = (value) => {
+      const raw = Number(value);
+      if (!Number.isFinite(raw) || raw <= 0) return null;
+      return Math.max(1, Math.trunc(raw));
+    };
+
+    const getDraftAssignedPageNumber = (draft) => {
+      const directValue = normalizeAssignedPageForDraft(draft?.importMeta?.assignedPageNumber);
+      if (directValue) return directValue;
+      const linkedProduct = productsById.get(String(draft?.productId || ""));
+      return (
+        normalizeAssignedPageForDraft(linkedProduct?.IMPORTED_ASSIGNED_PAGE) ||
+        normalizeAssignedPageForDraft(linkedProduct?.raw?.IMPORT_PAGE) ||
+        normalizeAssignedPageForDraft(draft?.assignedPageNumber)
+      );
+    };
+
+    const getDraftAssignedProductCount = (draft) => {
+      const explicit = Number(draft?.importMeta?.assignedProductCount);
+      if (Number.isFinite(explicit) && explicit > 0) return Math.max(1, Math.trunc(explicit));
+      const familyCount = Array.isArray(draft?.familyProducts) ? draft.familyProducts.length : 0;
+      return Math.max(1, familyCount || 1);
+    };
+
+    const getDraftPlacementSortOrder = (draft) => {
+      const explicit = Number(draft?.importMeta?.sortOrder);
+      if (Number.isFinite(explicit) && explicit > 0) return Math.trunc(explicit);
+      const createdAt = Number(draft?.createdAt);
+      if (Number.isFinite(createdAt) && createdAt > 0) return Math.trunc(createdAt);
+      return Number.MAX_SAFE_INTEGER;
+    };
+
+    const summarizeAssignedPagesFromDrafts = (drafts) => {
+      const perPage = new Map();
+      let totalProducts = 0;
+
+      (Array.isArray(drafts) ? drafts : []).forEach((draft) => {
+        if (draft?.importMeta?.source !== "excel") return;
+        const pageNumber = getDraftAssignedPageNumber(draft);
+        if (!pageNumber) return;
+        const productCount = getDraftAssignedProductCount(draft);
+        perPage.set(pageNumber, (perPage.get(pageNumber) || 0) + productCount);
+        totalProducts += productCount;
+      });
+
+      const pages = Array.from(perPage.entries())
+        .map(([pageNumber, productCount]) => ({ pageNumber, productCount }))
+        .sort((a, b) => a.pageNumber - b.pageNumber);
+
+      return {
+        totalPages: pages.length,
+        totalProducts,
+        pages
+      };
+    };
+
+    const getPendingAssignedExcelDrafts = () => (
+      (Array.isArray(customDraftModules) ? customDraftModules : [])
+        .filter((draft) => draft?.importMeta?.source === "excel" && getDraftAssignedPageNumber(draft))
+    );
+
+    const getImportedExcelDrafts = () => (
+      (Array.isArray(customDraftModules) ? customDraftModules : [])
+        .filter((draft) => draft?.importMeta?.source === "excel")
+    );
+
+    const getUnassignedExcelDraftProductCount = () => (
+      (Array.isArray(customDraftModules) ? customDraftModules : [])
+        .filter((draft) => draft?.importMeta?.source === "excel" && !getDraftAssignedPageNumber(draft))
+        .reduce((sum, draft) => sum + getDraftAssignedProductCount(draft), 0)
+    );
+
+    const getCatalogPagesList = () => (
+      (Array.isArray(window.pages) ? window.pages : []).filter((page) => page && !page.isCover)
+    );
+
+    const refreshCatalogPagesPerfState = () => {
+      try {
+        if (typeof window.refreshPagesPerf === "function") {
+          window.refreshPagesPerf();
+        } else if (typeof window.dispatchEvent === "function") {
+          window.dispatchEvent(new CustomEvent("excelImported"));
+        }
+      } catch (_err) {}
+      queueCustomStyleLazyImagesRefresh();
+    };
+
+    const getCatalogPageByOrdinal = (pageNumber) => {
+      const normalized = normalizeAssignedPageForDraft(pageNumber);
+      if (!normalized) return null;
+      const pagesList = getCatalogPagesList();
+      return pagesList[normalized - 1] || null;
+    };
+
+    const ensureCatalogPagesCount = (requiredCount) => {
+      const target = Math.max(0, Number(requiredCount) || 0);
+      let pagesList = getCatalogPagesList();
+      if (pagesList.length >= target) return 0;
+      if (typeof window.createNewPage !== "function") return -1;
+      const before = pagesList.length;
+      while (pagesList.length < target) {
+        const created = window.createNewPage({ reveal: false });
+        if (!created) break;
+        pagesList = getCatalogPagesList();
+      }
+      return Math.max(0, pagesList.length - before);
+    };
+
+    const buildAutoPlacementPointersForPage = (page, itemCount, options = {}) => {
+      const total = Math.max(0, Number(itemCount) || 0);
+      if (!page?.stage || total <= 0) return [];
+
+      const stageW = Math.max(1, Number(page.stage.width?.() || window.W || 0));
+      const stageH = Math.max(1, Number(page.stage.height?.() || window.H || 0));
+      const { w: moduleWRaw, h: moduleHRaw } = getCustomModuleDimensions(page);
+      const moduleW = Math.max(120, Number(moduleWRaw) || 0);
+      const moduleH = Math.max(96, Number(moduleHRaw) || 0);
+      const gapX = Math.max(16, Math.round(moduleW * 0.08));
+      const gapY = Math.max(18, Math.round(moduleH * 0.08));
+      const maxCols = Math.max(1, Math.floor((stageW + gapX) / (moduleW + gapX)));
+      const maxRows = Math.max(1, Math.floor((stageH + gapY) / (moduleH + gapY)));
+      let cols = Math.min(maxCols, Math.max(1, Math.ceil(Math.sqrt(total))));
+      let rows = Math.ceil(total / cols);
+
+      if (rows > maxRows) {
+        cols = maxCols;
+        rows = Math.ceil(total / Math.max(1, cols));
+      }
+
+      const rowCounts = [];
+      let remaining = total;
+      while (remaining > 0) {
+        const nextCount = Math.min(cols, remaining);
+        rowCounts.push(nextCount);
+        remaining -= nextCount;
+      }
+
+      const contentH = (rows * moduleH) + (Math.max(0, rows - 1) * gapY);
+      const baseStartY = Math.max(moduleH / 2, ((stageH - contentH) / 2) + (moduleH / 2));
+      const out = [];
+
+      rowCounts.forEach((rowCount, rowIndex) => {
+        const contentW = (rowCount * moduleW) + (Math.max(0, rowCount - 1) * gapX);
+        const baseStartX = Math.max(moduleW / 2, ((stageW - contentW) / 2) + (moduleW / 2));
+        for (let colIndex = 0; colIndex < rowCount; colIndex += 1) {
+          out.push({
+            x: Number((baseStartX + (colIndex * (moduleW + gapX))).toFixed(2)),
+            y: Number((baseStartY + (rowIndex * (moduleH + gapY))).toFixed(2))
+          });
+        }
+      });
+
+      const offset = Math.max(0, Math.min(out.length, Number(options.offset) || 0));
+      return out.slice(offset);
+    };
+
+    const collectCatalogEntryImageUrlsFromImport = (catalogEntry, mappedImagesByIndex) => {
+      if (!(mappedImagesByIndex instanceof Map) || !catalogEntry || typeof catalogEntry !== "object") return [];
+      const urls = [];
+      const seen = new Set();
+      const pushUrl = (candidate) => {
+        const url = String(candidate || "").trim();
+        if (!url || seen.has(url)) return;
+        seen.add(url);
+        urls.push(url);
+      };
+      const pushByIndex = (indexValue) => {
+        const mapped = getMappedValueByImportIndex(mappedImagesByIndex, indexValue);
+        if (mapped) pushUrl(mapped);
+      };
+      const familyProductIds = Array.isArray(catalogEntry.CUSTOM_FAMILY_PRODUCT_IDS) ? catalogEntry.CUSTOM_FAMILY_PRODUCT_IDS : [];
+      if (familyProductIds.length) {
+        familyProductIds.forEach((productId) => {
+          const product = productsById.get(String(productId || ""));
+          pushByIndex(product?.index);
+        });
+      }
+      if (!urls.length) {
+        const sourceProductId = String(catalogEntry.CUSTOM_SOURCE_PRODUCT_ID || "").trim();
+        if (sourceProductId) {
+          const product = productsById.get(sourceProductId);
+          pushByIndex(product?.index);
+        }
+      }
+      if (!urls.length) {
+        const familyIndexes = Array.isArray(catalogEntry.CUSTOM_FAMILY_PRODUCT_INDEXES) ? catalogEntry.CUSTOM_FAMILY_PRODUCT_INDEXES : [];
+        familyIndexes.forEach((indexValue) => pushByIndex(indexValue));
+      }
+      if (!urls.length) {
+        const mergedIndexes = String(catalogEntry.INDEKS || "")
+          .split(/[,\n;|/]+/)
+          .map((value) => String(value || "").trim())
+          .filter(Boolean);
+        if (mergedIndexes.length > 1) {
+          mergedIndexes.forEach((indexValue) => pushByIndex(indexValue));
+        }
+      }
+      if (!urls.length) {
+        pushByIndex(catalogEntry.CUSTOM_SOURCE_PRODUCT_INDEX || catalogEntry.INDEKS);
+      }
+      return urls;
+    };
+
+    const syncCatalogPagesWithImportedImages = async (mappedImagesByIndex) => {
+      if (!(mappedImagesByIndex instanceof Map) || !mappedImagesByIndex.size) return 0;
+      const rebuildJobs = [];
+      let touchedSlots = 0;
+
+      getCatalogPagesList().forEach((page) => {
+        const slotsToRebuild = [];
+        (Array.isArray(page?.products) ? page.products : []).forEach((catalogEntry, slotIndex) => {
+          if (!catalogEntry || typeof catalogEntry !== "object") return;
+          const nextUrls = collectCatalogEntryImageUrlsFromImport(catalogEntry, mappedImagesByIndex);
+          if (!nextUrls.length) return;
+          const prevUrls = Array.isArray(catalogEntry.FAMILY_IMAGE_URLS)
+            ? catalogEntry.FAMILY_IMAGE_URLS.map((item) => String(item || "").trim()).filter(Boolean)
+            : [];
+          const nextKey = nextUrls.join("\n");
+          const prevKey = prevUrls.join("\n");
+          if (nextKey === prevKey) return;
+          catalogEntry.FAMILY_IMAGE_URLS = nextUrls.slice();
+          catalogEntry.CUSTOM_IMAGE_LAYOUTS = buildExportImageLayouts(
+            String(catalogEntry.CUSTOM_SOURCE_PRODUCT_INDEX || catalogEntry.INDEKS || "").trim(),
+            String(catalogEntry.INDEKS || catalogEntry.CUSTOM_SOURCE_PRODUCT_INDEX || "").trim(),
+            nextUrls,
+            String(catalogEntry.MODULE_LAYOUT_STYLE_ID || customModuleLayoutStyleId || "default").trim()
+          );
+          slotsToRebuild.push(slotIndex);
+        });
+        if (!slotsToRebuild.length) return;
+        touchedSlots += slotsToRebuild.length;
+        if (typeof window.CustomStyleDirectHooks?.rebuildDirectModuleLayoutsOnPage === "function") {
+          rebuildJobs.push(
+            Promise.resolve(window.CustomStyleDirectHooks.rebuildDirectModuleLayoutsOnPage(page, {
+              slotIndexes: slotsToRebuild
+            }))
+              .then(() => {
+                page.layer?.batchDraw?.();
+                page.transformerLayer?.batchDraw?.();
+              })
+              .catch(() => {})
+          );
+        }
+      });
+
+      if (rebuildJobs.length) {
+        await Promise.allSettled(rebuildJobs);
+      }
+      queueCustomStyleLazyImagesRefresh();
+      return touchedSlots;
+    };
+
+    const autoPlaceAssignedDrafts = async (drafts, options = {}) => {
+      const assignedDrafts = (Array.isArray(drafts) ? drafts : [])
+        .filter((draft) => getDraftAssignedPageNumber(draft))
+        .sort((a, b) => {
+          const pageA = getDraftAssignedPageNumber(a);
+          const pageB = getDraftAssignedPageNumber(b);
+          if (pageA !== pageB) return (pageA || 0) - (pageB || 0);
+          const orderA = getDraftPlacementSortOrder(a);
+          const orderB = getDraftPlacementSortOrder(b);
+          if (orderA !== orderB) return orderA - orderB;
+          return String(a?.productIndex || "").localeCompare(String(b?.productIndex || ""), "pl", {
+            numeric: true,
+            sensitivity: "base"
+          });
+        });
+
+      if (!assignedDrafts.length) {
+        return {
+          createdPages: 0,
+          placedCount: 0,
+          failedCount: 0,
+          touchedPages: []
+        };
+      }
+
+      const totalDrafts = assignedDrafts.length;
+      const batchSize = Math.max(1, Number(options?.batchSize) || CUSTOM_LAYOUT_BATCH_PLACEMENT_SIZE);
+      const reportProgress = options?.reportProgress !== false;
+      const reportProgressState = (label, completedCount) => {
+        if (!reportProgress) return;
+        const ratio = totalDrafts > 0 ? Math.max(0, Math.min(1, Number(completedCount || 0) / totalDrafts)) : 0;
+        const percent = 14 + (ratio * 76);
+        showCustomImportProgress(label || "Dodawanie gotowego layoutu do katalogu...", percent);
+      };
+
+      const maxAssignedPage = Math.max(...assignedDrafts.map((draft) => Number(getDraftAssignedPageNumber(draft) || 0)));
+      const createdPages = ensureCatalogPagesCount(maxAssignedPage);
+      if (createdPages > 0) {
+        refreshCatalogPagesPerfState();
+        await yieldToUiFrame(18);
+      }
+      const grouped = new Map();
+      assignedDrafts.forEach((draft) => {
+        const pageNumber = getDraftAssignedPageNumber(draft);
+        if (!pageNumber) return;
+        if (!grouped.has(pageNumber)) grouped.set(pageNumber, []);
+        grouped.get(pageNumber).push(draft);
+      });
+
+      let placedCount = 0;
+      let failedCount = 0;
+      const touchedPages = [];
+      let processedCount = 0;
+
+      for (const [pageNumber, pageDrafts] of grouped.entries()) {
+        const page = getCatalogPageByOrdinal(pageNumber);
+        if (!page) {
+          failedCount += pageDrafts.length;
+          processedCount += pageDrafts.length;
+          continue;
+        }
+        reportProgressState(`Dodawanie layoutu: strona ${pageNumber} (${pageDrafts.length} moduł${pageDrafts.length === 1 ? "" : "y"})...`, processedCount);
+        const existingCount = (Array.isArray(page.products) ? page.products.filter(Boolean).length : 0);
+        const pointers = buildAutoPlacementPointersForPage(page, existingCount + pageDrafts.length, {
+          offset: existingCount
+        });
+        for (let idx = 0; idx < pageDrafts.length; idx += 1) {
+          const draft = pageDrafts[idx];
+          const pointer = pointers[idx] || {
+            x: Number(page.stage.width?.() || 0) / 2,
+            y: Number(page.stage.height?.() || 0) / 2
+          };
+          const result = await placeDraftSnapshotDirectToPage(String(draft?.id || ""), {
+            stage: page.stage,
+            pageNumber: page.number,
+            pointer,
+            silent: true,
+            deferRender: true,
+            bulkPlacement: true
+          });
+          processedCount += 1;
+          if (result?.ok) {
+            placedCount += 1;
+            if (!touchedPages.includes(pageNumber)) touchedPages.push(pageNumber);
+          } else {
+            failedCount += 1;
+          }
+          if (processedCount % batchSize === 0 || processedCount === totalDrafts) {
+            refreshCatalogPagesPerfState();
+            reportProgressState(`Dodawanie layoutu: ${processedCount}/${totalDrafts}`, processedCount);
+            await yieldToUiFrame(10);
+          }
+        }
+        refreshCatalogPagesPerfState();
+        await yieldToUiFrame(6);
+      }
+
+      refreshCatalogPagesPerfState();
+      renderDraftModulesList();
+      return {
+        createdPages: createdPages < 0 ? 0 : createdPages,
+        placedCount,
+        failedCount,
+        touchedPages
+      };
+    };
+
     const showExcelImportMessage = (message, type = "info") => {
       if (!excelImportStatus) return;
       const palette = (type === "error")
@@ -8545,6 +9426,91 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       excelImportStatus.style.background = palette.bg;
       excelImportStatus.style.color = palette.color;
       excelImportStatus.textContent = String(message || "");
+    };
+
+    const refreshApplyImportedLayoutButtonState = () => {
+      if (!applyImportedLayoutBtn) return;
+      const importedDrafts = getImportedExcelDrafts();
+      const pendingDrafts = getPendingAssignedExcelDrafts();
+      const summary = summarizeAssignedPagesFromDrafts(pendingDrafts);
+      const hasImported = importedDrafts.length > 0;
+      const hasPending = pendingDrafts.length > 0;
+      applyImportedLayoutBtn.disabled = false;
+      applyImportedLayoutBtn.style.opacity = hasImported ? "1" : "0.72";
+      applyImportedLayoutBtn.style.cursor = "pointer";
+      applyImportedLayoutBtn.style.borderColor = hasPending
+        ? "#22c55e"
+        : (hasImported ? "rgba(245,158,11,.45)" : "rgba(100,116,139,.35)");
+      applyImportedLayoutBtn.style.background = hasPending
+        ? "rgba(34,197,94,.12)"
+        : (hasImported ? "rgba(245,158,11,.14)" : "rgba(15,23,42,.62)");
+      applyImportedLayoutBtn.style.color = hasPending
+        ? "#14532d"
+        : (hasImported ? "#fbbf24" : "#94a3b8");
+      applyImportedLayoutBtn.textContent = hasPending
+        ? `Dodaj gotowy layout (${summary.totalPages} str. / ${summary.totalProducts} prod.)`
+        : (hasImported ? "Dodaj gotowy layout (sprawdź strony)" : "Dodaj gotowy layout do katalogu");
+      applyImportedLayoutBtn.title = hasPending
+        ? `Doda przygotowany katalog na ${summary.totalPages} stronach.`
+        : (hasImported
+          ? "Excel jest wczytany, ale nie wykryto przypisanych stron. Sprawdź kolumnę I / nagłówek Strona i zaimportuj plik ponownie."
+          : "Najpierw zaimportuj Excel z przypisanymi stronami.");
+    };
+
+    const placePreparedImportedLayoutToCatalog = async () => {
+      const importedDrafts = getImportedExcelDrafts();
+      const pendingDrafts = getPendingAssignedExcelDrafts();
+      if (!pendingDrafts.length) {
+        const msg = importedDrafts.length
+          ? "Excel został wczytany, ale nie wykryłem przypisanych stron. Sprawdź kolumnę I lub nagłówek 'Strona' i zaimportuj Excel ponownie."
+          : "Brak przygotowanego układu z Excela. Najpierw zaimportuj Excel z kolumną Strona.";
+        showExcelImportMessage(msg, "info");
+        if (typeof window.showAppToast === "function") window.showAppToast(msg, "info");
+        refreshApplyImportedLayoutButtonState();
+        return;
+      }
+
+      showCustomImportProgress("Dodawanie gotowego layoutu do katalogu...", 12);
+      const placementResult = await autoPlaceAssignedDrafts(pendingDrafts);
+      const firstRemainingDraft = Array.isArray(customDraftModules) ? customDraftModules[0] : null;
+      if (firstRemainingDraft && typeof restoreDraftToEditor === "function") {
+        restoreDraftToEditor(firstRemainingDraft, { silent: true });
+      } else {
+        storeCustomStyleEditorSnapshot();
+      }
+      showCustomImportProgress("Finalizowanie układu katalogu...", 100);
+      await waitMs(120);
+      hideCustomImportProgress();
+
+      const remainingAssignedDrafts = getPendingAssignedExcelDrafts();
+      const remainingAssignedSummary = summarizeAssignedPagesFromDrafts(remainingAssignedDrafts);
+      const unassignedProducts = getUnassignedExcelDraftProductCount();
+      const placedInfo = placementResult?.placedCount
+        ? `Dodano ${placementResult.placedCount} ${placementResult.placedCount === 1 ? "moduł" : (placementResult.placedCount >= 2 && placementResult.placedCount <= 4 ? "moduły" : "modułów")} na ${placementResult.touchedPages.length} ${placementResult.touchedPages.length === 1 ? "stronie" : "stronach"}.${placementResult.createdPages ? ` Utworzono nowych stron: ${placementResult.createdPages}.` : ""}`
+        : "Nie udało się dodać żadnego modułu do katalogu.";
+      const remainingInfo = remainingAssignedDrafts.length
+        ? ` W kolejce zostało jeszcze ${remainingAssignedDrafts.length} moduł(y) przypisanych do ${remainingAssignedSummary.totalPages} stron.`
+        : " Wszystkie przypisane produkty zostały już dodane do katalogu.";
+      const skippedInfo = unassignedProducts
+        ? ` Produkty bez przypisanej strony pozostały w kolejce: ${unassignedProducts}.`
+        : "";
+      const failedInfo = placementResult?.failedCount
+        ? ` Nie udało się ustawić ${placementResult.failedCount} ${placementResult.failedCount === 1 ? "modułu" : (placementResult.failedCount >= 2 && placementResult.failedCount <= 4 ? "modułów" : "modułów")}.`
+        : "";
+      const summary = `Gotowy layout z Excela został dodany do katalogu. ${placedInfo}${remainingInfo}${skippedInfo}${failedInfo} Okno zostaje otwarte, więc możesz dalej importować zdjęcia.`;
+      const tone = placementResult?.placedCount
+        ? (placementResult?.failedCount ? "info" : "success")
+        : "error";
+      showExcelImportMessage(summary, tone);
+      if (typeof window.showAppToast === "function") {
+        window.showAppToast(
+          placementResult?.placedCount
+            ? `Układ katalogu dodany: ${placementResult.placedCount} moduł(y).`
+            : "Nie udało się dodać gotowego układu do katalogu.",
+          tone
+        );
+      }
+      refreshApplyImportedLayoutButtonState();
     };
 
     const getProductByExcelIndex = (() => {
@@ -8623,6 +9589,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         IMPORT_BRAND: String(row?.brand || "").trim(),
         IMPORT_TNZ: String(row?.tnzRaw || "").trim(),
         IMPORT_GROUP: String(row?.groupRaw || "").trim(),
+        IMPORT_PAGE: Number.isFinite(row?.assignedPageNumber) ? row.assignedPageNumber : "",
         IMPORT_SOURCE: base ? "database" : "excel-fallback"
       });
       return Object.assign({}, excelProduct || {}, base || {}, {
@@ -8639,6 +9606,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         raw: nextRaw,
         IMPORTED_BRAND: String(row?.brand || "").trim(),
         IMPORTED_GROUP_KEY: String(row?.groupKey || "").trim(),
+        IMPORTED_ASSIGNED_PAGE: Number.isFinite(row?.assignedPageNumber) ? row.assignedPageNumber : null,
         IMPORTED_SOURCE: base ? "database" : "excel-fallback",
         IMPORTED_MISSING_IN_DB: !base
       });
@@ -8682,20 +9650,72 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
       const groupedMap = new Map();
       const singles = [];
+      const compareTaskOrder = (a, b) => {
+        const pageA = normalizeAssignedPageForDraft(a?.assignedPageNumber);
+        const pageB = normalizeAssignedPageForDraft(b?.assignedPageNumber);
+        if (pageA !== pageB) {
+          if (pageA === null) return 1;
+          if (pageB === null) return -1;
+          return pageA - pageB;
+        }
+        const orderA = Number(a?.sortOrder);
+        const orderB = Number(b?.sortOrder);
+        if (Number.isFinite(orderA) || Number.isFinite(orderB)) {
+          const safeA = Number.isFinite(orderA) ? orderA : Number.MAX_SAFE_INTEGER;
+          const safeB = Number.isFinite(orderB) ? orderB : Number.MAX_SAFE_INTEGER;
+          if (safeA !== safeB) return safeA - safeB;
+        }
+        return String(a?.product?.index || a?.groupKey || "").localeCompare(
+          String(b?.product?.index || b?.groupKey || ""),
+          "pl",
+          { numeric: true, sensitivity: "base" }
+        );
+      };
+
       matched.forEach((item) => {
         const key = String(item?.row?.groupKey || "").trim();
+        const assignedPageNumber = normalizeAssignedPageForDraft(item?.row?.assignedPageNumber);
         if (!key) {
           singles.push(item);
           return;
         }
-        if (!groupedMap.has(key)) groupedMap.set(key, []);
-        groupedMap.get(key).push(item);
+        const compositeKey = `${assignedPageNumber || "none"}::${key}`;
+        if (!groupedMap.has(compositeKey)) {
+          groupedMap.set(compositeKey, {
+            groupKey: key,
+            assignedPageNumber,
+            items: []
+          });
+        }
+        groupedMap.get(compositeKey).items.push(item);
       });
       showCustomImportProgress("Budowanie modułów roboczych...", 26);
 
-      const sortedGroupKeys = Array.from(groupedMap.keys()).sort((a, b) =>
-        String(a).localeCompare(String(b), "pl", { numeric: true, sensitivity: "base" })
-      );
+      singles.sort((a, b) => compareTaskOrder(
+        {
+          assignedPageNumber: a?.row?.assignedPageNumber,
+          sortOrder: a?.row?.rowNo,
+          product: a?.product
+        },
+        {
+          assignedPageNumber: b?.row?.assignedPageNumber,
+          sortOrder: b?.row?.rowNo,
+          product: b?.product
+        }
+      ));
+
+      const sortedGroups = Array.from(groupedMap.values()).sort((a, b) => compareTaskOrder(
+        {
+          assignedPageNumber: a?.assignedPageNumber,
+          sortOrder: Math.min(...((Array.isArray(a?.items) ? a.items : []).map((entry) => Number(entry?.row?.rowNo) || Number.MAX_SAFE_INTEGER))),
+          groupKey: a?.groupKey
+        },
+        {
+          assignedPageNumber: b?.assignedPageNumber,
+          sortOrder: Math.min(...((Array.isArray(b?.items) ? b.items : []).map((entry) => Number(entry?.row?.rowNo) || Number.MAX_SAFE_INTEGER))),
+          groupKey: b?.groupKey
+        }
+      ));
 
       const importTasks = [];
       singles.forEach((item) => {
@@ -8704,12 +9724,16 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           product: item.product,
           row: item.row,
           cost: 1,
+          assignedPageNumber: normalizeAssignedPageForDraft(item?.row?.assignedPageNumber),
+          assignedProductCount: 1,
+          sortOrder: Number(item?.row?.rowNo) || Number.MAX_SAFE_INTEGER,
           progressLabel: "Importowanie produktów bez grupy..."
         });
       });
 
-      for (const groupKey of sortedGroupKeys) {
-        const items = groupedMap.get(groupKey) || [];
+      for (const groupEntry of sortedGroups) {
+        const groupKey = String(groupEntry?.groupKey || "").trim();
+        const items = Array.isArray(groupEntry?.items) ? groupEntry.items : [];
         if (items.length < 2) {
           const item = items[0];
           if (!item) continue;
@@ -8718,6 +9742,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
             product: item.product,
             row: item.row,
             cost: 1,
+            assignedPageNumber: normalizeAssignedPageForDraft(item?.row?.assignedPageNumber),
+            assignedProductCount: 1,
+            sortOrder: Number(item?.row?.rowNo) || Number.MAX_SAFE_INTEGER,
             progressLabel: "Importowanie grup rodzimych..."
           });
           continue;
@@ -8728,8 +9755,11 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         importTasks.push({
           kind: "group",
           groupKey,
+          assignedPageNumber: normalizeAssignedPageForDraft(groupEntry?.assignedPageNumber),
+          assignedProductCount: items.length,
           items: limitedItems,
           cost: limitedItems.length,
+          sortOrder: Math.min(...items.map((entry) => Number(entry?.row?.rowNo) || Number.MAX_SAFE_INTEGER)),
           progressLabel: "Importowanie grup rodzimych..."
         });
       }
@@ -8742,6 +9772,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         return;
       }
 
+      importTasks.sort(compareTaskOrder);
       const skippedByLimit = Math.max(0, importTasks.length - availableSlots);
       const tasksToRun = importTasks.slice(0, availableSlots);
       const totalUnits = Math.max(
@@ -8796,7 +9827,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
                 groupKey: "",
                 groupLabel: "",
                 brand: String(task?.row?.brand || "").trim(),
-                tnz: !!task?.row?.tnz
+                tnz: !!task?.row?.tnz,
+                sortOrder: Number(task?.sortOrder) || Number(task?.row?.rowNo) || Number.MAX_SAFE_INTEGER,
+                assignedPageNumber: normalizeAssignedPageForDraft(task?.assignedPageNumber),
+                assignedProductCount: Math.max(1, Number(task?.assignedProductCount) || 1)
               }
             };
           }
@@ -8843,7 +9877,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
                 groupKey: String(task.groupKey || ""),
                 groupLabel,
                 brand: String(baseEntry?.row?.brand || "").trim(),
-                tnz: hasTnz
+                tnz: hasTnz,
+                sortOrder: Number(task?.sortOrder) || Number(baseEntry?.row?.rowNo) || Number.MAX_SAFE_INTEGER,
+                assignedPageNumber: normalizeAssignedPageForDraft(task?.assignedPageNumber),
+                assignedProductCount: Math.max(1, Number(task?.assignedProductCount) || itemsForGroup.length || 1)
               }
             };
           }
@@ -8862,12 +9899,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       customDraftModules = [...createdDrafts, ...(Array.isArray(customDraftModules) ? customDraftModules : [])];
       customDraftModules = customDraftModules.slice(0, CUSTOM_DRAFT_MODULE_LIMIT);
       renderDraftModulesList();
-      if (createdDrafts[0] && typeof restoreDraftToEditor === "function") {
-        restoreDraftToEditor(createdDrafts[0], { silent: true });
+      showCustomImportProgress("Przygotowanie gotowego układu z Excela...", 94);
+      const firstRemainingDraft = Array.isArray(customDraftModules) ? customDraftModules[0] : null;
+      if (firstRemainingDraft && typeof restoreDraftToEditor === "function") {
+        restoreDraftToEditor(firstRemainingDraft, { silent: true });
       } else {
         storeCustomStyleEditorSnapshot();
       }
-      showCustomImportProgress("Finalizowanie podglądu importu...", 100);
+      showCustomImportProgress("Finalizowanie importu i podglądu...", 100);
       await waitMs(120);
       hideCustomImportProgress();
 
@@ -8877,10 +9916,25 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const limitInfo = skippedByLimit
         ? ` Osiągnięto limit kolejki ${CUSTOM_DRAFT_MODULE_LIMIT}. Pominięto ${skippedByLimit} moduł(y).`
         : "";
-      const summary = `Zaimportowano ${createdDrafts.length} moduł(y). Z bazy: ${matchedInDatabaseCount}.${fallbackCount ? ` Z Excela awaryjnie: ${fallbackCount}.` : ""}${unresolvedCount ? ` Nieprzetworzonych: ${unresolvedCount}.` : ""}${limitInfo}`;
-      showExcelImportMessage(summary, (fallbackCount || unresolvedCount) ? "info" : "success");
+      const assignedPageSummary = summarizeAssignedPagesFromDrafts(createdDrafts);
+      const hasAssignedPages = assignedPageSummary.totalPages > 0;
+      const assignedPageBreakdown = hasAssignedPages
+        ? ` ${assignedPageSummary.pages.map((page) => `Strona ${page.pageNumber}: ${page.productCount} ${page.productCount === 1 ? "produkt" : (page.productCount >= 2 && page.productCount <= 4 ? "produkty" : "produktów")}.`).join(" ")}`
+        : "";
+      const pagePreparedInfo = hasAssignedPages
+        ? ` Układ katalogu został przygotowany. Wykryto ${assignedPageSummary.totalPages} ${assignedPageSummary.totalPages === 1 ? "stronę" : (assignedPageSummary.totalPages >= 2 && assignedPageSummary.totalPages <= 4 ? "strony" : "stron")} z przypisanymi produktami.${assignedPageBreakdown}`
+        : "";
+      const nextStepInfo = hasAssignedPages
+        ? ` Następny krok: zaimportuj zdjęcia, a potem kliknij "Dodaj gotowy layout do katalogu".`
+        : " Produkty bez przypisanej strony pozostają w kolejce roboczej.";
+      const summary = `Zaimportowano ${createdDrafts.length} moduł(y). Z bazy: ${matchedInDatabaseCount}.${fallbackCount ? ` Z Excela awaryjnie: ${fallbackCount}.` : ""}${unresolvedCount ? ` Nieprzetworzonych: ${unresolvedCount}.` : ""}${limitInfo}${pagePreparedInfo}${nextStepInfo}`;
+      showExcelImportMessage(summary, hasAssignedPages || fallbackCount || unresolvedCount ? "info" : "success");
       if (typeof window.showAppToast === "function") {
-        window.showAppToast(summary, (fallbackCount || unresolvedCount) ? "info" : "success");
+        if (hasAssignedPages) {
+          window.showAppToast("Excel przygotowany. Zaimportuj zdjęcia i kliknij Dodaj gotowy layout do katalogu.", "info");
+        } else {
+          window.showAppToast(summary, (fallbackCount || unresolvedCount) ? "info" : "success");
+        }
       }
     };
 
@@ -8914,6 +9968,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       if (!draftListEl) return;
       if (!Array.isArray(customDraftModules) || !customDraftModules.length) {
         draftListEl.innerHTML = `<div class="custom-style-blank custom-style-muted" style="font-size:10px;color:#64748b;">Brak zapisanych modułów roboczych.</div>`;
+        refreshApplyImportedLayoutButtonState();
         draftBridgeListeners.forEach((fn) => {
           try { fn([]); } catch (_err) {}
         });
@@ -8948,10 +10003,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         const isGroupedImport = !!(draft?.importMeta?.source === "excel" && draft?.importMeta?.isNativeGroup);
         const isSingleImport = !!(draft?.importMeta?.source === "excel" && !draft?.importMeta?.isNativeGroup);
         const isTnzImport = !!(draft?.importMeta?.tnz || String(draft?.settings?.customPriceBadgeStyleId || "").includes("tnz"));
+        const assignedPageNumber = getDraftAssignedPageNumber(draft);
         const cardBg = isTnzImport ? "rgba(76,29,149,.28)" : (isGroupedImport ? "rgba(131,24,67,.24)" : (isSingleImport ? "rgba(6,95,70,.26)" : "rgba(5,10,18,.72)"));
         const cardBorder = isTnzImport ? "rgba(167,139,250,.42)" : (isGroupedImport ? "rgba(244,114,182,.40)" : (isSingleImport ? "rgba(74,222,128,.34)" : "rgba(148,163,184,.18)"));
         const groupLabel = isGroupedImport
           ? escapeHtml(String(draft?.importMeta?.groupLabel || "Grupa rodzima"))
+          : "";
+        const pageLabel = assignedPageNumber
+          ? `<div style="font-size:9px;font-weight:700;color:#67e8f9;margin-top:2px;">Strona ${assignedPageNumber}</div>`
           : "";
         return `
           <div class="custom-style-draft-card" data-draft-id="${escapeHtml(draft.id)}" style="display:grid;grid-template-columns:68px 1fr auto;gap:8px;align-items:start;border:1px solid ${cardBorder};border-radius:8px;padding:6px;background:${cardBg};">
@@ -8959,6 +10018,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
             <div style="min-width:0;">
               <div class="custom-style-heading" style="font-size:10px;font-weight:700;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">[${index}] ${title}</div>
               ${groupLabel ? `<div style="font-size:9px;font-weight:700;color:#f9a8d4;margin-top:2px;">${groupLabel}</div>` : ``}
+              ${pageLabel}
               <div style="font-size:9px;color:#cbd5e1;margin-top:2px;">Rodzina: ${familyCount} • Waluta: ${curr} • Cena: ${styleName}</div>
               <div class="custom-style-muted" style="font-size:9px;color:#64748b;margin-top:2px;">Teksty: ${metaFont}, ${metaAlign}${draft.settings?.customMetaTextBold ? ", B" : ""}${draft.settings?.customMetaTextUnderline ? ", U" : ""}</div>
               <div class="custom-style-muted" style="font-size:9px;color:#64748b;">Cena: ${priceFont}, ${priceAlign}${draft.settings?.customPriceTextBold ? ", B" : ""}${draft.settings?.customPriceTextUnderline ? ", U" : ""}</div>
@@ -8970,6 +10030,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           </div>
         `;
       }).join("");
+      refreshApplyImportedLayoutButtonState();
       draftBridgeListeners.forEach((fn) => {
         try { fn((customDraftModules || []).slice()); } catch (_err) {}
       });
@@ -9175,6 +10236,17 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         }
       };
     }
+    if (applyImportedLayoutBtn) {
+      applyImportedLayoutBtn.onclick = async () => {
+        if (applyImportedLayoutBtn.disabled) {
+          const msg = "Najpierw zaimportuj Excel z kolumną Strona, aby przygotować gotowy layout.";
+          showExcelImportMessage(msg, "info");
+          if (typeof window.showAppToast === "function") window.showAppToast(msg, "info");
+          return;
+        }
+        await placePreparedImportedLayoutToCatalog();
+      };
+    }
     if (bulkImageImportBtn && bulkImageImportInput) {
       bulkImageImportBtn.onclick = () => {
         bulkImageImportInput.value = "";
@@ -9186,8 +10258,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         let matchedFiles = 0;
         let mappedProducts = 0;
         let failedReads = 0;
+        const unmatchedFiles = [];
         const imageIndexMap = buildProductsByImageIndexMap();
-        const indexToDataUrl = new Map();
+        const indexToResolvedImageUrl = new Map();
         showCustomImportProgress("Import zdjęć: przygotowanie...", 4);
         try {
           for (let i = 0; i < files.length; i += 1) {
@@ -9196,26 +10269,44 @@ const CUSTOM_PRODUCT_LAYOUTS = {
             showCustomImportProgress(`Import zdjęć: ${file.name}`, progress);
             const candidates = getImageIndexCandidatesFromFileName(file.name);
             if (!candidates.length) continue;
+            if (i > 0 && i % 4 === 0) {
+              await yieldToUiFrame(8);
+            }
             let matched = false;
             for (const candidate of candidates) {
               const productList = getProductsByImageIndex(candidate, imageIndexMap);
               if (!productList.length) continue;
-              let dataUrl = getMappedValueByImportIndex(indexToDataUrl, candidate) || "";
-              if (!dataUrl) {
+              let resolvedImageUrl = getMappedValueByImportIndex(indexToResolvedImageUrl, candidate) || "";
+              let variants = getMappedValueByImportIndex(customResolvedImageVariantsByIndex, candidate);
+              if ((!variants || typeof variants !== "object") && !resolvedImageUrl) {
                 try {
-                  dataUrl = await readFileAsDataUrl(file);
+                  variants = await createCustomImageVariantsFromFileSafe(file, {
+                    cacheKey: `custom-style-bulk:${file.name}:${file.size}:${file.lastModified}`
+                  });
                 } catch (_err) {
                   failedReads += 1;
-                  dataUrl = "";
+                  variants = null;
                 }
-                if (!dataUrl) break;
-                setMappedValueByImportIndex(indexToDataUrl, candidate, dataUrl);
-                setMappedValueByImportIndex(customResolvedImageUrlsByIndex, candidate, dataUrl);
+                resolvedImageUrl = getCustomImageVariantSource(variants, "editor");
+                if (!resolvedImageUrl) break;
+                rememberCustomImageVariants(variants, {
+                  indexes: [candidate],
+                  sources: [resolvedImageUrl]
+                });
+                setMappedValueByImportIndex(indexToResolvedImageUrl, candidate, resolvedImageUrl);
+                setMappedValueByImportIndex(customResolvedImageUrlsByIndex, candidate, resolvedImageUrl);
+              } else if (!resolvedImageUrl && variants && typeof variants === "object") {
+                resolvedImageUrl = getCustomImageVariantSource(variants, "editor");
+                if (resolvedImageUrl) {
+                  setMappedValueByImportIndex(indexToResolvedImageUrl, candidate, resolvedImageUrl);
+                  setMappedValueByImportIndex(customResolvedImageUrlsByIndex, candidate, resolvedImageUrl);
+                }
               }
+              if (!resolvedImageUrl) break;
               productList.forEach((p) => {
                 if (!p?.id) return;
-                customImageOverrides.set(String(p.id), dataUrl);
-                customResolvedImageUrls.set(String(p.id), dataUrl);
+                customImageOverrides.set(String(p.id), resolvedImageUrl);
+                customResolvedImageUrls.set(String(p.id), resolvedImageUrl);
                 mappedProducts += 1;
               });
               matched = true;
@@ -9223,25 +10314,25 @@ const CUSTOM_PRODUCT_LAYOUTS = {
               break;
             }
             if (!matched) {
-              // plik bez dopasowania po indeksie
+              unmatchedFiles.push(String(file?.name || `plik-${i + 1}`));
             }
           }
 
           // Synchronizacja dla już utworzonych wariantów/draftów (id z importu excel).
-          if (indexToDataUrl.size) {
+          if (indexToResolvedImageUrl.size) {
             for (const p of productsById.values()) {
-              const dataUrl = getMappedValueByImportIndex(indexToDataUrl, p?.index) || "";
-              if (!dataUrl || !p?.id) continue;
-              customImageOverrides.set(String(p.id), dataUrl);
-              customResolvedImageUrls.set(String(p.id), dataUrl);
+              const resolvedImageUrl = getMappedValueByImportIndex(indexToResolvedImageUrl, p?.index) || "";
+              if (!resolvedImageUrl || !p?.id) continue;
+              customImageOverrides.set(String(p.id), resolvedImageUrl);
+              customResolvedImageUrls.set(String(p.id), resolvedImageUrl);
             }
             customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).map((draft) => {
               const productId = String(draft?.productId || "");
               const product = productsById.get(productId);
-              const mainUrl = getMappedValueByImportIndex(indexToDataUrl, product?.index || draft?.productIndex) || "";
+              const mainUrl = getMappedValueByImportIndex(indexToResolvedImageUrl, product?.index || draft?.productIndex) || "";
               const nextFamily = (Array.isArray(draft?.familyProducts) ? draft.familyProducts : []).map((fp) => {
                 const fpProd = productsById.get(String(fp?.productId || ""));
-                const fpUrl = getMappedValueByImportIndex(indexToDataUrl, fpProd?.index) || "";
+                const fpUrl = getMappedValueByImportIndex(indexToResolvedImageUrl, fpProd?.index) || "";
                 return fpUrl ? { ...fp, url: fpUrl } : fp;
               });
               if (!mainUrl && (!nextFamily.length || nextFamily === draft.familyProducts)) return draft;
@@ -9252,8 +10343,35 @@ const CUSTOM_PRODUCT_LAYOUTS = {
                 familyProducts: nextFamily
               };
             });
+            const resolveImportedUrlForProduct = (product, fallback = "") => {
+              const mapped = getMappedValueByImportIndex(indexToResolvedImageUrl, product?.index);
+              return mapped || String(fallback || "");
+            };
+            const nextPreviewUrl = resolveImportedUrlForProduct(currentPreviewProduct, currentPreviewImageUrl);
+            if (nextPreviewUrl) {
+              currentPreviewImageUrl = nextPreviewUrl;
+              currentPickerImageUrl = nextPreviewUrl;
+            }
+            const nextFamilyBaseUrl = resolveImportedUrlForProduct(familyBaseProduct, familyBaseImageUrl);
+            if (nextFamilyBaseUrl) {
+              familyBaseImageUrl = nextFamilyBaseUrl;
+            }
+            if (Array.isArray(currentFamilyProducts) && currentFamilyProducts.length) {
+              currentFamilyProducts = currentFamilyProducts.map((item) => {
+                const nextUrl = resolveImportedUrlForProduct(item?.product, item?.url);
+                if (!nextUrl || nextUrl === String(item?.url || "")) return item;
+                return {
+                  ...item,
+                  url: nextUrl
+                };
+              });
+            }
             renderDraftModulesList();
           }
+
+          const refreshedCatalogSlots = indexToResolvedImageUrl.size
+            ? await syncCatalogPagesWithImportedImages(indexToResolvedImageUrl)
+            : 0;
 
           if (currentPreviewProduct) {
             renderProductImagePreview(currentPreviewProduct);
@@ -9261,9 +10379,23 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           showCustomImportProgress("Import zdjęć zakończony.", 100);
           await waitMs(180);
           hideCustomImportProgress();
-          const summary = `Import zdjęć: dopasowano plików ${matchedFiles}/${files.length}, przypięto zdjęć do produktów: ${mappedProducts}.${failedReads ? ` Błędy odczytu: ${failedReads}.` : ""}`;
-          showExcelImportMessage(summary, matchedFiles ? "success" : "info");
-          if (typeof window.showAppToast === "function") window.showAppToast(summary, matchedFiles ? "success" : "info");
+          const unmatchedPreview = unmatchedFiles.length
+            ? ` Nie dopasowano plików: ${unmatchedFiles.slice(0, 5).join(", ")}${unmatchedFiles.length > 5 ? ` (+${unmatchedFiles.length - 5} więcej)` : ""}.`
+            : "";
+          const noMatchHint = !matchedFiles
+            ? " Nazwa pliku musi zawierać indeks produktu z Excela, np. 12345.jpg albo ABC123-front.png."
+            : "";
+          const refreshHint = matchedFiles && !refreshedCatalogSlots
+            ? " Zdjęcia dopasowano, ale nie znaleziono jeszcze gotowych modułów do odświeżenia na stronach."
+            : "";
+          const pendingLayoutSummary = summarizeAssignedPagesFromDrafts(getPendingAssignedExcelDrafts());
+          const nextStepHint = pendingLayoutSummary.totalPages
+            ? ` Następny krok: kliknij "Dodaj gotowy layout do katalogu" (${pendingLayoutSummary.totalPages} str. / ${pendingLayoutSummary.totalProducts} prod.).`
+            : "";
+          const summary = `Import zdjęć: dopasowano plików ${matchedFiles}/${files.length}, przypięto zdjęć do produktów: ${mappedProducts}.${refreshedCatalogSlots ? ` Odświeżono modułów w katalogu: ${refreshedCatalogSlots}.` : ""}${failedReads ? ` Błędy odczytu: ${failedReads}.` : ""}${unmatchedPreview}${noMatchHint}${refreshHint}${nextStepHint}`;
+          const summaryTone = matchedFiles ? (unmatchedFiles.length ? "info" : "success") : "error";
+          showExcelImportMessage(summary, summaryTone);
+          if (typeof window.showAppToast === "function") window.showAppToast(summary, summaryTone);
         } catch (err) {
           hideCustomImportProgress();
           const msg = `Błąd importu zdjęć: ${String(err && err.message ? err.message : err)}`;
@@ -9278,12 +10410,15 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const placeDraftSnapshotDirectToPage = async (draftId, payload = {}) => {
       const draft = (Array.isArray(customDraftModules) ? customDraftModules : []).find((d) => String(d?.id || "") === String(draftId || ""));
       if (!draft) return { ok: false, error: "draft_not_found" };
+      const silent = !!payload.silent;
+      const deferRender = !!payload.deferRender;
+      const bulkPlacement = !!payload.bulkPlacement;
       const stageRef = payload.stage || null;
       const page = (Array.isArray(window.pages) ? window.pages : []).find((p) => p && (p.stage === stageRef || p.number === payload.pageNumber)) || getActiveCatalogPage();
       const pointer = payload.pointer && Number.isFinite(payload.pointer.x) && Number.isFinite(payload.pointer.y) ? payload.pointer : null;
       if (!page || !page.stage || !page.layer || !pointer) return { ok: false, error: "page_or_pointer_missing" };
 
-      restoreDraftToEditor(draft);
+      restoreDraftToEditor(draft, { silent: true });
       const product = currentPreviewProduct;
       if (!product) return { ok: false, error: "product_restore_failed" };
 
@@ -9308,7 +10443,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const familyImageUrls = family.map((item) => String(item?.url || "").trim()).filter(Boolean);
       const effectiveImageUrl = getEffectivePreviewImageUrl();
       const preloadTargets = familyImageUrls.length > 1 ? familyImageUrls : [effectiveImageUrl].filter(Boolean);
-      await Promise.allSettled([preloadImageUrls(preloadTargets, 1400), waitMs(80)]);
+      if (!bulkPlacement) {
+        await Promise.allSettled([preloadImageUrls(preloadTargets, 1400), waitMs(80)]);
+      }
 
       const catalogEntry = applyPageCurrencyToCatalogEntry(buildCatalogProductFromCustom(product), page);
       page.products[slotIndex] = catalogEntry;
@@ -9328,8 +10465,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       if (String(customActiveDraftId || "") === String(draftId || "")) {
         customActiveDraftId = String(customDraftModules[0]?.id || "");
       }
-      renderDraftModulesList();
-      if (typeof window.showAppToast === "function") window.showAppToast("Przeciągnięto moduł na stronę katalogu.", "success");
+      if (!deferRender) renderDraftModulesList();
+      if (!silent && typeof window.showAppToast === "function") window.showAppToast("Przeciągnięto moduł na stronę katalogu.", "success");
       return { ok: true, slotIndex };
     };
 
@@ -9401,23 +10538,30 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       };
     }
     if (imageUploadInput) {
-      imageUploadInput.onchange = () => {
+      imageUploadInput.onchange = async () => {
         const file = imageUploadInput.files && imageUploadInput.files[0];
         if (!file) return;
         const targetId = imageUploadInput.dataset.productId || currentPreviewProduct?.id || "";
         if (!targetId) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          const dataUrl = String(reader.result || "");
-          if (!dataUrl.startsWith("data:image/")) return;
-          customImageOverrides.set(targetId, dataUrl);
+        try {
+          const variants = await createCustomImageVariantsFromFileSafe(file, {
+            cacheKey: `custom-style-single:${file.name}:${file.size}:${file.lastModified}`
+          });
+          const editorSrc = getCustomImageVariantSource(variants, "editor");
+          if (!editorSrc) return;
           const targetProduct = products.find((p) => p.id === targetId) || currentPreviewProduct;
+          rememberCustomImageVariants(variants, {
+            productOverrideIds: [targetId],
+            indexes: [targetProduct?.index],
+            sources: [editorSrc]
+          });
+          customImageOverrides.set(targetId, editorSrc);
+          customResolvedImageUrls.set(targetId, editorSrc);
           if (targetProduct) {
             currentPreviewProduct = targetProduct;
             renderProductImagePreview(targetProduct);
           }
-        };
-        reader.readAsDataURL(file);
+        } catch (_err) {}
       };
     }
     const applyToggleMark = (markEl, enabled) => {

@@ -24,8 +24,10 @@ window.__IMAGE_VARIANT_CACHE_BYTES = Number(window.__IMAGE_VARIANT_CACHE_BYTES) 
 window.__PRODUCT_IMAGE_CACHE_ORDER = Array.isArray(window.__PRODUCT_IMAGE_CACHE_ORDER) ? window.__PRODUCT_IMAGE_CACHE_ORDER : [];
 window.__IMAGE_SOURCE_BANK = window.__IMAGE_SOURCE_BANK || new Map();
 window.__IMAGE_SOURCE_BANK_ORDER = Array.isArray(window.__IMAGE_SOURCE_BANK_ORDER) ? window.__IMAGE_SOURCE_BANK_ORDER : [];
-const IMAGE_VARIANT_CACHE_LIMIT = 120;
-const IMAGE_VARIANT_CACHE_MAX_BYTES = 180 * 1024 * 1024;
+// Trzymaj cache wariantów zdjęć pod kontrolą, bo większe importy szybko
+// dopychają pamięć i zaczynają zamulać edytor przy pracy na wielu stronach.
+const IMAGE_VARIANT_CACHE_LIMIT = 80;
+const IMAGE_VARIANT_CACHE_MAX_BYTES = 96 * 1024 * 1024;
 const PRODUCT_IMAGE_CACHE_LIMIT = 180;
 const DATA_URL_KEY_INLINE_LIMIT = 220;
 const NODE_INLINE_SRC_LIMIT = 48000;
@@ -4278,6 +4280,31 @@ let currentZoom = 1.0;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3.0;
 
+function applyZoomToAllPages(scale) {
+    const safeScale = Number.isFinite(scale) ? scale : 1.0;
+    currentZoom = safeScale;
+    pages.forEach((page) => applyZoomToPage(page, safeScale));
+}
+
+function resetZoomToDefault() {
+    const range = document.getElementById('zoomRange');
+    const value = document.getElementById('zoomValue');
+    if (range) range.value = '1';
+    if (value) value.textContent = '100%';
+    applyZoomToAllPages(1.0);
+}
+
+function bindZoomResetShortcutOnce() {
+    if (window.__zoomResetShortcutBound) return;
+    window.__zoomResetShortcutBound = true;
+    document.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && e.key === '0') {
+            e.preventDefault();
+            resetZoomToDefault();
+        }
+    });
+}
+
 function applyZoomToPage(page, scale) {
     const wrapper = page.container.querySelector('.canvas-wrapper');
     if (!wrapper) return;
@@ -4417,16 +4444,15 @@ function createZoomSlider() {
     window.changeZoom = (delta) => {
         const newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, currentZoom + delta));
         range.value = newZoom;
-        currentZoom = newZoom;
         value.textContent = Math.round(newZoom * 100) + '%';
-        pages.forEach(p => applyZoomToPage(p, newZoom));
+        applyZoomToAllPages(newZoom);
         updateZoomTrack();
     };
 
     range.oninput = () => {
-        currentZoom = parseFloat(range.value);
-        value.textContent = Math.round(currentZoom * 100) + '%';
-        pages.forEach(p => applyZoomToPage(p, currentZoom));
+        const nextZoom = parseFloat(range.value);
+        value.textContent = Math.round(nextZoom * 100) + '%';
+        applyZoomToAllPages(nextZoom);
         updateZoomTrack();
     };
 
@@ -4452,16 +4478,7 @@ function createZoomSlider() {
     });
 
     updateZoomTrack();
-
-    document.addEventListener('keydown', e => {
-        if (e.ctrlKey && e.key === '0') {
-            e.preventDefault();
-            range.value = 1;
-            currentZoom = 1.0;
-            value.textContent = '100%';
-            pages.forEach(p => applyZoomToPage(p, 1.0));
-        }
-    });
+    bindZoomResetShortcutOnce();
 }
 
 // Styl suwaka zoom (Canva-like)
@@ -8664,6 +8681,64 @@ window.repairPageInteractions = function() {
     queueRefreshPagesPerf();
 };
 
+// Szybki kreator – zastosuj globalne ustawienia bez redefiniowania funkcji
+// przy każdym redraw pojedynczego slotu.
+window.applyQuickSettings = function(opts = {}) {
+    if (!Array.isArray(pages) || pages.length === 0) return;
+    pages.forEach(p => {
+        const imgStates = [];
+        if (Array.isArray(p.slotObjects)) {
+            p.slotObjects.forEach((img, idx) => {
+                if (!img) return;
+                if (typeof img.isDestroyed === "function" && img.isDestroyed()) {
+                    p.slotObjects[idx] = null;
+                    return;
+                }
+                imgStates[idx] = {
+                    img,
+                    x: img.x(),
+                    y: img.y(),
+                    scaleX: img.scaleX(),
+                    scaleY: img.scaleY(),
+                    rotation: img.rotation()
+                };
+                if (img.getLayer && img.getLayer() === p.layer) {
+                    img.remove();
+                }
+            });
+        }
+        if (opts.currency) p.settings.currency = opts.currency;
+        if (opts.fontFamily) p.settings.fontFamily = opts.fontFamily;
+        if (Number.isFinite(opts.nameSize)) p.settings.nameSize = opts.nameSize;
+        if (Number.isFinite(opts.priceSize)) p.settings.priceSize = opts.priceSize;
+        if (Number.isFinite(opts.indexSize)) p.settings.indexSize = opts.indexSize;
+        if (opts.nameColor) p.settings.nameColor = opts.nameColor;
+        if (opts.priceColor) p.settings.priceColor = opts.priceColor;
+        if (opts.indexColor) p.settings.indexColor = opts.indexColor;
+        if (Number.isFinite(opts.rankSize)) p.settings.rankSize = opts.rankSize;
+        if (opts.rankColor) p.settings.rankColor = opts.rankColor;
+        drawPage(p);
+        if (imgStates.length > 0) {
+            imgStates.forEach(state => {
+                if (!state || !state.img) return;
+                const img = state.img;
+                if (typeof img.isDestroyed === "function" && img.isDestroyed()) return;
+                if (img.getLayer && img.getLayer() !== p.layer) {
+                    p.layer.add(img);
+                }
+                img.x(state.x);
+                img.y(state.y);
+                img.scaleX(state.scaleX);
+                img.scaleY(state.scaleY);
+                img.rotation(state.rotation || 0);
+                setupProductImageDrag(img, p.layer);
+            });
+        }
+        p.layer.batchDraw();
+        p.transformerLayer.batchDraw();
+    });
+};
+
 // === RYSOWANIE STRONY ===
 function drawPage(page) {
     const { layer, transformerLayer, products, settings } = page;
@@ -8719,64 +8794,6 @@ let boxOffsetY = 20;
 if (window.LAYOUT_MODE === "layout8") {
     boxOffsetY = -38;   // ustaw na -60, -80, -120 jeśli chcesz wyżej
 }
-
-// Szybki kreator – zastosuj globalne ustawienia
-window.applyQuickSettings = function(opts = {}) {
-    if (!Array.isArray(pages) || pages.length === 0) return;
-    pages.forEach(p => {
-        const imgStates = [];
-        if (Array.isArray(p.slotObjects)) {
-            p.slotObjects.forEach((img, idx) => {
-                if (!img) return;
-                if (typeof img.isDestroyed === "function" && img.isDestroyed()) {
-                    p.slotObjects[idx] = null;
-                    return;
-                }
-                imgStates[idx] = {
-                    img,
-                    x: img.x(),
-                    y: img.y(),
-                    scaleX: img.scaleX(),
-                    scaleY: img.scaleY(),
-                    rotation: img.rotation()
-                };
-                // usuń z warstwy, aby drawPage nie zniszczył obrazu
-                if (img.getLayer && img.getLayer() === p.layer) {
-                    img.remove();
-                }
-            });
-        }
-        if (opts.currency) p.settings.currency = opts.currency;
-        if (opts.fontFamily) p.settings.fontFamily = opts.fontFamily;
-        if (Number.isFinite(opts.nameSize)) p.settings.nameSize = opts.nameSize;
-        if (Number.isFinite(opts.priceSize)) p.settings.priceSize = opts.priceSize;
-        if (Number.isFinite(opts.indexSize)) p.settings.indexSize = opts.indexSize;
-        if (opts.nameColor) p.settings.nameColor = opts.nameColor;
-        if (opts.priceColor) p.settings.priceColor = opts.priceColor;
-        if (opts.indexColor) p.settings.indexColor = opts.indexColor;
-        if (Number.isFinite(opts.rankSize)) p.settings.rankSize = opts.rankSize;
-        if (opts.rankColor) p.settings.rankColor = opts.rankColor;
-        drawPage(p);
-        if (imgStates.length > 0) {
-            imgStates.forEach(state => {
-                if (!state || !state.img) return;
-                const img = state.img;
-                if (typeof img.isDestroyed === "function" && img.isDestroyed()) return;
-                if (img.getLayer && img.getLayer() !== p.layer) {
-                    p.layer.add(img);
-                }
-                img.x(state.x);
-                img.y(state.y);
-                img.scaleX(state.scaleX);
-                img.scaleY(state.scaleY);
-                img.rotation(state.rotation || 0);
-                setupProductImageDrag(img, p.layer);
-            });
-        }
-        p.layer.batchDraw();
-        p.transformerLayer.batchDraw();
-    });
-};
 
 y += boxOffsetY;
 
