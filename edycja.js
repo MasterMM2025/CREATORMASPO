@@ -997,6 +997,77 @@ function refreshPriceGroupLayout(priceGroup, page) {
   }
 }
 
+function estimatePageEditTextContentHeight(node) {
+  if (!(node instanceof Konva.Text)) return 0;
+  const fontSize = Math.max(1, Number(node.fontSize?.() || 12));
+  const lineHeightMult = Math.max(0.5, Number(node.lineHeight?.() || 1));
+  const linePx = Math.max(fontSize, Math.round(fontSize * lineHeightMult));
+  const lines = Math.max(
+    1,
+    Number(node.textArr?.length) || String(node.text?.() || "").split("\n").length
+  );
+  return Math.max(fontSize, Math.ceil(lines * linePx));
+}
+
+function updatePageEditMetaTextHeight(node, forcedMaxHeight = null) {
+  if (!(node instanceof Konva.Text) || !node.getAttr) return;
+  const isMetaText = !!(
+    node.getAttr('isName') ||
+    node.getAttr('isIndex') ||
+    node.getAttr('isCustomPackageInfo')
+  );
+  if (!isMetaText) return;
+  const pad = node.getAttr('isName') ? 4 : 3;
+  const minH = Math.max(10, Math.ceil(Number(node.fontSize?.() || 12) + 2));
+  const contentH = estimatePageEditTextContentHeight(node);
+  const naturalH = Math.max(minH, Math.ceil(contentH + pad));
+  const capH = Number(forcedMaxHeight);
+  const nextH = Number.isFinite(capH) && capH > 0 ? Math.max(minH, Math.min(naturalH, capH)) : naturalH;
+  if (typeof node.height === 'function') node.height(nextH);
+}
+
+function collectDirectNameNodes(page) {
+  const out = [];
+  if (!page?.layer || typeof page.layer.find !== 'function') return out;
+  const textNodes = page.layer.find((node) =>
+    node instanceof Konva.Text &&
+    node.getAttr &&
+    node.getAttr('isName')
+  ) || [];
+  textNodes.forEach((node) => {
+    const parent = typeof node.getParent === 'function' ? node.getParent() : null;
+    const isDirect = !!(
+      String(node.getAttr?.('directModuleId') || '').trim() ||
+      (parent && parent.getAttr && parent.getAttr('isDirectCustomModuleGroup'))
+    );
+    if (!isDirect) return;
+    out.push(node);
+  });
+  return out;
+}
+
+function relayoutDirectMetaTextAfterStyleChange(page) {
+  const names = collectDirectNameNodes(page);
+  names.forEach((nameNode) => {
+    if (typeof nameNode.wrap === 'function') nameNode.wrap('word');
+    const layoutMaxHeight = Number(nameNode.getAttr?.('layoutMaxHeight'));
+    const minFont = 6;
+    const startFont = Math.max(minFont, Math.round(Number(nameNode.fontSize?.() || 12)));
+    let nextFont = startFont;
+    if (Number.isFinite(layoutMaxHeight) && layoutMaxHeight > 0) {
+      while (nextFont > minFont) {
+        updatePageEditMetaTextHeight(nameNode, layoutMaxHeight);
+        if (estimatePageEditTextContentHeight(nameNode) <= layoutMaxHeight) break;
+        nextFont -= 1;
+        if (typeof nameNode.fontSize === 'function') nameNode.fontSize(nextFont);
+      }
+      updatePageEditMetaTextHeight(nameNode, layoutMaxHeight);
+      return;
+    }
+    updatePageEditMetaTextHeight(nameNode);
+  });
+}
+
 function syncLegacyPageSettingsFromStyles(page, styles, changedTypes = null) {
   if (!page) return;
   if (!page.settings) page.settings = {};
@@ -1084,6 +1155,10 @@ function applyPageEditStylesToPage(page, styles, selectedCurrency, options = {})
       node.getAttr &&
       node.getAttr('isRating'),
     page.settings.ratingStyle);
+  }
+
+  if (changedTypes.name || changedTypes.index || changedTypes.package) {
+    relayoutDirectMetaTextAfterStyleChange(page);
   }
 
   updateDirectCustomModuleCurrency(page, selectedCurrency);
