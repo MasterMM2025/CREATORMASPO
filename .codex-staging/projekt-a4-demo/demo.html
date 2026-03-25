@@ -1,0 +1,2451 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Demo Styl Wlasny</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="demo.css">
+  <script src="https://unpkg.com/konva@9/konva.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+  <div id="startProjectsView" hidden></div>
+  <div id="editorView" class="demo-shell">
+    <aside class="demo-sidebar">
+      <div class="demo-brand">
+        <div class="demo-brand__eyebrow">Styl wlasny</div>
+        <h1>Panel testowy</h1>
+        <p>Osobny projekt do pracy nad dodawaniem produktow i ukladem strony A4.</p>
+      </div>
+
+      <div class="quick-actions">
+        <button id="addCatalogProductsBtn" class="quick-action quick-action--active" type="button">Dodaj produkt</button>
+        <button id="openMagicLayoutBtn" class="quick-action" type="button">AI Layout</button>
+      </div>
+
+      <section id="stylWlasnyRoot" class="editor-panel">
+        <div class="editor-panel__head">
+          <div class="demo-brand__eyebrow">Demo</div>
+          <h3>Oryginalny styl-wlasny.js</h3>
+          <p>Ten przycisk otwiera prawdziwy modal z glównego projektu. Strona po prawej to prosty obszar testowy A4 do wstawiania produktów i uruchamiania AI Layout.</p>
+        </div>
+      </section>
+    </aside>
+
+    <main class="demo-canvas">
+      <div class="canvas-toolbar">
+        <div>
+          <div class="canvas-toolbar__eyebrow">Projekt.js</div>
+          <h2>Strona katalogu A4</h2>
+        </div>
+        <div class="canvas-toolbar__actions">
+          <button id="addPageBtn" class="ui-btn ui-btn--ghost" type="button">Dodaj strone A4</button>
+        </div>
+      </div>
+
+      <div id="projectNotice" class="project-notice">Kliknij "Dodaj produkt do katalogu", aby wstawic modul na aktywna strone A4.</div>
+      <div id="pagesContainer" class="project-pages"></div>
+    </main>
+  </div>
+  <div id="toastStack" class="toast-stack" aria-live="polite"></div>
+
+  <script src="projekt.js"></script>
+  <script>window.__stylWlasnyHelper1Loaded = true;</script>
+  <script id="stylWlasnyHelper1Inline">
+(function () {
+  const TRAY_ID = "customStyleDraftTray";
+  const TRAY_STYLE_ID = "customStyleDraftTrayStyle";
+  let trayInitialized = false;
+  let unsubscribe = null;
+  let subscribedBridge = null;
+  let currentDrafts = [];
+  let dragDraftId = null;
+  let lastRenderedDraftCount = 0;
+
+  function formatProductWord(count) {
+    const safe = Math.max(0, Number(count) || 0);
+    if (safe === 1) return "produkt";
+    if (safe >= 2 && safe <= 4) return "produkty";
+    return "produktów";
+  }
+
+  function isExcelImportedDraft(draft) {
+    return String(draft?.importMeta?.source || "") === "excel";
+  }
+
+  function getAssignedPageNumber(draft) {
+    const raw = Number(draft?.importMeta?.assignedPageNumber);
+    if (!Number.isFinite(raw) || raw <= 0) return null;
+    return Math.max(1, Math.trunc(raw));
+  }
+
+  function getDraftProductCount(draft) {
+    const explicit = Number(draft?.importMeta?.assignedProductCount);
+    if (Number.isFinite(explicit) && explicit > 0) return Math.max(1, Math.trunc(explicit));
+    const familyCount = Array.isArray(draft?.familyProducts) ? draft.familyProducts.length : 0;
+    return Math.max(1, familyCount || 1);
+  }
+
+  function buildAssignedPageStats(drafts) {
+    const perPage = new Map();
+    let unassignedExcelProducts = 0;
+
+    (Array.isArray(drafts) ? drafts : []).forEach((draft) => {
+      if (!isExcelImportedDraft(draft)) return;
+      const productCount = getDraftProductCount(draft);
+      const pageNumber = getAssignedPageNumber(draft);
+      if (!pageNumber) {
+        unassignedExcelProducts += productCount;
+        return;
+      }
+      perPage.set(pageNumber, (perPage.get(pageNumber) || 0) + productCount);
+    });
+
+    const pages = Array.from(perPage.entries())
+      .map(([pageNumber, productCount]) => ({ pageNumber, productCount }))
+      .sort((a, b) => a.pageNumber - b.pageNumber);
+
+    return {
+      totalPages: pages.length,
+      totalProducts: pages.reduce((sum, page) => sum + page.productCount, 0),
+      unassignedExcelProducts,
+      pages
+    };
+  }
+
+  function compareDraftsForDisplay(a, b) {
+    const pageA = getAssignedPageNumber(a);
+    const pageB = getAssignedPageNumber(b);
+    if (pageA !== pageB) {
+      if (pageA === null) return 1;
+      if (pageB === null) return -1;
+      return pageA - pageB;
+    }
+
+    const indexA = String(a?.productIndex || "");
+    const indexB = String(b?.productIndex || "");
+    const byIndex = indexA.localeCompare(indexB, "pl", { numeric: true, sensitivity: "base" });
+    if (byIndex) return byIndex;
+
+    return String(a?.productName || "").localeCompare(String(b?.productName || ""), "pl", {
+      numeric: true,
+      sensitivity: "base"
+    });
+  }
+
+  function getBridge() {
+    return window.CustomStyleDraftBridge || null;
+  }
+
+  function ensureTrayStyles() {
+    if (document.getElementById(TRAY_STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = TRAY_STYLE_ID;
+    style.textContent = `
+      #${TRAY_ID} {
+        position: fixed;
+        top: 92px;
+        right: 28px;
+        width: 344px;
+        max-width: calc(100vw - 28px);
+        min-width: 0;
+        bottom: 28px;
+        max-height: none;
+        display: none;
+        flex-direction: column;
+        overflow: hidden;
+        background: linear-gradient(180deg, rgba(14, 19, 31, 0.98) 0%, rgba(9, 14, 24, 0.98) 100%);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 24px;
+        box-shadow: -20px 0 40px rgba(0, 0, 0, 0.32);
+        backdrop-filter: blur(12px);
+        z-index: 1000002;
+        font-family: "Inter", "Segoe UI", Arial, sans-serif;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 14px 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+      }
+      #${TRAY_ID} .custom-style-draft-tray__header-copy {
+        min-width: 0;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__kicker {
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: #7f8aa0;
+        margin-bottom: 4px;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__title {
+        font-size: 18px;
+        font-weight: 800;
+        color: #f5f7fb;
+        letter-spacing: -0.02em;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__subtitle {
+        margin-top: 4px;
+        font-size: 11px;
+        line-height: 1.4;
+        color: #93a0b5;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__close {
+        width: 32px;
+        height: 32px;
+        border-radius: 11px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: linear-gradient(180deg, rgba(28, 36, 54, 0.96) 0%, rgba(16, 22, 34, 0.98) 100%);
+        color: #d8e0ee;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 auto;
+        transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__close:hover {
+        background: rgba(39,203,173,0.12);
+        border-color: rgba(39,203,173,0.28);
+        color: #8df5e2;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__count {
+        margin: 12px 10px 0;
+        padding: 12px 14px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(19, 27, 42, 0.88) 0%, rgba(12, 18, 30, 0.94) 100%);
+        color: #f5f7fb;
+        font-size: 13px;
+        font-weight: 800;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__hint {
+        margin: 8px 10px 0;
+        padding: 10px 14px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 14px;
+        background: rgba(39, 203, 173, 0.08);
+        color: #a9b5c8;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-summary {
+        margin: 8px 10px 0;
+        padding: 12px 14px;
+        border: 1px solid rgba(103, 232, 249, 0.18);
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(11, 31, 49, 0.92) 0%, rgba(9, 17, 30, 0.98) 100%);
+        display: none;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-summary-title {
+        font-size: 12px;
+        font-weight: 800;
+        color: #dff7ff;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-summary-copy {
+        margin-top: 4px;
+        font-size: 10px;
+        line-height: 1.45;
+        color: #9fc1d4;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-summary-grid {
+        margin-top: 10px;
+        display: grid;
+        gap: 6px;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-chip {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 10px;
+        border-radius: 12px;
+        background: rgba(15, 23, 42, 0.82);
+        border: 1px solid rgba(148, 163, 184, 0.14);
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-chip strong {
+        font-size: 11px;
+        color: #f5f7fb;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__page-chip span {
+        font-size: 10px;
+        color: #8df5e2;
+        text-align: right;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__list {
+        flex: 1 1 auto;
+        overflow: auto;
+        padding: 10px;
+        display: grid;
+        gap: 8px;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__empty {
+        padding: 16px 14px;
+        border: 1px dashed rgba(255,255,255,0.12);
+        border-radius: 16px;
+        color: #93a0b5;
+        font-size: 12px;
+        text-align: center;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__card {
+        display: grid;
+        grid-template-columns: 88px 1fr;
+        gap: 10px;
+        align-items: center;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 16px;
+        padding: 10px;
+        background: linear-gradient(180deg, rgba(20, 29, 46, 0.94) 0%, rgba(12, 18, 30, 0.98) 100%);
+        cursor: grab;
+        transition: transform 0.16s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__card:hover {
+        transform: translateY(-1px);
+        border-color: rgba(39,203,173,0.24);
+        box-shadow: 0 14px 28px rgba(0,0,0,0.18);
+      }
+      #${TRAY_ID} .custom-style-draft-tray__meta {
+        min-width: 0;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__meta-title {
+        font-size: 11px;
+        font-weight: 700;
+        color: #f5f7fb;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__meta-subtitle {
+        margin-top: 4px;
+        font-size: 10px;
+        color: #93a0b5;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__thumb,
+      #${TRAY_ID} .custom-style-draft-tray__thumb-grid {
+        width: 88px;
+        height: 58px;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 12px;
+        background: rgba(255,255,255,0.96);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__thumb-grid {
+        padding: 3px;
+        box-sizing: border-box;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+        gap: 3px;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__thumb-cell {
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+        background: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__thumb img,
+      #${TRAY_ID} .custom-style-draft-tray__thumb-grid img,
+      #${TRAY_ID} .custom-style-draft-tray__thumb-cell img {
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        pointer-events: none;
+        user-select: none;
+        -webkit-user-drag: none;
+      }
+      #${TRAY_ID} .custom-style-draft-tray__thumb-empty {
+        font-size: 9px;
+        color: #94a3b8;
+      }
+      @media (max-width: 700px) {
+        #${TRAY_ID} {
+          left: 8px;
+          right: 8px;
+          top: 72px;
+          width: auto;
+          min-width: 0;
+          bottom: 76px;
+          border-radius: 18px;
+        }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function ensureTray() {
+    if (document.getElementById(TRAY_ID)) return document.getElementById(TRAY_ID);
+    ensureTrayStyles();
+    const el = document.createElement("div");
+    el.id = TRAY_ID;
+
+    el.innerHTML = `
+      <div class="custom-style-draft-tray__header">
+        <div class="custom-style-draft-tray__header-copy">
+          <div class="custom-style-draft-tray__kicker">Drag and Drop</div>
+          <div class="custom-style-draft-tray__title">Produkty do dodania</div>
+          <div class="custom-style-draft-tray__subtitle">Przeciągnij moduł na stronę katalogu.</div>
+        </div>
+        <button id="${TRAY_ID}_close" class="custom-style-draft-tray__close" type="button" aria-label="Ukryj panel" title="Ukryj panel">✕</button>
+      </div>
+      <div id="${TRAY_ID}_count" class="custom-style-draft-tray__count">
+        Pozostało: 0 produktów
+      </div>
+      <div class="custom-style-draft-tray__hint">
+        Po upuszczeniu moduł znika z kolejki.
+      </div>
+      <div id="${TRAY_ID}_pageSummary" class="custom-style-draft-tray__page-summary"></div>
+      <div id="${TRAY_ID}_list" class="custom-style-draft-tray__list">
+        <div class="custom-style-draft-tray__empty">Brak elementów.</div>
+      </div>
+    `;
+    document.body.appendChild(el);
+
+    const closeBtn = document.getElementById(`${TRAY_ID}_close`);
+    if (closeBtn) closeBtn.onclick = () => hideTray();
+    return el;
+  }
+
+  function showTray() {
+    const el = ensureTray();
+    el.style.display = "flex";
+    attachStageDropTargets();
+    bindBridge();
+    const bridge = getBridge();
+    if (bridge && typeof bridge.getDrafts === "function") {
+      renderDrafts(bridge.getDrafts());
+    } else {
+      renderDrafts(currentDrafts);
+    }
+  }
+
+  function hideTray() {
+    const el = document.getElementById(TRAY_ID);
+    if (el) el.style.display = "none";
+  }
+
+  function isTrayOpen() {
+    const el = document.getElementById(TRAY_ID);
+    return !!el && el.style.display !== "none";
+  }
+
+  function renderDrafts(drafts) {
+    currentDrafts = Array.isArray(drafts) ? drafts.slice() : [];
+    const nextCount = currentDrafts.length;
+    const countEl = document.getElementById(`${TRAY_ID}_count`);
+    if (countEl) {
+      countEl.textContent = `Pozostało: ${nextCount} ${formatProductWord(nextCount)}`;
+    }
+    const pageSummaryEl = document.getElementById(`${TRAY_ID}_pageSummary`);
+    const pageStats = buildAssignedPageStats(currentDrafts);
+    if (pageSummaryEl) {
+      if (!pageStats.totalPages) {
+        pageSummaryEl.style.display = "none";
+        pageSummaryEl.innerHTML = "";
+      } else {
+        pageSummaryEl.style.display = "block";
+        const chips = pageStats.pages.map((page) => `
+          <div class="custom-style-draft-tray__page-chip">
+            <strong>Strona ${page.pageNumber}</strong>
+            <span>${page.productCount} ${formatProductWord(page.productCount)}</span>
+          </div>
+        `).join("");
+        const extra = pageStats.unassignedExcelProducts
+          ? `<div class="custom-style-draft-tray__page-summary-copy">Bez przypisanej strony: ${pageStats.unassignedExcelProducts} ${formatProductWord(pageStats.unassignedExcelProducts)}.</div>`
+          : "";
+        pageSummaryEl.innerHTML = `
+          <div class="custom-style-draft-tray__page-summary-title">Podsumowanie stron z Excela</div>
+          <div class="custom-style-draft-tray__page-summary-copy">Wykryto ${pageStats.totalPages} ${pageStats.totalPages === 1 ? "stronę" : (pageStats.totalPages >= 2 && pageStats.totalPages <= 4 ? "strony" : "stron")} i ${pageStats.totalProducts} ${formatProductWord(pageStats.totalProducts)} z przypisaniem do stron.</div>
+          <div class="custom-style-draft-tray__page-summary-grid">${chips}</div>
+          ${extra}
+        `;
+      }
+    }
+    const list = document.getElementById(`${TRAY_ID}_list`);
+    if (!list) return;
+    if (!currentDrafts.length) {
+      list.innerHTML = `<div class="custom-style-draft-tray__empty">Brak elementów w kolejce.</div>`;
+      if (lastRenderedDraftCount > 0 && isTrayOpen()) {
+        setTimeout(() => {
+          if ((currentDrafts || []).length === 0) hideTray();
+        }, 80);
+      }
+      lastRenderedDraftCount = 0;
+      return;
+    }
+    const buildThumbMarkup = (draft) => {
+      const familyThumbs = (Array.isArray(draft?.familyProducts) ? draft.familyProducts : [])
+        .map((item) => String(item?.url || "").trim())
+        .filter(Boolean)
+        .slice(0, 4);
+      if (familyThumbs.length > 1) {
+        const cells = familyThumbs.map((src) => `
+          <div class="custom-style-draft-tray__thumb-cell">
+            <img src="${escapeHtml(src)}" alt="" draggable="false">
+          </div>
+        `).join("");
+        return `
+          <div class="custom-style-draft-tray__thumb-grid">
+            ${cells}
+          </div>
+        `;
+      }
+      const singleThumb = familyThumbs[0] || String(draft?.previewImageUrl || "").trim();
+      return `
+        <div class="custom-style-draft-tray__thumb">
+          ${singleThumb ? `<img src="${escapeHtml(singleThumb)}" alt="" draggable="false">` : `<span class="custom-style-draft-tray__thumb-empty">brak</span>`}
+        </div>
+      `;
+    };
+    const displayDrafts = currentDrafts.slice().sort(compareDraftsForDisplay);
+    list.innerHTML = displayDrafts.map((draft) => {
+      const title = String(draft?.nameOverrides?.[draft?.productId] || draft?.productName || "").trim();
+      const index = String(draft?.productIndex || "").trim();
+      const familyCount = Math.max(1, Array.isArray(draft?.familyProducts) ? draft.familyProducts.length : 1);
+      const currency = String(draft?.settings?.customCurrencySymbol || "£");
+      const assignedPageNumber = getAssignedPageNumber(draft);
+      const subtitleParts = [];
+      if (assignedPageNumber) subtitleParts.push(`Strona: ${assignedPageNumber}`);
+      subtitleParts.push(`Rodzina: ${familyCount}`);
+      subtitleParts.push(escapeHtml(currency));
+      return `
+        <div data-draft-id="${escapeHtml(String(draft.id || ""))}" draggable="true" class="custom-style-draft-tray__card">
+          ${buildThumbMarkup(draft)}
+          <div class="custom-style-draft-tray__meta">
+            <div class="custom-style-draft-tray__meta-title">${escapeHtml(index ? `[${index}] ${title || draft?.productId || ""}` : (title || draft?.productId || ""))}</div>
+            <div class="custom-style-draft-tray__meta-subtitle">${subtitleParts.join(" • ")}</div>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    list.querySelectorAll("[data-draft-id]").forEach((item) => {
+      item.querySelectorAll("img").forEach((img) => {
+        img.setAttribute("draggable", "false");
+        img.addEventListener("dragstart", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        });
+      });
+      item.addEventListener("dragstart", (e) => {
+        dragDraftId = String(item.getAttribute("data-draft-id") || "");
+        item.style.opacity = "0.55";
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", dragDraftId);
+          e.dataTransfer.setData("application/x-custom-style-draft", dragDraftId);
+        }
+      });
+      item.addEventListener("dragend", () => {
+        dragDraftId = null;
+        item.style.opacity = "1";
+      });
+      item.addEventListener("dblclick", () => {
+        const bridge = getBridge();
+        if (!bridge || typeof bridge.openDraftInEditor !== "function") return;
+        bridge.openDraftInEditor(String(item.getAttribute("data-draft-id") || ""));
+      });
+    });
+    lastRenderedDraftCount = nextCount;
+  }
+
+  function escapeHtml(value) {
+    return String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function bindBridge() {
+    const bridge = getBridge();
+    if (!bridge) return;
+    if (subscribedBridge && bridge !== subscribedBridge && unsubscribe) {
+      try { unsubscribe(); } catch (_err) {}
+      unsubscribe = null;
+      subscribedBridge = null;
+    }
+    if (unsubscribe && subscribedBridge === bridge) return;
+    if (typeof bridge.subscribe === "function") {
+      unsubscribe = bridge.subscribe((drafts) => {
+        renderDrafts(drafts);
+      });
+      subscribedBridge = bridge;
+    } else if (typeof bridge.getDrafts === "function") {
+      renderDrafts(bridge.getDrafts());
+      subscribedBridge = bridge;
+    }
+  }
+
+  function attachStageDropTargets() {
+    if (trayInitialized) return;
+    trayInitialized = true;
+
+    const onDragOver = (e) => {
+      if (!dragDraftId) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    };
+
+    const onDrop = async (e, page) => {
+      if (!dragDraftId) return;
+      e.preventDefault();
+      const bridge = getBridge();
+      if (!bridge || typeof bridge.dropDraftToPage !== "function") return;
+      const stage = page?.stage;
+      if (!stage) return;
+      try {
+        if (typeof stage.setPointersPositions === "function") stage.setPointersPositions(e);
+      } catch (_err) {}
+      const container = stage.container ? stage.container() : null;
+      const rect = container ? container.getBoundingClientRect() : null;
+      const pointer = stage.getPointerPosition?.() || (rect ? {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      } : null);
+      if (!pointer) return;
+      const res = await bridge.dropDraftToPage(dragDraftId, {
+        stage,
+        pageNumber: page.number,
+        pointer
+      });
+      if (!res || res.ok !== true) return;
+      dragDraftId = null;
+    };
+
+    const installForPage = (page) => {
+      const stage = page?.stage;
+      if (!stage || page._customDraftTrayDropBound) return;
+      const container = stage.container ? stage.container() : null;
+      if (!container) return;
+      page._customDraftTrayDropBound = true;
+      container.addEventListener("dragover", onDragOver);
+      container.addEventListener("drop", (e) => onDrop(e, page));
+    };
+
+    const bindAllPages = () => {
+      (Array.isArray(window.pages) ? window.pages : []).forEach(installForPage);
+    };
+    bindAllPages();
+
+    window.addEventListener("canvasCreated", bindAllPages);
+    window.addEventListener("customStyleDraftTrayOpenRequest", () => showTray());
+  }
+
+  function init() {
+    ensureTray();
+    bindBridge();
+    attachStageDropTargets();
+  }
+
+  window.CustomStyleDraftTrayUI = {
+    open: showTray,
+    close: hideTray,
+    isOpen: isTrayOpen,
+    refresh() {
+      const bridge = getBridge();
+      if (bridge?.getDrafts) renderDrafts(bridge.getDrafts());
+    }
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+
+  </script>
+  <script id="stylWlasnyRegistryInline">
+(function () {
+  const root = window;
+  if (!root.STYL_WLASNY_REGISTRY) {
+    root.STYL_WLASNY_REGISTRY = {
+      priceBadges: [],
+      moduleLayouts: []
+    };
+  }
+
+  root.registerStylWlasnyPriceBadgeStyle = function registerStylWlasnyPriceBadgeStyle(styleDef) {
+    if (!styleDef || typeof styleDef !== "object") return;
+    const id = String(styleDef.id || "").trim();
+    const label = String(styleDef.label || "").trim();
+    if (!id || !label) return;
+
+    const normalized = {
+      id,
+      label,
+      path: String(styleDef.path || "").trim(),
+      url: String(styleDef.url || "").trim()
+    };
+
+    const list = root.STYL_WLASNY_REGISTRY.priceBadges;
+    const idx = list.findIndex((item) => String(item?.id || "") === id);
+    if (idx >= 0) list[idx] = normalized;
+    else list.push(normalized);
+  };
+
+  root.registerStylWlasnyModuleLayoutStyle = function registerStylWlasnyModuleLayoutStyle(styleDef) {
+    if (!styleDef || typeof styleDef !== "object") return;
+    const id = String(styleDef.id || "").trim();
+    const label = String(styleDef.label || "").trim();
+    if (!id || !label) return;
+
+    const normalized = {
+      id,
+      label,
+      config: (styleDef.config && typeof styleDef.config === "object") ? styleDef.config : {}
+    };
+
+    const list = root.STYL_WLASNY_REGISTRY.moduleLayouts;
+    const idx = list.findIndex((item) => String(item?.id || "") === id);
+    if (idx >= 0) list[idx] = normalized;
+    else list.push(normalized);
+  };
+})();
+
+  </script>
+  <script id="stylWlasnyModuleLayout1Inline">
+(function () {
+  if (typeof window.registerStylWlasnyModuleLayoutStyle !== "function") return;
+
+  window.registerStylWlasnyModuleLayoutStyle({
+    id: "styl-numer-1",
+    label: "Styl numer 1",
+    config: {
+      singleDirect: {
+        imgArea: { x: 12.5, y: 18.8, w: 62, h: 44 },
+        nameArea: { x: 66.2, y: 22.5, w: 31, h: 28 },
+        indexPos: { x: 66.2, y: 36.5 },
+        packagePos: { x: 66.2, y: 40.5 },
+        priceArea: { x: 66.2, y: 61.8, s: 14.5 },
+        divider: { x: 63.6, y: 15.5, h: 58.5, w: 0.55 }
+      },
+      familyDirect: {
+        // Reuzywamy ten sam układ tekstu/ceny co singleDirect;
+        // zmieniamy tylko siatkę zdjęć dla rodziny.
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.40, y: 0.00, w: 0.62, h: 0.44 },
+            { x: 0.40, y: 0.50, w: 0.62, h: 0.44 }
+          ],
+          family3: [
+            { x: 0.40, y: 0.00, w: 0.62, h: 0.27 },
+            { x: 0.40, y: 0.35, w: 0.62, h: 0.27 },
+            { x: 0.40, y: 0.70, w: 0.62, h: 0.27 }
+          ],
+          family4: [
+            { x: 0.40, y: 0.00, w: 0.62, h: 0.20 },
+            { x: 0.40, y: 0.26, w: 0.62, h: 0.20 },
+            { x: 0.40, y: 0.52, w: 0.62, h: 0.20 },
+            { x: 0.40, y: 0.78, w: 0.62, h: 0.20 }
+          ]
+        }
+      },
+      text: {
+        nameColor: "#111111",
+        indexColor: "#b9b9b9",
+        packageColor: "#111111",
+        indexItalic: false,
+        noPriceCircle: true,
+        priceColor: "#d71920",
+        forcePriceBold: true,
+        priceScaleMultiplier: 1.4
+      }
+    }
+  });
+})();
+
+  </script>
+  <script id="stylWlasnyModuleLayout2Inline">
+(function () {
+  if (typeof window.registerStylWlasnyModuleLayoutStyle !== "function") return;
+
+  window.registerStylWlasnyModuleLayoutStyle({
+    id: "styl-numer-2",
+    label: "Styl numer 2",
+    config: {
+      singleDirect: {
+        imgArea: { x: 10.0, y: 16.0, w: 62.5, h: 50.0 },
+        nameArea: { x: 66.5, y: 22.0, w: 30.0, h: 22.0 },
+        indexPos: { x: 66.5, y: 36.2 },
+        packagePos: { x: 66.5, y: 39.8 },
+        priceArea: { x: 66.5, y: 50.8, w: 24.0, h: 11.5, r: 2.2 },
+        divider: { x: -1, y: 0, h: 0, w: 0 }
+      },
+      familyDirect: {
+        // Dla rodziny utrzymujemy ten sam układ tekstów/ceny co w singleDirect,
+        // zmienia się tylko sposób ułożenia wielu zdjęć produktu.
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.50, y: 0.00, w: 0.72, h: 0.43 },
+            { x: 0.50, y: 0.47, w: 0.72, h: 0.43 }
+          ],
+          family3: [
+            { x: 0.50, y: 0.00, w: 0.72, h: 0.30 },
+            { x: 0.50, y: 0.34, w: 0.72, h: 0.30 },
+            { x: 0.50, y: 0.68, w: 0.72, h: 0.30 }
+          ],
+          family4: [
+            { x: 0.50, y: 0.00, w: 0.72, h: 0.22 },
+            { x: 0.50, y: 0.26, w: 0.72, h: 0.22 },
+            { x: 0.50, y: 0.52, w: 0.72, h: 0.22 },
+            { x: 0.50, y: 0.78, w: 0.72, h: 0.22 }
+          ]
+        }
+      },
+      text: {
+        nameColor: "#151515",
+        indexColor: "#9ca3af",
+        packageColor: "#151515",
+        indexItalic: false,
+        priceShape: "roundedRect",
+        priceBgColor: "#2eaee8",
+        priceBgRadius: 2.2,
+        forcePriceBold: true,
+        priceColor: "#ffffff",
+        priceScaleMultiplier: 1.08
+      }
+    }
+  });
+})();
+
+  </script>
+  <script id="stylWlasnyModuleLayout3Inline">
+(function () {
+  if (typeof window.registerStylWlasnyModuleLayoutStyle !== "function") return;
+
+  window.registerStylWlasnyModuleLayoutStyle({
+    id: "styl-numer-3",
+    label: "Styl numer 3",
+    config: {
+      singleDirect: {
+        // Zdjęcie duże u góry modułu
+        imgArea: { x: 4.0, y: 5.0, w: 92.0, h: 48.0 },
+
+        // Duża cena pod zdjęciem (bez koła)
+        priceArea: { x: 17.5, y: 55.0, s: 17.0 },
+
+        // Opis pod ceną: nazwa -> indeks -> opak.
+        nameArea: { x: 18.0, y: 76.0, w: 76.0, h: 12.8 },
+        indexPos: { x: 18.0, y: 88.8 },
+        packagePos: { x: 18.0, y: 93.0 },
+
+        // Dodatki wyłączone w tym układzie
+        flagArea: { x: 0, y: 0, w: 0, h: 0 },
+        barcodeArea: { x: 0, y: 0, w: 0, h: 0 },
+        divider: { x: -1, y: 0, h: 0, w: 0 }
+      },
+      familyDirect: {
+        // Dla rodziny zachowujemy ten sam układ stylu 3:
+        // zdjęcia zostają w górnym obszarze, a cena i tekst pod spodem.
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.02, y: 0.00, w: 0.46, h: 1.00 },
+            { x: 0.52, y: 0.00, w: 0.46, h: 1.00 }
+          ],
+          family3: [
+            { x: 0.01, y: 0.00, w: 0.31, h: 1.00 },
+            { x: 0.345, y: 0.00, w: 0.31, h: 1.00 },
+            { x: 0.68, y: 0.00, w: 0.31, h: 1.00 }
+          ],
+          family4: [
+            { x: 0.06, y: 0.00, w: 0.40, h: 0.48 },
+            { x: 0.54, y: 0.00, w: 0.40, h: 0.48 },
+            { x: 0.06, y: 0.52, w: 0.40, h: 0.48 },
+            { x: 0.54, y: 0.52, w: 0.40, h: 0.48 }
+          ]
+        }
+      },
+      text: {
+        nameColor: "#123d85",
+        indexColor: "#b9b9b9",
+        packageColor: "#123d85",
+        indexItalic: true,
+        noPriceCircle: true,
+        priceColor: "#0b4aa2",
+        forcePriceBold: true,
+        priceExtraBold: true,
+        priceScaleMultiplier: 1.35
+      }
+    }
+  });
+})();
+
+  </script>
+  <script id="stylWlasnyModuleLayoutTestAInline">
+(function () {
+  if (typeof window.registerStylWlasnyModuleLayoutStyle !== "function") return;
+
+  window.registerStylWlasnyModuleLayoutStyle({
+    id: "test-poziomy-divider",
+    label: "Test: poziomy divider",
+    config: {
+      singleDirect: {
+        imgArea: { x: 8.0, y: 15.0, w: 40.0, h: 58.0 },
+        nameArea: { x: 54.0, y: 17.0, w: 36.0, h: 20.0 },
+        indexPos: { x: 54.0, y: 37.5 },
+        packagePos: { x: 54.0, y: 42.0 },
+        priceArea: { x: 54.0, y: 60.0, s: 15.2 },
+        divider: { x: 54.0, y: 52.5, w: 34.0, h: 0.7, anchor: "module" }
+      },
+      familyDirect: {
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.47 },
+            { x: 0.00, y: 0.53, w: 1.00, h: 0.47 }
+          ],
+          family3: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.35, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.70, w: 1.00, h: 0.30 }
+          ],
+          family4: [
+            { x: 0.00, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.00, y: 0.52, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.52, w: 0.48, h: 0.48 }
+          ]
+        }
+      },
+      text: {
+        nameColor: "#1f2a44",
+        indexColor: "#8ea0b8",
+        packageColor: "#24324a",
+        indexItalic: false,
+        noPriceCircle: true,
+        priceColor: "#ff6b35",
+        dividerColor: "#9ac3f5",
+        forcePriceBold: true,
+        priceScaleMultiplier: 1.28
+      }
+    }
+  });
+})();
+
+  </script>
+  <script id="stylWlasnyModuleLayoutTestBInline">
+(function () {
+  if (typeof window.registerStylWlasnyModuleLayoutStyle !== "function") return;
+
+  window.registerStylWlasnyModuleLayoutStyle({
+    id: "test-zdjecie-po-prawej",
+    label: "Test: zdjecie po prawej",
+    config: {
+      singleDirect: {
+        imgArea: { x: 57.0, y: 12.0, w: 34.0, h: 54.0 },
+        nameArea: { x: 8.0, y: 17.0, w: 42.0, h: 21.0 },
+        indexPos: { x: 8.0, y: 39.0 },
+        packagePos: { x: 8.0, y: 43.0 },
+        priceArea: { x: 8.0, y: 58.0, w: 28.0, h: 11.5, r: 2.8 },
+        divider: { x: 51.0, y: 14.0, w: 0.65, h: 54.0, anchor: "module" }
+      },
+      familyDirect: {
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.47 },
+            { x: 0.00, y: 0.53, w: 1.00, h: 0.47 }
+          ],
+          family3: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.35, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.70, w: 1.00, h: 0.30 }
+          ],
+          family4: [
+            { x: 0.00, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.00, y: 0.52, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.52, w: 0.48, h: 0.48 }
+          ]
+        }
+      },
+      text: {
+        nameColor: "#0d3b66",
+        indexColor: "#6b7e93",
+        packageColor: "#184e77",
+        indexItalic: false,
+        priceShape: "roundedRect",
+        priceBgColor: "#0f766e",
+        dividerColor: "#a7f3d0",
+        forcePriceBold: true,
+        priceColor: "#ffffff",
+        priceScaleMultiplier: 1.1
+      }
+    }
+  });
+})();
+
+  </script>
+  <script id="stylWlasnyModuleLayoutTestCInline">
+(function () {
+  if (typeof window.registerStylWlasnyModuleLayoutStyle !== "function") return;
+
+  window.registerStylWlasnyModuleLayoutStyle({
+    id: "test-limonkowa-cena",
+    label: "Test: limonkowa cena",
+    config: {
+      singleDirect: {
+        imgArea: { x: 6.0, y: 8.0, w: 88.0, h: 34.0 },
+        priceArea: { x: 8.0, y: 47.0, s: 18.0 },
+        nameArea: { x: 8.0, y: 68.0, w: 82.0, h: 11.5 },
+        indexPos: { x: 8.0, y: 81.5 },
+        packagePos: { x: 8.0, y: 86.5 },
+        divider: { x: 8.0, y: 61.0, w: 84.0, h: 0.6, anchor: "module" },
+        flagArea: { x: 72.0, y: 47.5, w: 16.0, h: 2.8 },
+        barcodeArea: { x: 61.0, y: 91.0, w: 30.0, h: 7.0 }
+      },
+      familyDirect: {
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.00, y: 0.00, w: 0.49, h: 1.00 },
+            { x: 0.51, y: 0.00, w: 0.49, h: 1.00 }
+          ],
+          family3: [
+            { x: 0.00, y: 0.00, w: 0.32, h: 1.00 },
+            { x: 0.34, y: 0.00, w: 0.32, h: 1.00 },
+            { x: 0.68, y: 0.00, w: 0.32, h: 1.00 }
+          ],
+          family4: [
+            { x: 0.00, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.00, y: 0.52, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.52, w: 0.48, h: 0.48 }
+          ]
+        }
+      },
+      text: {
+        nameColor: "#243b2f",
+        indexColor: "#8ca08f",
+        packageColor: "#31553c",
+        indexItalic: true,
+        noPriceCircle: true,
+        priceColor: "#7ebc00",
+        dividerColor: "#d7e3a3",
+        forcePriceBold: true,
+        priceExtraBold: true,
+        priceScaleMultiplier: 1.42
+      }
+    }
+  });
+})();
+
+  </script>
+  <script id="stylWlasnyModuleLayoutTestDInline">
+(function () {
+  if (typeof window.registerStylWlasnyModuleLayoutStyle !== "function") return;
+
+  window.registerStylWlasnyModuleLayoutStyle({
+    id: "test-editorial",
+    label: "Test: editorial",
+    config: {
+      singleDirect: {
+        imgArea: { x: 9.0, y: 18.0, w: 31.0, h: 58.0 },
+        nameArea: { x: 47.0, y: 16.0, w: 41.0, h: 18.0 },
+        indexPos: { x: 47.0, y: 33.5 },
+        packagePos: { x: 47.0, y: 38.2 },
+        priceArea: { x: 47.0, y: 66.0, w: 30.0, h: 12.5, r: 3.0 },
+        divider: { x: 47.0, y: 51.0, w: 38.0, h: 0.75, anchor: "module" },
+        flagArea: { x: 47.0, y: 43.0, w: 15.0, h: 2.6 },
+        barcodeArea: { x: 47.0, y: 83.0, w: 34.0, h: 8.0 }
+      },
+      familyDirect: {
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.47 },
+            { x: 0.00, y: 0.53, w: 1.00, h: 0.47 }
+          ],
+          family3: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.35, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.70, w: 1.00, h: 0.30 }
+          ],
+          family4: [
+            { x: 0.00, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.00, y: 0.52, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.52, w: 0.48, h: 0.48 }
+          ]
+        }
+      },
+      text: {
+        nameColor: "#4a1f1f",
+        indexColor: "#b08968",
+        packageColor: "#6f1d1b",
+        indexItalic: false,
+        priceShape: "roundedRect",
+        priceBgColor: "#f4a261",
+        dividerColor: "#d8b08c",
+        forcePriceBold: true,
+        priceColor: "#2b1b16",
+        priceScaleMultiplier: 1.12
+      }
+    }
+  });
+})();
+
+  </script>
+  <script id="stylWlasnyGeneratedMagicTestsInline">
+(function () {
+  if (typeof window.registerStylWlasnyModuleLayoutStyle !== "function") return;
+
+  const palettes = [
+    {
+      name: "Ink Linen",
+      nameColor: "#243446",
+      indexColor: "#8f9ba6",
+      packageColor: "#3f5368",
+      dividerColor: "#d9d2c7",
+      accentPrice: "#b45d3c",
+      rectDark: "#31465b",
+      rectLight: "#f4efe8",
+      rectLightText: "#2d3f50"
+    },
+    {
+      name: "Sage Stone",
+      nameColor: "#314238",
+      indexColor: "#8b958b",
+      packageColor: "#506157",
+      dividerColor: "#ddd8ca",
+      accentPrice: "#8b6a46",
+      rectDark: "#4b5c52",
+      rectLight: "#f3f0e8",
+      rectLightText: "#33453b"
+    },
+    {
+      name: "Burgundy Paper",
+      nameColor: "#4a2a2f",
+      indexColor: "#a48f90",
+      packageColor: "#6c4248",
+      dividerColor: "#e4d6d0",
+      accentPrice: "#b45a57",
+      rectDark: "#73454a",
+      rectLight: "#f8f2ef",
+      rectLightText: "#4a2e33"
+    },
+    {
+      name: "Navy Porcelain",
+      nameColor: "#23364e",
+      indexColor: "#8d99a8",
+      packageColor: "#39526f",
+      dividerColor: "#d8dee6",
+      accentPrice: "#bf6d46",
+      rectDark: "#314b69",
+      rectLight: "#f2f5f8",
+      rectLightText: "#24384f"
+    },
+    {
+      name: "Cocoa Shell",
+      nameColor: "#3a2f2b",
+      indexColor: "#a09187",
+      packageColor: "#5b4a42",
+      dividerColor: "#e4dbd3",
+      accentPrice: "#a96644",
+      rectDark: "#5f4a3f",
+      rectLight: "#faf4ed",
+      rectLightText: "#43352e"
+    },
+    {
+      name: "Slate Copper",
+      nameColor: "#2f3741",
+      indexColor: "#95a0aa",
+      packageColor: "#4b5864",
+      dividerColor: "#ddd6cf",
+      accentPrice: "#b2704e",
+      rectDark: "#465462",
+      rectLight: "#f5f1ec",
+      rectLightText: "#34414d"
+    }
+  ];
+
+  const layoutPresets = [
+    {
+      name: "Left Tall",
+      singleDirect: {
+        imgArea: { x: 8.0, y: 14.0, w: 38.0, h: 58.0 },
+        nameArea: { x: 53.0, y: 17.0, w: 35.0, h: 21.0 },
+        indexPos: { x: 53.0, y: 38.5 },
+        packagePos: { x: 53.0, y: 43.2 },
+        priceArea: { x: 53.0, y: 61.5, s: 15.0 },
+        divider: { x: 48.8, y: 15.0, w: 0.62, h: 56.5, anchor: "module" }
+      },
+      familyDirect: {
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.47 },
+            { x: 0.00, y: 0.53, w: 1.00, h: 0.47 }
+          ],
+          family3: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.35, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.70, w: 1.00, h: 0.30 }
+          ],
+          family4: [
+            { x: 0.00, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.00, y: 0.52, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.52, w: 0.48, h: 0.48 }
+          ]
+        }
+      }
+    },
+    {
+      name: "Right Tall",
+      singleDirect: {
+        imgArea: { x: 55.0, y: 13.0, w: 34.0, h: 56.0 },
+        nameArea: { x: 8.0, y: 17.0, w: 40.0, h: 22.0 },
+        indexPos: { x: 8.0, y: 39.0 },
+        packagePos: { x: 8.0, y: 43.4 },
+        priceArea: { x: 8.0, y: 60.0, w: 28.0, h: 11.4, r: 2.5 },
+        divider: { x: 50.4, y: 15.0, w: 0.62, h: 55.0, anchor: "module" }
+      },
+      familyDirect: {
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.47 },
+            { x: 0.00, y: 0.53, w: 1.00, h: 0.47 }
+          ],
+          family3: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.35, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.70, w: 1.00, h: 0.30 }
+          ],
+          family4: [
+            { x: 0.00, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.00, y: 0.52, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.52, w: 0.48, h: 0.48 }
+          ]
+        }
+      }
+    },
+    {
+      name: "Hero Top",
+      singleDirect: {
+        imgArea: { x: 6.0, y: 6.0, w: 88.0, h: 38.0 },
+        nameArea: { x: 8.0, y: 68.0, w: 80.0, h: 12.0 },
+        indexPos: { x: 8.0, y: 81.5 },
+        packagePos: { x: 8.0, y: 86.2 },
+        priceArea: { x: 8.0, y: 49.0, s: 17.6 },
+        divider: { x: 8.0, y: 61.5, w: 84.0, h: 0.64, anchor: "module" }
+      },
+      familyDirect: {
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.00, y: 0.00, w: 0.49, h: 1.00 },
+            { x: 0.51, y: 0.00, w: 0.49, h: 1.00 }
+          ],
+          family3: [
+            { x: 0.00, y: 0.00, w: 0.32, h: 1.00 },
+            { x: 0.34, y: 0.00, w: 0.32, h: 1.00 },
+            { x: 0.68, y: 0.00, w: 0.32, h: 1.00 }
+          ],
+          family4: [
+            { x: 0.00, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.00, y: 0.52, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.52, w: 0.48, h: 0.48 }
+          ]
+        }
+      }
+    },
+    {
+      name: "Horizontal Split",
+      singleDirect: {
+        imgArea: { x: 8.0, y: 16.0, w: 39.0, h: 51.0 },
+        nameArea: { x: 54.0, y: 18.0, w: 34.0, h: 18.0 },
+        indexPos: { x: 54.0, y: 36.8 },
+        packagePos: { x: 54.0, y: 41.0 },
+        priceArea: { x: 54.0, y: 64.0, s: 14.6 },
+        divider: { x: 54.0, y: 53.0, w: 32.0, h: 0.72, anchor: "module" }
+      },
+      familyDirect: {
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.47 },
+            { x: 0.00, y: 0.53, w: 1.00, h: 0.47 }
+          ],
+          family3: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.35, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.70, w: 1.00, h: 0.30 }
+          ],
+          family4: [
+            { x: 0.00, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.00, y: 0.52, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.52, w: 0.48, h: 0.48 }
+          ]
+        }
+      }
+    },
+    {
+      name: "Editorial Rail",
+      singleDirect: {
+        imgArea: { x: 10.0, y: 18.0, w: 28.0, h: 59.0 },
+        nameArea: { x: 45.0, y: 16.0, w: 42.0, h: 18.0 },
+        indexPos: { x: 45.0, y: 34.0 },
+        packagePos: { x: 45.0, y: 38.8 },
+        priceArea: { x: 45.0, y: 66.0, w: 32.0, h: 12.0, r: 3.0 },
+        divider: { x: 45.0, y: 51.5, w: 38.0, h: 0.78, anchor: "module" }
+      },
+      familyDirect: {
+        useSingleLayout: true,
+        imageLayouts: {
+          family2: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.47 },
+            { x: 0.00, y: 0.53, w: 1.00, h: 0.47 }
+          ],
+          family3: [
+            { x: 0.00, y: 0.00, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.35, w: 1.00, h: 0.30 },
+            { x: 0.00, y: 0.70, w: 1.00, h: 0.30 }
+          ],
+          family4: [
+            { x: 0.00, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.00, w: 0.48, h: 0.48 },
+            { x: 0.00, y: 0.52, w: 0.48, h: 0.48 },
+            { x: 0.52, y: 0.52, w: 0.48, h: 0.48 }
+          ]
+        }
+      }
+    }
+  ];
+
+  const dividerPresets = [
+    { name: "Hairline po zdjeciu", mode: "image-edge-thin" },
+    { name: "Soft rail po zdjeciu", mode: "image-edge-soft" },
+    { name: "Szeroki rail po lewej", mode: "left-accent-wide" },
+    { name: "Poziomy divider", mode: "horizontal-mid" },
+    { name: "Poziomy footer", mode: "horizontal-low" },
+    { name: "Bez dividera", mode: "none" }
+  ];
+
+  const pricePresets = [
+    {
+      name: "Minimal Accent",
+      apply(single, text, palette) {
+        text.noPriceCircle = true;
+        text.forcePriceBold = true;
+        text.priceScaleMultiplier = 1.16;
+        text.priceColor = palette.accentPrice;
+        text.priceMainFactor = 0.54;
+        text.priceUnitFactor = 0.19;
+        text.priceDecFactor = 0;
+      }
+    },
+    {
+      name: "Solid Tag",
+      apply(single, text, palette) {
+        text.priceShape = "roundedRect";
+        text.forcePriceBold = true;
+        text.priceColor = "#ffffff";
+        text.priceBgColor = palette.rectDark;
+        text.priceBgRadius = 3.2;
+        text.priceScaleMultiplier = 1.02;
+        text.priceTextAlign = "left";
+        single.priceArea = { ...single.priceArea, w: Math.max(22, Number(single.priceArea.w || 24)), h: Math.max(10.5, Number(single.priceArea.h || 11.4)), r: 3.2 };
+      }
+    },
+    {
+      name: "Soft Label",
+      apply(single, text, palette) {
+        text.priceShape = "roundedRect";
+        text.forcePriceBold = true;
+        text.priceColor = palette.rectLightText;
+        text.priceBgColor = palette.rectLight;
+        text.priceBgRadius = 3.6;
+        text.priceScaleMultiplier = 1.02;
+        text.priceTextAlign = "left";
+        single.priceArea = { ...single.priceArea, w: Math.max(24, Number(single.priceArea.w || 26)), h: Math.max(11.0, Number(single.priceArea.h || 11.6)), r: 3.6 };
+      }
+    },
+    {
+      name: "Editorial Number",
+      apply(single, text, palette) {
+        text.noPriceCircle = true;
+        text.forcePriceBold = true;
+        text.priceExtraBold = true;
+        text.priceScaleMultiplier = 1.26;
+        text.priceColor = palette.accentPrice;
+        text.priceMainFactor = 0.58;
+        text.priceUnitFactor = 0.17;
+        text.priceDecFactor = 0;
+      }
+    },
+    {
+      name: "Top Corner Tag",
+      apply(single, text, palette, layout) {
+        text.priceShape = "roundedRect";
+        text.forcePriceBold = true;
+        text.priceColor = "#ffffff";
+        text.priceBgColor = palette.rectDark;
+        text.priceBgRadius = 3.4;
+        text.priceScaleMultiplier = 0.98;
+        text.priceTextAlign = "left";
+        single.priceArea = {
+          ...single.priceArea,
+          x: layout.name === "Right Tall" ? 8.0 : 62.0,
+          y: 9.0,
+          w: 24.0,
+          h: 10.2,
+          r: 3.4
+        };
+      }
+    },
+    {
+      name: "Shelf Marker",
+      apply(single, text, palette) {
+        text.noPriceCircle = true;
+        text.forcePriceBold = true;
+        text.priceScaleMultiplier = 1.08;
+        text.priceColor = palette.packageColor;
+        text.priceMainFactor = 0.48;
+        text.priceUnitFactor = 0.18;
+        text.priceDecFactor = 0;
+        single.priceArea = {
+          ...single.priceArea,
+          x: 8.0,
+          y: 76.0,
+          s: 13.0
+        };
+      }
+    }
+  ];
+
+  function clone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function hexToRgb(hex) {
+    const safe = String(hex || "").replace("#", "").trim();
+    if (safe.length !== 6) return null;
+    const numeric = Number.parseInt(safe, 16);
+    if (!Number.isFinite(numeric)) return null;
+    return {
+      r: (numeric >> 16) & 255,
+      g: (numeric >> 8) & 255,
+      b: numeric & 255
+    };
+  }
+
+  function rgbToHex(rgb) {
+    if (!rgb) return "#d9d9d9";
+    const channel = (value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0");
+    return `#${channel(rgb.r)}${channel(rgb.g)}${channel(rgb.b)}`;
+  }
+
+  function mixHex(baseHex, mixHexColor, weight = 0.5) {
+    const base = hexToRgb(baseHex);
+    const mix = hexToRgb(mixHexColor);
+    if (!base || !mix) return String(baseHex || mixHexColor || "#d9d9d9");
+    const safeWeight = Math.max(0, Math.min(1, Number(weight) || 0));
+    return rgbToHex({
+      r: base.r + ((mix.r - base.r) * safeWeight),
+      g: base.g + ((mix.g - base.g) * safeWeight),
+      b: base.b + ((mix.b - base.b) * safeWeight)
+    });
+  }
+
+  function applyDividerPreset(single, text, palette, preset, layout) {
+    const imageRightGap = 4.0 + ((Number(layout.singleDirect?.imgArea?.x || 0) + Number(layout.singleDirect?.imgArea?.w || 0)) > 60 ? 2.0 : 0);
+    if (preset.mode === "none") {
+      single.divider = { x: -1, y: 0, w: 0, h: 0, anchor: "module" };
+      return;
+    }
+    if (preset.mode === "image-edge-thin") {
+      single.divider = {
+        x: 0,
+        y: 14.5,
+        w: 0.46,
+        h: 59.5,
+        anchor: "image-right",
+        gapFromImage: imageRightGap,
+        snapToPriceTop: false
+      };
+      text.dividerColor = mixHex(palette.dividerColor, palette.packageColor, 0.34);
+      return;
+    }
+    if (preset.mode === "image-edge-soft") {
+      single.divider = {
+        x: 0,
+        y: 13.5,
+        w: 0.9,
+        h: 60.0,
+        anchor: "image-right",
+        gapFromImage: imageRightGap + 1.6,
+        snapToPriceTop: false
+      };
+      text.dividerColor = mixHex(palette.packageColor, palette.dividerColor, 0.48);
+      return;
+    }
+    if (preset.mode === "left-accent-wide") {
+      single.divider = {
+        x: 6.0,
+        y: 16.0,
+        w: 1.35,
+        h: 56.0,
+        anchor: "module",
+        snapToPriceTop: false
+      };
+      text.dividerColor = mixHex(palette.packageColor, palette.dividerColor, 0.18);
+      return;
+    }
+    if (preset.mode === "horizontal-mid") {
+      single.divider = {
+        x: 52.0,
+        y: 52.5,
+        w: 34.0,
+        h: 0.8,
+        anchor: "module",
+        snapToPriceTop: false
+      };
+      text.dividerColor = mixHex(palette.packageColor, palette.dividerColor, 0.36);
+      return;
+    }
+    if (preset.mode === "horizontal-low") {
+      single.divider = {
+        x: 8.0,
+        y: 71.5,
+        w: 82.0,
+        h: 0.72,
+        anchor: "module",
+        snapToPriceTop: false
+      };
+      text.dividerColor = mixHex(palette.packageColor, palette.dividerColor, 0.42);
+    }
+  }
+
+  function clampNumber(value, min, max) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return min;
+    return Math.max(min, Math.min(max, numeric));
+  }
+
+  function mergeIntervals(intervals, min, max) {
+    const safeMin = Number.isFinite(min) ? min : 0;
+    const safeMax = Number.isFinite(max) ? max : 100;
+    const merged = [];
+    intervals
+      .filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && end > start)
+      .map(([start, end]) => [Math.max(safeMin, start), Math.min(safeMax, end)])
+      .filter(([start, end]) => end > start)
+      .sort((a, b) => a[0] - b[0])
+      .forEach(([start, end]) => {
+        const last = merged[merged.length - 1];
+        if (!last || start > last[1]) {
+          merged.push([start, end]);
+        } else {
+          last[1] = Math.max(last[1], end);
+        }
+      });
+    return merged;
+  }
+
+  function buildGeneratedLayoutOccupiedRects(single, priceRect) {
+    const rects = [];
+    const addRect = (x, y, w, h, pad = 0) => {
+      if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return;
+      rects.push({
+        x: x - pad,
+        y: y - pad,
+        w: w + (pad * 2),
+        h: h + (pad * 2)
+      });
+    };
+
+    addRect(single.imgArea.x, single.imgArea.y, single.imgArea.w, single.imgArea.h, 1.2);
+    addRect(single.nameArea.x, single.nameArea.y, single.nameArea.w, single.nameArea.h, 1.4);
+
+    const metaLeft = Math.min(single.indexPos.x, single.packagePos.x);
+    const metaTop = Math.min(single.indexPos.y - 1.2, single.packagePos.y - 1.4);
+    const metaRight = Math.max(single.indexPos.x + 20, single.packagePos.x + 28);
+    const metaBottom = Math.max(single.indexPos.y + 4.0, single.packagePos.y + 5.0);
+    addRect(metaLeft, metaTop, metaRight - metaLeft, metaBottom - metaTop, 1.2);
+
+    if (priceRect) {
+      addRect(priceRect.x, priceRect.y, priceRect.w, priceRect.h, 1.8);
+    }
+
+    return rects;
+  }
+
+  function findSafeVerticalDividerPlacement(rects, options) {
+    const dividerWidth = clampNumber(options?.dividerWidth, 0.35, 4);
+    const safeTop = clampNumber(options?.top, 0, 100);
+    const safeBottom = clampNumber(options?.bottom, safeTop, 100);
+    const searchMin = clampNumber(options?.searchMin, 0, 100);
+    const searchMax = clampNumber(options?.searchMax, searchMin, 100);
+    const preferredX = clampNumber(options?.preferredX, searchMin, searchMax);
+    const minHeight = clampNumber(options?.minHeight, 6, 80);
+    const step = 0.6;
+    const candidates = [];
+
+    for (let offset = 0; offset <= (searchMax - searchMin) + 0.001; offset += step) {
+      const leftCandidate = preferredX - offset;
+      const rightCandidate = preferredX + offset;
+      if (leftCandidate >= searchMin) candidates.push(leftCandidate);
+      if (offset > 0 && rightCandidate <= searchMax) candidates.push(rightCandidate);
+    }
+
+    let best = null;
+
+    candidates.forEach((candidateX) => {
+      const dividerLeft = candidateX;
+      const dividerRight = candidateX + dividerWidth;
+      const blocked = mergeIntervals(
+        rects
+          .filter((rect) => dividerLeft < (rect.x + rect.w) && dividerRight > rect.x)
+          .map((rect) => [rect.y, rect.y + rect.h]),
+        safeTop,
+        safeBottom
+      );
+
+      let cursor = safeTop;
+      blocked.forEach(([start, end]) => {
+        if ((start - cursor) >= minHeight) {
+          const height = start - cursor;
+          const score = height - (Math.abs(candidateX - preferredX) * 0.42);
+          if (!best || score > best.score) {
+            best = { x: candidateX, y: cursor, h: height, score };
+          }
+        }
+        cursor = Math.max(cursor, end);
+      });
+
+      if ((safeBottom - cursor) >= minHeight) {
+        const height = safeBottom - cursor;
+        const score = height - (Math.abs(candidateX - preferredX) * 0.42);
+        if (!best || score > best.score) {
+          best = { x: candidateX, y: cursor, h: height, score };
+        }
+      }
+    });
+
+    return best ? {
+      x: clampNumber(best.x, 0, 100),
+      y: clampNumber(best.y, safeTop, safeBottom),
+      h: clampNumber(best.h, minHeight, safeBottom - safeTop)
+    } : null;
+  }
+
+  function findSafeHorizontalDividerPlacement(rects, options) {
+    const dividerHeight = clampNumber(options?.dividerHeight, 0.35, 4);
+    const safeLeft = clampNumber(options?.left, 0, 100);
+    const safeRight = clampNumber(options?.right, safeLeft, 100);
+    const searchMin = clampNumber(options?.searchMin, 0, 100);
+    const searchMax = clampNumber(options?.searchMax, searchMin, 100);
+    const preferredY = clampNumber(options?.preferredY, searchMin, searchMax);
+    const minWidth = clampNumber(options?.minWidth, 12, 100);
+    const step = 0.6;
+    const candidates = [];
+
+    for (let offset = 0; offset <= (searchMax - searchMin) + 0.001; offset += step) {
+      const topCandidate = preferredY - offset;
+      const bottomCandidate = preferredY + offset;
+      if (topCandidate >= searchMin) candidates.push(topCandidate);
+      if (offset > 0 && bottomCandidate <= searchMax) candidates.push(bottomCandidate);
+    }
+
+    let best = null;
+
+    candidates.forEach((candidateY) => {
+      const dividerTop = candidateY;
+      const dividerBottom = candidateY + dividerHeight;
+      const blocked = mergeIntervals(
+        rects
+          .filter((rect) => dividerTop < (rect.y + rect.h) && dividerBottom > rect.y)
+          .map((rect) => [rect.x, rect.x + rect.w]),
+        safeLeft,
+        safeRight
+      );
+
+      let cursor = safeLeft;
+      blocked.forEach(([start, end]) => {
+        if ((start - cursor) >= minWidth) {
+          const width = start - cursor;
+          const score = width - (Math.abs(candidateY - preferredY) * 0.45);
+          if (!best || score > best.score) {
+            best = { x: cursor, y: candidateY, w: width, score };
+          }
+        }
+        cursor = Math.max(cursor, end);
+      });
+
+      if ((safeRight - cursor) >= minWidth) {
+        const width = safeRight - cursor;
+        const score = width - (Math.abs(candidateY - preferredY) * 0.45);
+        if (!best || score > best.score) {
+          best = { x: cursor, y: candidateY, w: width, score };
+        }
+      }
+    });
+
+    return best ? {
+      x: clampNumber(best.x, safeLeft, safeRight),
+      y: clampNumber(best.y, searchMin, searchMax),
+      w: clampNumber(best.w, minWidth, safeRight - safeLeft)
+    } : null;
+  }
+
+  function stabilizeGeneratedSingleDirectLayout(single, text, dividerPreset, pricePreset) {
+    single.imgArea.x = clampNumber(single.imgArea.x, 2, 76);
+    single.imgArea.y = clampNumber(single.imgArea.y, 4, 78);
+    single.imgArea.w = clampNumber(single.imgArea.w, 18, 92);
+    single.imgArea.h = clampNumber(single.imgArea.h, 20, 70);
+
+    single.nameArea.x = clampNumber(single.nameArea.x, 6, 80);
+    single.nameArea.y = clampNumber(single.nameArea.y, 8, 84);
+    single.nameArea.w = clampNumber(single.nameArea.w, 18, 86);
+    single.nameArea.h = clampNumber(single.nameArea.h, 10, 28);
+
+    single.indexPos.x = clampNumber(single.indexPos.x, 6, 90);
+    single.indexPos.y = clampNumber(single.indexPos.y, 14, 90);
+    single.packagePos.x = clampNumber(single.packagePos.x, 6, 90);
+    single.packagePos.y = clampNumber(single.packagePos.y, 18, 94);
+
+    const isRoundedTag = String(text.priceShape || "").trim() === "roundedRect";
+    const isFreePrice = !!text.noPriceCircle;
+    const priceHeight = isRoundedTag ? clampNumber(single.priceArea.h || 11, 8.5, 15) : clampNumber(single.priceArea.s || 14, 10, 22);
+    const priceWidth = isRoundedTag ? clampNumber(single.priceArea.w || 24, 18, 34) : clampNumber((single.priceArea.s || 14) * 1.4, 14, 34);
+    const priceTop = clampNumber(single.priceArea.y, 6, 88);
+    const priceBottom = priceTop + priceHeight;
+    const metaBottom = Math.max(
+      single.nameArea.y + single.nameArea.h,
+      single.indexPos.y + 3.5,
+      single.packagePos.y + 4.5
+    );
+    const textLeft = single.nameArea.x;
+    const textRight = single.nameArea.x + single.nameArea.w;
+    const priceLeft = clampNumber(single.priceArea.x, 4, 92);
+    const priceRight = priceLeft + priceWidth;
+    const overlapX = Math.max(0, Math.min(textRight, priceRight) - Math.max(textLeft, priceLeft));
+    const hasTopTag = priceTop <= single.nameArea.y + 2;
+
+    if (hasTopTag && overlapX > 4) {
+      const targetNameTop = priceBottom + 3.6;
+      const shift = Math.max(0, targetNameTop - single.nameArea.y);
+      single.nameArea.y = clampNumber(single.nameArea.y + shift, 8, 78);
+      single.indexPos.y = clampNumber(single.indexPos.y + shift, 16, 90);
+      single.packagePos.y = clampNumber(single.packagePos.y + shift, 20, 94);
+    }
+
+    if ((isRoundedTag || isFreePrice) && overlapX > 0 && priceTop < metaBottom + 10 && !hasTopTag) {
+      single.priceArea.y = clampNumber(metaBottom + 12, 18, 86);
+    } else if ((isRoundedTag || isFreePrice) && priceTop < metaBottom + 7 && !hasTopTag) {
+      single.priceArea.y = clampNumber(metaBottom + 9.5, 18, 86);
+    }
+
+    if (pricePreset.name === "Top Corner Tag") {
+      const safeWidth = clampNumber(single.priceArea.w || 24, 20, 30);
+      single.priceArea.w = safeWidth;
+      single.priceArea.h = clampNumber(single.priceArea.h || 10.2, 9.2, 12.5);
+      single.priceArea.r = clampNumber(single.priceArea.r || 3.4, 2.6, 4.4);
+      single.priceArea.x = clampNumber((single.nameArea.x + single.nameArea.w) - safeWidth, single.nameArea.x, 72);
+      single.priceArea.y = 8.0;
+      const tagBottom = single.priceArea.y + single.priceArea.h;
+      if (single.nameArea.y < tagBottom + 4) {
+        const shift = (tagBottom + 6) - single.nameArea.y;
+        single.nameArea.y = clampNumber(single.nameArea.y + shift, 12, 80);
+        single.indexPos.y = clampNumber(single.indexPos.y + shift, 16, 90);
+        single.packagePos.y = clampNumber(single.packagePos.y + shift, 20, 94);
+      }
+    }
+
+    const currentPriceWidth = isRoundedTag
+      ? clampNumber(single.priceArea.w || priceWidth, 18, 34)
+      : clampNumber((single.priceArea.s || 14) * 1.4, 14, 34);
+    const currentPriceHeight = isRoundedTag
+      ? clampNumber(single.priceArea.h || priceHeight, 8.5, 15)
+      : Math.max(10, clampNumber(single.priceArea.s || 14, 10, 22));
+    const priceRect = {
+      x: clampNumber(single.priceArea.x, 4, 92),
+      y: clampNumber(single.priceArea.y, 6, 92),
+      w: currentPriceWidth,
+      h: currentPriceHeight
+    };
+    const imageTop = single.imgArea.y;
+    const imageBottom = single.imgArea.y + single.imgArea.h;
+    const imageRight = single.imgArea.x + single.imgArea.w;
+    const nameBottom = single.nameArea.y + single.nameArea.h;
+    const packageBottom = single.packagePos.y + 4.5;
+    const priceBottomAdjusted = priceRect.y + priceRect.h;
+    const fullTextBottom = Math.max(nameBottom, packageBottom);
+    const occupiedRects = buildGeneratedLayoutOccupiedRects(single, priceRect);
+
+    if (dividerPreset.mode === "image-edge-thin" || dividerPreset.mode === "image-edge-soft") {
+      const dividerWidth = dividerPreset.mode === "image-edge-thin" ? 0.46 : 0.9;
+      const dividerGap = dividerPreset.mode === "image-edge-thin" ? 4.6 : 6.2;
+      const dividerPlacement = findSafeVerticalDividerPlacement(occupiedRects, {
+        preferredX: clampNumber(imageRight + dividerGap, 4, 92),
+        dividerWidth,
+        top: clampNumber(imageTop + 1.4, 4, 92),
+        bottom: clampNumber(imageBottom - 1.4, 6, 94),
+        searchMin: clampNumber(imageRight + 1.8, 4, 92),
+        searchMax: 92 - dividerWidth,
+        minHeight: 8
+      });
+
+      if (dividerPlacement) {
+        single.divider.x = dividerPlacement.x;
+        single.divider.y = dividerPlacement.y;
+        single.divider.w = dividerWidth;
+        single.divider.h = dividerPlacement.h;
+        single.divider.anchor = "module";
+        single.divider.snapToPriceTop = false;
+      } else {
+        single.divider = { x: -1, y: 0, w: 0, h: 0, anchor: "module", snapToPriceTop: false };
+      }
+    }
+
+    if (dividerPreset.mode === "horizontal-mid") {
+      const upperBottom = Math.max(packageBottom, imageBottom);
+      const lowerTop = priceRect.y;
+      if (lowerTop - upperBottom >= 10) {
+        const dividerPlacement = findSafeHorizontalDividerPlacement(occupiedRects, {
+          preferredY: clampNumber((upperBottom + lowerTop) / 2, upperBottom + 3, lowerTop - 4),
+          dividerHeight: clampNumber(single.divider.h || 0.8, 0.45, 2),
+          left: 8,
+          right: 92,
+          searchMin: upperBottom + 2.5,
+          searchMax: lowerTop - 2.5,
+          minWidth: 26
+        });
+        if (dividerPlacement) {
+          single.divider.y = dividerPlacement.y;
+          single.divider.x = dividerPlacement.x;
+          single.divider.w = dividerPlacement.w;
+        } else {
+          single.divider = { x: -1, y: 0, w: 0, h: 0, anchor: "module", snapToPriceTop: false };
+        }
+      } else {
+        single.divider = { x: -1, y: 0, w: 0, h: 0, anchor: "module", snapToPriceTop: false };
+      }
+    }
+
+    if (dividerPreset.mode === "horizontal-low") {
+      const safeTop = Math.max(priceBottomAdjusted, fullTextBottom) + 4;
+      if (safeTop <= 90) {
+        const dividerPlacement = findSafeHorizontalDividerPlacement(occupiedRects, {
+          preferredY: clampNumber(safeTop, 66, 92),
+          dividerHeight: clampNumber(single.divider.h || 0.72, 0.45, 2),
+          left: 8,
+          right: 92,
+          searchMin: safeTop,
+          searchMax: 94,
+          minWidth: 32
+        });
+        if (dividerPlacement) {
+          single.divider.y = dividerPlacement.y;
+          single.divider.x = dividerPlacement.x;
+          single.divider.w = dividerPlacement.w;
+        } else {
+          single.divider = { x: -1, y: 0, w: 0, h: 0, anchor: "module", snapToPriceTop: false };
+        }
+      } else {
+        single.divider = { x: -1, y: 0, w: 0, h: 0, anchor: "module", snapToPriceTop: false };
+      }
+    }
+
+    if (single.divider && single.divider.w > 0 && single.divider.h > 0) {
+      const isVerticalDivider = single.divider.h >= single.divider.w;
+      if (isVerticalDivider) {
+        const verticalPlacement = findSafeVerticalDividerPlacement(occupiedRects, {
+          preferredX: clampNumber(single.divider.x, 0, 96),
+          dividerWidth: clampNumber(single.divider.w, 0.35, 4),
+          top: clampNumber(single.divider.y, 0, 96),
+          bottom: clampNumber(single.divider.y + single.divider.h, 0, 96),
+          searchMin: clampNumber(single.divider.x - 10, 2, 96),
+          searchMax: clampNumber(single.divider.x + 10, 2, 96),
+          minHeight: 8
+        });
+        if (verticalPlacement) {
+          single.divider.x = verticalPlacement.x;
+          single.divider.y = verticalPlacement.y;
+          single.divider.h = verticalPlacement.h;
+        } else {
+          single.divider = { x: -1, y: 0, w: 0, h: 0, anchor: "module", snapToPriceTop: false };
+        }
+      } else {
+        const horizontalPlacement = findSafeHorizontalDividerPlacement(occupiedRects, {
+          preferredY: clampNumber(single.divider.y, 0, 96),
+          dividerHeight: clampNumber(single.divider.h, 0.35, 4),
+          left: clampNumber(single.divider.x, 0, 96),
+          right: clampNumber(single.divider.x + single.divider.w, 0, 96),
+          searchMin: clampNumber(single.divider.y - 10, 4, 96),
+          searchMax: clampNumber(single.divider.y + 10, 4, 96),
+          minWidth: 20
+        });
+        if (horizontalPlacement) {
+          single.divider.x = horizontalPlacement.x;
+          single.divider.y = horizontalPlacement.y;
+          single.divider.w = horizontalPlacement.w;
+        } else {
+          single.divider = { x: -1, y: 0, w: 0, h: 0, anchor: "module", snapToPriceTop: false };
+        }
+      }
+    }
+  }
+
+  const generatedIds = [];
+  const labelMap = {};
+
+  let counter = 1;
+  layoutPresets.forEach((layout) => {
+    dividerPresets.forEach((dividerPreset) => {
+      palettes.forEach((palette) => {
+        pricePresets.forEach((pricePreset) => {
+        const singleDirect = clone(layout.singleDirect);
+        const id = `ai-test-${String(counter).padStart(3, "0")}`;
+        const label = counter === 1
+          ? "Styl AI"
+          : `Styl AI ${String(counter).padStart(3, "0")} - ${layout.name} / ${palette.name} / ${dividerPreset.name} / ${pricePreset.name}`;
+        const text = {
+          nameColor: palette.nameColor,
+          indexColor: palette.indexColor,
+          packageColor: palette.packageColor,
+          dividerColor: palette.dividerColor,
+          indexItalic: layout.name === "Hero Top"
+        };
+
+        applyDividerPreset(singleDirect, text, palette, dividerPreset, layout);
+        pricePreset.apply(singleDirect, text, palette, layout);
+        if (!text.priceColor) text.priceColor = palette.accentPrice;
+        stabilizeGeneratedSingleDirectLayout(singleDirect, text, dividerPreset, pricePreset);
+
+        window.registerStylWlasnyModuleLayoutStyle({
+          id,
+          label,
+          config: {
+            singleDirect,
+            familyDirect: clone(layout.familyDirect),
+            text
+          }
+        });
+
+        generatedIds.push(id);
+        labelMap[id] = label;
+        counter += 1;
+        });
+      });
+    });
+  });
+
+  const aiLabFamilies = [
+    {
+      id: "ai-lab-premium",
+      label: "Styl AI Lab Premium",
+      layoutNames: ["Left Tall", "Editorial Rail", "Right Tall"],
+      paletteNames: ["Ink Linen", "Slate Copper", "Cocoa Shell", "Navy Porcelain"],
+      dividerModes: ["image-edge-thin", "image-edge-soft", "horizontal-mid", "none"],
+      priceNames: ["Soft Label", "Minimal Accent", "Editorial Number"],
+      imageScale: [0.94, 1.08],
+      imageShiftX: [-3.5, 3.5],
+      imageShiftY: [-2.0, 2.8],
+      textShiftX: [-2.0, 2.0],
+      textShiftY: [-1.5, 3.5],
+      priceScale: [0.96, 1.14],
+      dividerWeight: [0.92, 1.18],
+      accentMix: "#c98c62",
+      paperMix: "#f6f1ea",
+      imageShareTarget: 0.25,
+      wantsDivider: true
+    },
+    {
+      id: "ai-lab-editorial",
+      label: "Styl AI Lab Editorial",
+      layoutNames: ["Hero Top", "Editorial Rail", "Horizontal Split"],
+      paletteNames: ["Burgundy Paper", "Ink Linen", "Navy Porcelain", "Slate Copper"],
+      dividerModes: ["horizontal-mid", "horizontal-low", "image-edge-thin", "none"],
+      priceNames: ["Editorial Number", "Top Corner Tag", "Minimal Accent"],
+      imageScale: [0.92, 1.16],
+      imageShiftX: [-4.2, 4.2],
+      imageShiftY: [-3.2, 3.6],
+      textShiftX: [-3.2, 3.2],
+      textShiftY: [-2.5, 4.4],
+      priceScale: [0.94, 1.18],
+      dividerWeight: [0.88, 1.26],
+      accentMix: "#b85d58",
+      paperMix: "#f5eeea",
+      imageShareTarget: 0.29,
+      wantsDivider: true
+    },
+    {
+      id: "ai-lab-retail",
+      label: "Styl AI Lab Retail",
+      layoutNames: ["Right Tall", "Left Tall", "Horizontal Split"],
+      paletteNames: ["Sage Stone", "Cocoa Shell", "Ink Linen", "Slate Copper"],
+      dividerModes: ["image-edge-soft", "left-accent-wide", "horizontal-mid", "none"],
+      priceNames: ["Solid Tag", "Soft Label", "Shelf Marker", "Minimal Accent"],
+      imageScale: [0.90, 1.10],
+      imageShiftX: [-3.0, 3.0],
+      imageShiftY: [-1.6, 2.4],
+      textShiftX: [-1.8, 2.0],
+      textShiftY: [-1.2, 2.8],
+      priceScale: [1.04, 1.24],
+      dividerWeight: [1.0, 1.34],
+      accentMix: "#b27745",
+      paperMix: "#f5f0e7",
+      imageShareTarget: 0.24,
+      wantsDivider: true
+    },
+    {
+      id: "ai-lab-minimal",
+      label: "Styl AI Lab Minimal",
+      layoutNames: ["Left Tall", "Hero Top", "Editorial Rail"],
+      paletteNames: ["Ink Linen", "Navy Porcelain", "Slate Copper"],
+      dividerModes: ["none", "image-edge-thin", "horizontal-low"],
+      priceNames: ["Minimal Accent", "Soft Label"],
+      imageScale: [0.90, 1.04],
+      imageShiftX: [-2.4, 2.4],
+      imageShiftY: [-1.8, 1.8],
+      textShiftX: [-1.4, 1.8],
+      textShiftY: [-1.4, 2.6],
+      priceScale: [0.92, 1.06],
+      dividerWeight: [0.82, 1.04],
+      accentMix: "#9e6f53",
+      paperMix: "#faf7f2",
+      imageShareTarget: 0.22,
+      wantsDivider: false
+    },
+    {
+      id: "ai-lab-spotlight",
+      label: "Styl AI Lab Spotlight",
+      layoutNames: ["Hero Top", "Horizontal Split", "Right Tall"],
+      paletteNames: ["Burgundy Paper", "Navy Porcelain", "Cocoa Shell", "Ink Linen"],
+      dividerModes: ["horizontal-mid", "horizontal-low", "image-edge-soft"],
+      priceNames: ["Top Corner Tag", "Editorial Number", "Solid Tag"],
+      imageScale: [1.00, 1.22],
+      imageShiftX: [-4.0, 4.0],
+      imageShiftY: [-3.8, 3.2],
+      textShiftX: [-2.8, 3.2],
+      textShiftY: [-2.6, 4.0],
+      priceScale: [1.04, 1.28],
+      dividerWeight: [0.94, 1.24],
+      accentMix: "#c65f3f",
+      paperMix: "#f7efe8",
+      imageShareTarget: 0.31,
+      wantsDivider: true
+    },
+    {
+      id: "ai-lab-contrast",
+      label: "Styl AI Lab Contrast",
+      layoutNames: ["Right Tall", "Editorial Rail", "Horizontal Split", "Hero Top"],
+      paletteNames: ["Burgundy Paper", "Navy Porcelain", "Slate Copper", "Sage Stone"],
+      dividerModes: ["left-accent-wide", "image-edge-soft", "horizontal-mid", "none"],
+      priceNames: ["Solid Tag", "Top Corner Tag", "Minimal Accent", "Editorial Number"],
+      imageScale: [0.94, 1.14],
+      imageShiftX: [-3.6, 3.6],
+      imageShiftY: [-2.6, 3.2],
+      textShiftX: [-2.6, 2.8],
+      textShiftY: [-2.0, 3.6],
+      priceScale: [1.00, 1.22],
+      dividerWeight: [0.96, 1.30],
+      accentMix: "#cb734e",
+      paperMix: "#f3eee7",
+      imageShareTarget: 0.27,
+      wantsDivider: true
+    }
+  ];
+
+  const layoutPresetMap = new Map(layoutPresets.map((layout) => [layout.name, layout]));
+  const paletteMap = new Map(palettes.map((palette) => [palette.name, palette]));
+  const dividerPresetMap = new Map(dividerPresets.map((preset) => [preset.mode, preset]));
+  const pricePresetMap = new Map(pricePresets.map((preset) => [preset.name, preset]));
+  const aiLabFamilyMap = new Map(aiLabFamilies.map((family) => [family.id, family]));
+
+  function createAiLabRandom(seed) {
+    let state = Math.max(1, Number(seed) || 1) >>> 0;
+    return function nextRandom() {
+      state = (state + 0x6D2B79F5) >>> 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function pickAiLabItem(items, random, fallback = null) {
+    if (!Array.isArray(items) || !items.length) return fallback;
+    const index = Math.max(0, Math.min(items.length - 1, Math.floor(random() * items.length)));
+    return items[index] || fallback;
+  }
+
+  function aiLabBetween(random, min, max) {
+    return min + ((max - min) * random());
+  }
+
+  function aiLabJitter(random, min, max) {
+    return aiLabBetween(random, min, max);
+  }
+
+  function parseDemoMagicAiLabStyleId(styleId) {
+    const safe = String(styleId || "").trim();
+    if (!safe) return null;
+    const runtimeMatch = safe.match(/^(ai-lab-[a-z0-9-]+)--s(\d+)$/);
+    if (runtimeMatch) {
+      return {
+        familyId: runtimeMatch[1],
+        seed: Math.max(1, Number(runtimeMatch[2]) || 1),
+        runtimeId: safe,
+        isRuntime: true
+      };
+    }
+    if (aiLabFamilyMap.has(safe)) {
+      return {
+        familyId: safe,
+        seed: 1,
+        runtimeId: safe,
+        isRuntime: false
+      };
+    }
+    return null;
+  }
+
+  function buildAiLabRuntimeStyleId(familyId, seed) {
+    return `${String(familyId || "").trim()}--s${String(Math.max(1, Number(seed) || 1)).padStart(6, "0")}`;
+  }
+
+  function buildAiLabLabel(family, seed) {
+    return `${family.label} • seed ${String(Math.max(1, Number(seed) || 1)).padStart(6, "0")}`;
+  }
+
+  function hashAiLabSeed(input) {
+    const source = String(input || "");
+    let hash = 2166136261;
+    for (let index = 0; index < source.length; index += 1) {
+      hash ^= source.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function mutateAiLabPalette(palette, family, random) {
+    return {
+      ...clone(palette),
+      nameColor: mixHex(palette.nameColor, family.paperMix, aiLabBetween(random, 0.04, 0.18)),
+      indexColor: mixHex(palette.indexColor, family.paperMix, aiLabBetween(random, 0.08, 0.22)),
+      packageColor: mixHex(palette.packageColor, family.nameColorMix || palette.nameColor, aiLabBetween(random, 0.08, 0.24)),
+      dividerColor: mixHex(palette.dividerColor, family.paperMix, aiLabBetween(random, 0.04, 0.22)),
+      accentPrice: mixHex(palette.accentPrice, family.accentMix, aiLabBetween(random, 0.08, 0.3)),
+      rectDark: mixHex(palette.rectDark, palette.nameColor, aiLabBetween(random, 0.06, 0.22)),
+      rectLight: mixHex(palette.rectLight, family.paperMix, aiLabBetween(random, 0.04, 0.16)),
+      rectLightText: mixHex(palette.rectLightText, palette.nameColor, aiLabBetween(random, 0.06, 0.18))
+    };
+  }
+
+  function mutateAiLabFamilyDirect(baseFamilyDirect, random) {
+    const next = clone(baseFamilyDirect);
+    const imageLayouts = next?.imageLayouts;
+    if (!imageLayouts || typeof imageLayouts !== "object") return next;
+    Object.keys(imageLayouts).forEach((key) => {
+      const layouts = Array.isArray(imageLayouts[key]) ? imageLayouts[key] : [];
+      imageLayouts[key] = layouts.map((slot) => {
+        const insetX = aiLabBetween(random, 0, 0.02);
+        const insetY = aiLabBetween(random, 0, 0.02);
+        return {
+          x: clampNumber(slot.x + insetX, 0, 0.9),
+          y: clampNumber(slot.y + insetY, 0, 0.9),
+          w: clampNumber(slot.w - (insetX * 2), 0.2, 1),
+          h: clampNumber(slot.h - (insetY * 2), 0.2, 1)
+        };
+      });
+    });
+    return next;
+  }
+
+  function getAiLabPriceMetrics(single, text) {
+    const rounded = String(text.priceShape || "").trim() === "roundedRect";
+    const width = rounded
+      ? clampNumber(single.priceArea.w || 24, 18, 34)
+      : clampNumber((single.priceArea.s || 14) * 1.4, 14, 34);
+    const height = rounded
+      ? clampNumber(single.priceArea.h || 11, 8.5, 15)
+      : Math.max(10, clampNumber(single.priceArea.s || 14, 10, 22));
+    return {
+      width,
+      height,
+      isRounded: rounded
+    };
+  }
+
+  function applyAiLabFamilyMutation(single, text, family, layout, random) {
+    const imgScale = aiLabBetween(random, family.imageScale[0], family.imageScale[1]);
+    const priceScale = aiLabBetween(random, family.priceScale[0], family.priceScale[1]);
+    const dividerScale = aiLabBetween(random, family.dividerWeight[0], family.dividerWeight[1]);
+
+    single.imgArea.w = clampNumber(single.imgArea.w * imgScale, 18, 92);
+    single.imgArea.h = clampNumber(single.imgArea.h * imgScale, 20, 72);
+    single.imgArea.x = clampNumber(single.imgArea.x + aiLabJitter(random, family.imageShiftX[0], family.imageShiftX[1]), 2, 76);
+    single.imgArea.y = clampNumber(single.imgArea.y + aiLabJitter(random, family.imageShiftY[0], family.imageShiftY[1]), 4, 78);
+
+    single.nameArea.x = clampNumber(single.nameArea.x + aiLabJitter(random, family.textShiftX[0], family.textShiftX[1]), 6, 80);
+    single.nameArea.y = clampNumber(single.nameArea.y + aiLabJitter(random, family.textShiftY[0], family.textShiftY[1]), 8, 84);
+    single.nameArea.w = clampNumber(single.nameArea.w * aiLabBetween(random, 0.9, 1.12), 18, 86);
+    single.nameArea.h = clampNumber(single.nameArea.h * aiLabBetween(random, 0.92, 1.16), 10, 28);
+
+    single.indexPos.x = clampNumber(single.nameArea.x + aiLabJitter(random, -0.8, 1.2), 6, 90);
+    single.packagePos.x = clampNumber(single.nameArea.x + aiLabJitter(random, -0.8, 1.8), 6, 90);
+    single.indexPos.y = clampNumber(single.indexPos.y + aiLabJitter(random, family.textShiftY[0], family.textShiftY[1]), 14, 90);
+    single.packagePos.y = clampNumber(single.packagePos.y + aiLabJitter(random, family.textShiftY[0], family.textShiftY[1]), 18, 94);
+
+    if (String(text.priceShape || "").trim() === "roundedRect") {
+      single.priceArea.w = clampNumber((single.priceArea.w || 24) * priceScale, 18, 34);
+      single.priceArea.h = clampNumber((single.priceArea.h || 11) * aiLabBetween(random, 0.94, 1.12), 8.5, 15);
+    } else {
+      single.priceArea.s = clampNumber((single.priceArea.s || 14) * priceScale, 10, 22);
+    }
+
+    if (family.id === "ai-lab-editorial") {
+      text.priceScaleMultiplier = clampNumber(Number(text.priceScaleMultiplier || 1.18) * aiLabBetween(random, 1.02, 1.12), 0.96, 1.38);
+      single.priceArea.y = clampNumber(single.priceArea.y + aiLabJitter(random, -2.2, 2.2), 8, 86);
+    } else if (family.id === "ai-lab-retail") {
+      text.priceScaleMultiplier = clampNumber(Number(text.priceScaleMultiplier || 1.02) * aiLabBetween(random, 1.04, 1.14), 1.0, 1.42);
+      single.priceArea.x = clampNumber(single.priceArea.x + aiLabJitter(random, -2.0, 2.0), 6, 82);
+      single.priceArea.y = clampNumber(single.priceArea.y + aiLabJitter(random, -1.0, 2.6), 10, 88);
+    } else if (family.id === "ai-lab-minimal") {
+      text.priceScaleMultiplier = clampNumber(Number(text.priceScaleMultiplier || 1) * aiLabBetween(random, 0.92, 1.02), 0.88, 1.12);
+      single.nameArea.w = clampNumber(single.nameArea.w * aiLabBetween(random, 0.98, 1.08), 20, 86);
+    } else if (family.id === "ai-lab-spotlight") {
+      single.imgArea.w = clampNumber(single.imgArea.w * aiLabBetween(random, 1.03, 1.12), 22, 92);
+      single.imgArea.h = clampNumber(single.imgArea.h * aiLabBetween(random, 1.02, 1.12), 24, 72);
+      text.priceScaleMultiplier = clampNumber(Number(text.priceScaleMultiplier || 1.1) * aiLabBetween(random, 1.04, 1.16), 1.0, 1.42);
+    } else if (family.id === "ai-lab-contrast") {
+      text.forcePriceBold = true;
+      text.priceScaleMultiplier = clampNumber(Number(text.priceScaleMultiplier || 1.08) * aiLabBetween(random, 1.0, 1.14), 0.98, 1.36);
+      text.nameColor = mixHex(text.nameColor, "#1d2430", aiLabBetween(random, 0.06, 0.18));
+    }
+
+    if (single.divider && single.divider.w > 0 && single.divider.h > 0) {
+      if (single.divider.h >= single.divider.w) {
+        single.divider.w = clampNumber(single.divider.w * dividerScale, 0.36, 2.2);
+        single.divider.x = clampNumber(single.divider.x + aiLabJitter(random, -2.0, 2.0), 2, 94);
+      } else {
+        single.divider.h = clampNumber(single.divider.h * dividerScale, 0.42, 2.4);
+        single.divider.y = clampNumber(single.divider.y + aiLabJitter(random, -3.0, 3.0), 4, 94);
+      }
+    }
+
+    const priceMetrics = getAiLabPriceMetrics(single, text);
+    const prefersBottomPrice = family.id === "ai-lab-premium" || family.id === "ai-lab-retail" || family.id === "ai-lab-minimal";
+    const prefersTopPrice = family.id === "ai-lab-editorial" || family.id === "ai-lab-spotlight";
+    if (prefersBottomPrice && random() < 0.58) {
+      single.priceArea.y = clampNumber(Math.max(single.packagePos.y + 9.5, single.priceArea.y), 18, 88 - priceMetrics.height);
+    }
+    if (prefersTopPrice && random() < 0.32) {
+      single.priceArea.y = clampNumber(single.priceArea.y - aiLabBetween(random, 2.4, 6.2), 8, 40);
+    }
+
+    if (layout.name === "Hero Top") {
+      single.nameArea.w = clampNumber(single.nameArea.w * aiLabBetween(random, 0.96, 1.16), 24, 86);
+      single.nameArea.x = clampNumber(single.nameArea.x + aiLabJitter(random, -2.0, 2.0), 6, 78);
+    }
+  }
+
+  function scoreAiLabCandidate(single, text, family) {
+    const dividerVisible = !!(single.divider && single.divider.w > 0 && single.divider.h > 0);
+    const imageShare = (single.imgArea.w * single.imgArea.h) / 10000;
+    const nameBottom = single.nameArea.y + single.nameArea.h;
+    const packageBottom = single.packagePos.y + 4.5;
+    const priceMetrics = getAiLabPriceMetrics(single, text);
+    const priceBottom = single.priceArea.y + priceMetrics.height;
+    const textPriceGap = Math.max(0, single.priceArea.y - Math.max(nameBottom, packageBottom));
+    const centerX = (single.imgArea.x + (single.imgArea.w / 2) + single.nameArea.x + (single.nameArea.w / 2)) / 2;
+
+    let score = 100;
+    score -= Math.abs(imageShare - Number(family.imageShareTarget || 0.25)) * 180;
+    score -= Math.abs(centerX - 50) * 0.55;
+    score += family.wantsDivider ? (dividerVisible ? 10 : -8) : (dividerVisible ? -2 : 9);
+    score += Math.min(12, textPriceGap * 0.7);
+    score -= Math.max(0, priceBottom - 90) * 1.4;
+    score -= Math.max(0, 14 - single.nameArea.h) * 0.9;
+    if (family.id === "ai-lab-editorial" || family.id === "ai-lab-spotlight") {
+      score += Math.min(14, single.imgArea.h * 0.12);
+    }
+    if (family.id === "ai-lab-minimal") {
+      score += Math.max(0, (92 - Math.max(nameBottom, priceBottom)) * 0.14);
+    }
+    if (family.id === "ai-lab-retail") {
+      score += Math.min(14, priceMetrics.height * 1.1);
+    }
+    return score;
+  }
+
+  function buildAiLabStylePayload(familyId, seed = 1) {
+    const family = aiLabFamilyMap.get(String(familyId || "").trim());
+    if (!family) return null;
+    const safeSeed = Math.max(1, Math.round(Number(seed) || 1));
+    const baseSeed = hashAiLabSeed(`${family.id}|${safeSeed}`);
+    let best = null;
+
+    for (let attempt = 0; attempt < 18; attempt += 1) {
+      const random = createAiLabRandom(baseSeed + (attempt * 104729));
+      const layout = clone(layoutPresetMap.get(pickAiLabItem(family.layoutNames, random, family.layoutNames[0])) || layoutPresets[0]);
+      const palette = mutateAiLabPalette(
+        clone(paletteMap.get(pickAiLabItem(family.paletteNames, random, family.paletteNames[0])) || palettes[0]),
+        family,
+        random
+      );
+      const dividerPreset = dividerPresetMap.get(pickAiLabItem(family.dividerModes, random, family.dividerModes[0])) || dividerPresets[0];
+      const pricePreset = pricePresetMap.get(pickAiLabItem(family.priceNames, random, family.priceNames[0])) || pricePresets[0];
+      const singleDirect = clone(layout.singleDirect);
+      const text = {
+        nameColor: palette.nameColor,
+        indexColor: palette.indexColor,
+        packageColor: palette.packageColor,
+        dividerColor: palette.dividerColor,
+        indexItalic: layout.name === "Hero Top"
+      };
+
+      applyDividerPreset(singleDirect, text, palette, dividerPreset, layout);
+      pricePreset.apply(singleDirect, text, palette, layout);
+      if (!text.priceColor) text.priceColor = palette.accentPrice;
+      applyAiLabFamilyMutation(singleDirect, text, family, layout, random);
+      stabilizeGeneratedSingleDirectLayout(singleDirect, text, dividerPreset, pricePreset);
+
+      const score = scoreAiLabCandidate(singleDirect, text, family);
+      if (!best || score > best.score) {
+        best = {
+          score,
+          layoutName: layout.name,
+          paletteName: palette.name,
+          dividerName: dividerPreset.name,
+          priceName: pricePreset.name,
+          config: {
+            singleDirect,
+            familyDirect: mutateAiLabFamilyDirect(layout.familyDirect, random),
+            text: {
+              ...text,
+              __aiLabMeta: {
+                familyId: family.id,
+                familyLabel: family.label,
+                seed: safeSeed,
+                score: Number(score.toFixed(2)),
+                layoutName: layout.name,
+                paletteName: palette.name,
+                dividerName: dividerPreset.name,
+                priceName: pricePreset.name
+              }
+            }
+          }
+        };
+      }
+    }
+
+    if (!best) return null;
+    return {
+      familyId: family.id,
+      styleId: buildAiLabRuntimeStyleId(family.id, safeSeed),
+      label: buildAiLabLabel(family, safeSeed),
+      config: best.config,
+      score: best.score,
+      familyLabel: family.label,
+      seed: safeSeed,
+      summary: `${best.layoutName} / ${best.paletteName} / ${best.dividerName} / ${best.priceName}`
+    };
+  }
+
+  function registerAiLabBaseStyles() {
+    aiLabFamilies.forEach((family, index) => {
+      const payload = buildAiLabStylePayload(family.id, index + 1);
+      if (!payload) return;
+      window.registerStylWlasnyModuleLayoutStyle({
+        id: family.id,
+        label: family.label,
+        config: clone(payload.config)
+      });
+      labelMap[family.id] = family.label;
+    });
+  }
+
+  function ensureDemoMagicAiLabStyle(styleId, seed = 1) {
+    const parsed = parseDemoMagicAiLabStyleId(styleId);
+    const familyId = parsed?.familyId || String(styleId || "").trim();
+    if (!aiLabFamilyMap.has(familyId)) return null;
+    const safeSeed = Math.max(1, Math.round(Number(seed || parsed?.seed || 1) || 1));
+    const payload = buildAiLabStylePayload(familyId, safeSeed);
+    if (!payload) return null;
+    window.registerStylWlasnyModuleLayoutStyle({
+      id: payload.styleId,
+      label: payload.label,
+      config: clone(payload.config)
+    });
+    window.__DEMO_MAGIC_STYLE_LABELS = {
+      ...(window.__DEMO_MAGIC_STYLE_LABELS || {}),
+      [payload.styleId]: payload.label
+    };
+    return payload;
+  }
+
+  registerAiLabBaseStyles();
+
+  const dividerSequence = [0, 1, 2, 3, 4, 5];
+  const paletteCount = palettes.length;
+  const priceCount = pricePresets.length;
+  const styleSequence = [];
+  dividerSequence.forEach((dividerIndex) => {
+    for (let paletteIndex = 0; paletteIndex < paletteCount; paletteIndex += 1) {
+      for (let priceIndex = 0; priceIndex < priceCount; priceIndex += 1) {
+        for (let layoutIndex = 0; layoutIndex < layoutPresets.length; layoutIndex += 1) {
+          const globalIndex =
+            (((layoutIndex * dividerPresets.length) + dividerIndex) * paletteCount * priceCount) +
+            (paletteIndex * priceCount) +
+            priceIndex;
+          if (generatedIds[globalIndex]) styleSequence.push(generatedIds[globalIndex]);
+        }
+      }
+    }
+  });
+
+  window.__DEMO_MAGIC_STYLE_SEQUENCE = styleSequence;
+  window.__DEMO_MAGIC_STYLE_COUNT = generatedIds.length;
+  window.__DEMO_MAGIC_VARIANT_COUNT = 1000;
+  window.__DEMO_MAGIC_AI_LAB_SEQUENCE = aiLabFamilies.map((family) => family.id);
+  window.__DEMO_MAGIC_AI_LAB_LABELS = aiLabFamilies.reduce((acc, family) => {
+    acc[family.id] = family.label;
+    return acc;
+  }, {});
+  window.parseDemoMagicAiLabStyleId = parseDemoMagicAiLabStyleId;
+  window.ensureDemoMagicAiLabStyle = ensureDemoMagicAiLabStyle;
+  window.__DEMO_MAGIC_AI_LAB_CAPABILITIES = [
+    "nieskonczone seedy",
+    "mutacje koloru i ceny",
+    "mutacje dividera",
+    "mutacje polozenia zdjecia i tekstu",
+    "ranking kandydatow"
+  ];
+  window.__DEMO_MAGIC_STYLE_LABELS = {
+    ...(window.__DEMO_MAGIC_STYLE_LABELS || {}),
+    ...labelMap
+  };
+})();
+
+  </script>
+  <script src="styl-wlasny.js"></script>
+  <script src="magic-layout.js"></script>
+</body>
+</html>

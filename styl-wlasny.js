@@ -4987,11 +4987,16 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       priceGroup.off("transformend.directPriceResize");
       priceGroup.off("dragmove.directPriceRealign");
     }
-    priceGroup.on("dblclick.directPriceEdit dbltap.directPriceEdit", () => {
+    priceGroup.on("dblclick.directPriceEdit dbltap.directPriceEdit", async () => {
       const current = `${main.text?.() || "0"}.${dec.text?.() || "00"}`;
-      const raw = prompt("Podaj nową cenę (np. 1,49):", String(current).replace(".", ","));
-      if (raw == null) return;
-      const parsed = parseFloat(String(raw).replace(",", ".").replace(/[^0-9.]/g, ""));
+      const parsed = typeof window.showPriceEditDialog === "function"
+        ? await window.showPriceEditDialog({
+          title: "Edytuj cenę",
+          message: "Zmień wartość ceny dla zaznaczonego modułu.",
+          confirmText: "Zapisz",
+          value: String(current).replace(".", ",")
+        })
+        : parseFloat(String(prompt("Podaj nową cenę (np. 1,49):", String(current).replace(".", ",")) || "").replace(",", ".").replace(/[^0-9.]/g, ""));
       if (!Number.isFinite(parsed)) return;
       const [nm, nd] = parsed.toFixed(2).split(".");
       main.text(nm);

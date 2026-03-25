@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mini edytor zdjec</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app">
+      <section class="hero">
+        <p class="eyebrow">Mini studio foto</p>
+        <h1>Kadrowanie, usuwanie tla i kompresja</h1>
+        <p class="intro">
+          Wgraj zdjecie, zaznacz kadr na podgladzie, usun tlo i pobierz gotowy plik.
+        </p>
+      </section>
+
+      <section class="panel">
+        <label class="upload" for="fileInput">
+          <span>Wybierz zdjecie</span>
+          <input id="fileInput" type="file" accept="image/*">
+        </label>
+
+        <div class="actions">
+          <button id="removeBgBtn" type="button" disabled>Usun tlo</button>
+          <button id="cleanBgBtn" type="button" disabled>Doczysc tlo</button>
+          <button id="resetBtn" type="button" disabled>Reset</button>
+          <button id="downloadBtn" type="button" disabled>Pobierz wynik</button>
+        </div>
+
+        <div class="fields">
+          <label class="field">
+            <span>Format</span>
+            <select id="formatSelect" disabled>
+              <option value="auto">Auto</option>
+              <option value="png">PNG</option>
+              <option value="jpg">JPG</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Jakosc JPG</span>
+            <div class="range-row">
+              <input id="qualityRange" type="range" min="0.92" max="1" step="0.01" value="0.96" disabled>
+              <strong id="qualityValue">96%</strong>
+            </div>
+          </label>
+        </div>
+
+        <p id="status" class="status">Wybierz plik, aby zaczac.</p>
+        <p id="meta" class="meta">
+          Auto wybiera mniejszy plik. Przy przezroczystym tle zapisuje PNG.
+        </p>
+      </section>
+
+      <section class="workspace">
+        <article class="canvas-card">
+          <div class="card-head">
+            <h2>Podglad</h2>
+            <p>Zaznacz kadr przeciagnieciem myszy.</p>
+          </div>
+          <canvas id="previewCanvas" width="720" height="420"></canvas>
+        </article>
+
+        <article class="canvas-card">
+          <div class="card-head">
+            <h2>Wynik</h2>
+            <p>Podglad gotowego wycinka.</p>
+          </div>
+          <canvas id="resultCanvas" width="720" height="420"></canvas>
+        </article>
+      </section>
+
+      <section class="panel note">
+        <p>
+          Wskazowka: najlepsza jakosc daje lokalny backend backgroundremover. Strona najpierw probuje
+          lokalnego backendu, a dopiero potem przechodzi na fallback w przegladarce.
+        </p>
+        <code>Uruchom lokalny serwer: ./start-local-ai.sh</code>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

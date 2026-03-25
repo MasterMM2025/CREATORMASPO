@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Test 30459</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+      body { padding: 24px 0; }
+      .test-log {
+        margin-top: 16px;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <section class="hero">
+        <p class="eyebrow">Harness</p>
+        <h1>Automatyczny test 30459.png</h1>
+        <p class="intro">Strona sama laduje obraz i uruchamia usuwanie tla.</p>
+      </section>
+
+      <section class="panel">
+        <label class="upload" for="fileInput">
+          <span>Wybierz zdjecie</span>
+          <input id="fileInput" type="file" accept="image/*">
+        </label>
+
+        <div class="actions">
+          <button id="removeBgBtn" type="button" disabled>Usun tlo</button>
+          <button id="resetBtn" type="button" disabled>Reset</button>
+          <button id="downloadBtn" type="button" disabled>Pobierz wynik</button>
+        </div>
+
+        <div class="fields">
+          <label class="field">
+            <span>Format</span>
+            <select id="formatSelect" disabled>
+              <option value="auto">Auto</option>
+              <option value="png">PNG</option>
+              <option value="jpg">JPG</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Jakosc JPG</span>
+            <div class="range-row">
+              <input id="qualityRange" type="range" min="0.92" max="1" step="0.01" value="0.96" disabled>
+              <strong id="qualityValue">96%</strong>
+            </div>
+          </label>
+        </div>
+
+        <p id="status" class="status">Start testu...</p>
+        <p id="meta" class="meta">---</p>
+        <div id="testLog" class="test-log">Ladowanie...</div>
+      </section>
+
+      <section class="workspace">
+        <article class="canvas-card">
+          <div class="card-head">
+            <h2>Podglad</h2>
+            <p>Obraz wejsciowy</p>
+          </div>
+          <canvas id="previewCanvas" width="720" height="420"></canvas>
+        </article>
+
+        <article class="canvas-card">
+          <div class="card-head">
+            <h2>Wynik</h2>
+            <p>Po usunieciu tla</p>
+          </div>
+          <canvas id="resultCanvas" width="720" height="420"></canvas>
+        </article>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+    <script>
+      (async () => {
+        const log = document.getElementById("testLog");
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        window.removeBackgroundWithOpenSourceAI = async () => {
+          throw new Error("Harness forces local fallback");
+        };
+        const waitForCompletion = async () => {
+          const started = Date.now();
+          while (Date.now() - started < 120000) {
+            const status = document.getElementById("status").textContent || "";
+            if (
+              status.includes("Tlo zostalo usuniete") ||
+              status.includes("Tlo usuniete przez AI open source") ||
+              status.includes("Nie udalo sie")
+            ) {
+              return status;
+            }
+            await wait(1200);
+          }
+          return document.getElementById("status").textContent || "timeout";
+        };
+
+        try {
+          const response = await fetch("./30459.png", { cache: "no-store" });
+          const blob = await response.blob();
+          const file = new File([blob], "30459.png", { type: "image/png" });
+          log.textContent = "Plik pobrany. Ladowanie do aplikacji...";
+          await loadSelectedFile(file);
+          await wait(150);
+          log.textContent = "Usuwanie tla...";
+          document.getElementById("removeBgBtn").click();
+          await waitForCompletion();
+          log.textContent = [
+            "Status: " + document.getElementById("status").textContent,
+            "Meta: " + document.getElementById("meta").textContent
+          ].join("\n");
+        } catch (error) {
+          log.textContent = "Blad harness: " + String(error && error.message ? error.message : error);
+        }
+      })();
+    </script>
+  </body>
+</html>

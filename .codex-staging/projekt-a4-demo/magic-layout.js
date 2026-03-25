@@ -3700,10 +3700,358 @@
       }
       return false;
     }
+    const fixedStyleMode = String(opts.styleMode || "").trim();
+    if (fixedStyleMode.startsWith("style:")) {
+      const fixedStyleId = String(fixedStyleMode.slice(6) || "").trim();
+      if (fixedStyleId) {
+        page._demoMagicVariantStyleId = fixedStyleId;
+        page._demoMagicVariantCursor = 0;
+        page._magicLayoutLastPageStyleId = fixedStyleId;
+      }
+    }
     if (typeof window.showAppToast === "function") {
       window.showAppToast("AI zmienilo uklad strony na bazie wybranego stylu.", "success");
     }
     return true;
+  }
+
+  function hashDemoMagicSeed(input) {
+    const source = String(input || "");
+    let hash = 2166136261;
+    for (let i = 0; i < source.length; i += 1) {
+      hash ^= source.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function createDemoMagicRandom(seed) {
+    let state = (Number(seed) || 0) >>> 0;
+    return function nextRandom() {
+      state = (state + 0x6D2B79F5) >>> 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function withDemoMagicSeed(seed, fn) {
+    const originalRandom = Math.random;
+    const seeded = createDemoMagicRandom(seed);
+    Math.random = seeded;
+    try {
+      return fn();
+    } finally {
+      Math.random = originalRandom;
+    }
+  }
+
+  function clampDemoMagic(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function pickDemoMagic(items, randomValue) {
+    if (!Array.isArray(items) || !items.length) return "";
+    const safeRandom = Number.isFinite(randomValue) ? randomValue : 0;
+    const index = Math.max(0, Math.min(items.length - 1, Math.floor(safeRandom * items.length)));
+    return items[index];
+  }
+
+  function parseDemoMagicAiLabStyle(styleId) {
+    if (typeof window.parseDemoMagicAiLabStyleId === "function") {
+      const parsed = window.parseDemoMagicAiLabStyleId(styleId);
+      if (parsed && parsed.familyId) return parsed;
+    }
+    const safe = String(styleId || "").trim();
+    const runtimeMatch = safe.match(/^(ai-lab-[a-z0-9-]+)--s(\d+)$/);
+    if (runtimeMatch) {
+      return {
+        familyId: runtimeMatch[1],
+        seed: Math.max(1, Number(runtimeMatch[2]) || 1),
+        runtimeId: safe,
+        isRuntime: true
+      };
+    }
+    if (/^ai-lab-[a-z0-9-]+$/.test(safe)) {
+      return {
+        familyId: safe,
+        seed: 1,
+        runtimeId: safe,
+        isRuntime: false
+      };
+    }
+    return null;
+  }
+
+  function resolveDemoMagicRuntimeStyle(page, requestedStyleId, opts = {}) {
+    const safeRequestedStyleId = String(requestedStyleId || "default").trim() || "default";
+    const aiLab = parseDemoMagicAiLabStyle(safeRequestedStyleId);
+    if (!aiLab?.familyId) {
+      return {
+        styleId: safeRequestedStyleId,
+        familyId: "",
+        seed: 0,
+        isAiLab: false,
+        label: ""
+      };
+    }
+
+    const nextSeed = Math.max(1, Math.round(Number(opts.aiSeed || aiLab.seed || page?._demoMagicAiLabSeed || 1) || 1));
+    const payload = typeof window.ensureDemoMagicAiLabStyle === "function"
+      ? window.ensureDemoMagicAiLabStyle(aiLab.familyId, nextSeed)
+      : null;
+    if (payload?.styleId) {
+      return {
+        styleId: payload.styleId,
+        familyId: aiLab.familyId,
+        seed: nextSeed,
+        isAiLab: true,
+        label: String(payload.label || "").trim(),
+        summary: String(payload.summary || "").trim()
+      };
+    }
+
+    return {
+      styleId: aiLab.runtimeId || aiLab.familyId,
+      familyId: aiLab.familyId,
+      seed: nextSeed,
+      isAiLab: true,
+      label: String(window.__DEMO_MAGIC_AI_LAB_LABELS?.[aiLab.familyId] || aiLab.familyId).trim(),
+      summary: ""
+    };
+  }
+
+  function getDemoMagicVariantLimit() {
+    const configured = Number(window.__DEMO_MAGIC_VARIANT_COUNT || 1000);
+    return Math.max(24, Math.min(4000, Math.round(configured) || 1000));
+  }
+
+  function normalizeDemoMagicVariantOptions(context, rows, options) {
+    const nextRows = Array.isArray(rows) && rows.length ? rows.slice() : [Math.max(1, Number(context?.modules?.length || 1))];
+    const nextOptions = { ...options };
+    if (Number(context?.modules?.length || 0) === 1) {
+      nextRows.length = 0;
+      nextRows.push(1);
+      nextOptions.gapX = 0;
+      nextOptions.gapY = 0;
+      nextOptions.marginMode = "auto";
+      nextOptions.align = "center";
+      nextOptions.verticalMode = "center";
+      nextOptions.scaleMode = "fit";
+      nextOptions.orderStrategy = "preserve";
+      nextOptions.scaleBias = clampDemoMagic(getNumber(nextOptions.scaleBias, 0.98), 0.92, 1.04);
+      nextOptions.rowAlignModes = ["center"];
+      nextOptions.rowScaleBiases = [1];
+      nextOptions.moduleScaleBiases = [1];
+    }
+    return {
+      rows: nextRows,
+      options: nextOptions
+    };
+  }
+
+  function buildDemoMagicVariantCatalog(context, styleId, limit = getDemoMagicVariantLimit()) {
+    if (!context || !context.page || !context.modules?.length) return [];
+    const safeStyleId = String(styleId || getPreferredMagicLayoutStyleId(context.page) || "default").trim() || "default";
+    const safeLimit = Math.max(24, Math.min(4000, Math.round(Number(limit) || getDemoMagicVariantLimit())));
+    const cacheKey = [
+      safeStyleId,
+      context.modules.length,
+      Math.round(getNumber(context.pageWidth, 0)),
+      Math.round(getNumber(context.pageHeight, 0)),
+      safeLimit
+    ].join("|");
+    const cached = context.page._demoMagicVariantCatalogCache;
+    if (cached?.key === cacheKey && Array.isArray(cached.variants) && cached.variants.length) {
+      return cached.variants;
+    }
+
+    const styleMode = `style:${safeStyleId}`;
+    const seed = hashDemoMagicSeed(cacheKey);
+    const deterministicPresets = withDemoMagicSeed(seed, () => buildRandomPresets(context, 2));
+    const variants = [];
+    const signatures = new Set();
+    const pushVariant = (preset, flavorSuffix = "") => {
+      if (!preset || !Array.isArray(preset.rows) || !preset.rows.length) return;
+      if (variants.length >= safeLimit) return;
+      const normalized = normalizeDemoMagicVariantOptions(context, preset.rows, {
+        ...preset.options,
+        styleMode
+      });
+      const rows = normalized.rows;
+      const options = normalized.options;
+      const signature = getPresetSignature(
+        rows,
+        options,
+        `${preset.signature || preset.flavor || "demo"}:${flavorSuffix}`
+      );
+      if (signatures.has(signature)) return;
+      const plan = buildLayoutPlan(context, rows, options);
+      if (plan.error) return;
+      signatures.add(signature);
+      variants.push({
+        rows,
+        options,
+        signature,
+        flavor: String(preset.flavor || flavorSuffix || "demo").trim()
+      });
+    };
+
+    deterministicPresets
+      .slice()
+      .sort((a, b) => String(a.signature || "").localeCompare(String(b.signature || ""), "en", { numeric: true }))
+      .forEach((preset, index) => pushVariant(preset, `seed-${index}`));
+
+    const basePresets = variants.length
+      ? variants.slice()
+      : buildProfileBasedSeedPresets(context, getPresetProfilesForContext(context), `demo-fixed-${safeStyleId}`)
+        .map((preset) => ({
+          rows: Array.isArray(preset.rows) ? preset.rows.slice() : [],
+          options: { ...preset.options, styleMode },
+          signature: preset.signature,
+          flavor: preset.flavor
+        }));
+
+    const orderStrategies = Array.isArray(getOrderStrategies(context)) ? getOrderStrategies(context) : ["preserve"];
+    const verticalModes = Array.isArray(getVerticalModes(context)) ? getVerticalModes(context) : ["center"];
+    const alignModes = ["center", "left", "right"];
+
+    for (let index = 0; variants.length < safeLimit && index < safeLimit * 8; index += 1) {
+      const template = basePresets[index % Math.max(1, basePresets.length)] || variants[index % Math.max(1, variants.length)];
+      if (!template) break;
+      const random = createDemoMagicRandom(seed + (index + 1) * 7919);
+      const rows = Array.isArray(template.rows) && template.rows.length
+        ? template.rows.slice()
+        : [context.modules.length];
+      const rowAlignModes = rows.map((_, rowIndex) => {
+        const templateAlign = Array.isArray(template.options?.rowAlignModes)
+          ? template.options.rowAlignModes[rowIndex]
+          : "";
+        return pickDemoMagic(
+          [templateAlign || template.options?.align || "center"].concat(alignModes),
+          random()
+        ) || "center";
+      });
+      const rowScaleBiases = rows.map((_, rowIndex) => {
+        const base = Array.isArray(template.options?.rowScaleBiases)
+          ? getNumber(template.options.rowScaleBiases[rowIndex], getNumber(template.options?.scaleBias, 1))
+          : getNumber(template.options?.scaleBias, 1);
+        return clampDemoMagic(Number((base * (0.72 + (random() * 0.64))).toFixed(3)), 0.42, 1.34);
+      });
+      const moduleScaleBiases = Array.from({ length: context.modules.length }, (_item, moduleIndex) => {
+        const base = Array.isArray(template.options?.moduleScaleBiases)
+          ? getNumber(template.options.moduleScaleBiases[moduleIndex], 1)
+          : 1;
+        return clampDemoMagic(Number((base * (0.62 + (random() * 0.88))).toFixed(3)), 0.48, 1.42);
+      });
+      const options = {
+        gapX: clampDemoMagic(Math.round(getNumber(template.options?.gapX, 16) + ((random() - 0.5) * 20)), 0, 54),
+        gapY: clampDemoMagic(Math.round(getNumber(template.options?.gapY, 18) + ((random() - 0.5) * 22)), 0, 58),
+        marginX: clampDemoMagic(Math.round(getNumber(template.options?.marginX, 32) + ((random() - 0.5) * 28)), 8, 96),
+        marginY: clampDemoMagic(Math.round(getNumber(template.options?.marginY, 36) + ((random() - 0.5) * 34)), 10, 104),
+        marginMode: random() < 0.7 ? "auto" : "manual",
+        align: pickDemoMagic([template.options?.align || "center"].concat(alignModes), random()) || "center",
+        scaleMode: random() < 0.84 ? "fit" : "keep",
+        orderStrategy: pickDemoMagic([template.options?.orderStrategy || "preserve"].concat(orderStrategies), random()) || "preserve",
+        verticalMode: pickDemoMagic([template.options?.verticalMode || "center"].concat(verticalModes), random()) || "center",
+        scaleBias: clampDemoMagic(Number((getNumber(template.options?.scaleBias, 1) * (0.74 + (random() * 0.54))).toFixed(3)), 0.52, 1.28),
+        rowAlignModes,
+        rowScaleBiases,
+        moduleScaleBiases,
+        styleMode
+      };
+      pushVariant({
+        rows,
+        options,
+        signature: template.signature,
+        flavor: `${template.flavor || "demo"}-math-${index + 1}`
+      }, `math-${index}`);
+    }
+
+    context.page._demoMagicVariantCatalogCache = {
+      key: cacheKey,
+      variants
+    };
+    return variants;
+  }
+
+  async function applyDemoMagicVariantForPage(page, opts = {}) {
+    try {
+      await ensureMagicLayoutCustomStylesReady();
+    } catch (_err) {}
+    const context = buildMagicLayoutContext(page);
+    if (context?.error) {
+      if (typeof window.showAppToast === "function") {
+        window.showAppToast(context.error, "error");
+      } else {
+        alert(context.error);
+      }
+      return false;
+    }
+
+    const rawStyleId = String(opts.styleId || getPreferredMagicLayoutStyleId(page) || "default").trim() || "default";
+    const requestedStyleId = rawStyleId.startsWith("style:") ? String(rawStyleId.slice(6) || "").trim() || "default" : rawStyleId;
+    const runtimeStyle = resolveDemoMagicRuntimeStyle(page, requestedStyleId, opts);
+    const styleId = runtimeStyle.styleId;
+    const variants = buildDemoMagicVariantCatalog(context, styleId, opts.limit);
+    if (!variants.length) {
+      return applyQuickAiMagicLayoutForPage(page, {
+        styleMode: `style:${styleId}`
+      });
+    }
+
+    const requestedIndex = Math.round(Number(opts.variantIndex) || 0);
+    const safeIndex = ((requestedIndex % variants.length) + variants.length) % variants.length;
+    const selected = variants[safeIndex];
+    const options = {
+      ...selected.options,
+      styleMode: `style:${styleId}`
+    };
+    await applyModuleStylesToPage(context, options.styleMode || "keep");
+    const result = layoutModules(context, selected.rows, options);
+    if (result.error) {
+      if (typeof window.showAppToast === "function") {
+        window.showAppToast(result.error, "error");
+      } else {
+        alert(result.error);
+      }
+      return false;
+    }
+
+    page._demoMagicCubeUnlocked = true;
+    page._demoMagicLastStyleId = styleId;
+    page._demoMagicVariantStyleId = styleId;
+    page._demoMagicVariantCursor = safeIndex;
+    page._demoMagicVariantCount = variants.length;
+    page._demoMagicVariantSignature = selected.signature;
+    page._demoMagicVariantFlavor = selected.flavor;
+    page._magicLayoutLastPageStyleId = styleId;
+    page._magicLayoutLastRandomSignature = selected.signature;
+    if (runtimeStyle.isAiLab) {
+      page._demoMagicAiLabFamilyId = runtimeStyle.familyId;
+      page._demoMagicAiLabSeed = runtimeStyle.seed;
+      page._demoMagicAiLabRuntimeStyleId = styleId;
+    }
+    triggerMagicPageEffect(context, opts.effectMode === "style" ? "random" : "ai");
+    if (typeof window.showAppToast === "function") {
+      const styleLabel = String(
+        runtimeStyle.label ||
+        window.__DEMO_MAGIC_STYLE_LABELS?.[styleId] ||
+        getModuleStyleDefinition(styleId)?.label ||
+        styleId
+      ).trim();
+      window.showAppToast(`Styl: ${styleLabel} | wariant ${safeIndex + 1}/${variants.length}.`, "success");
+    }
+    return {
+      ok: true,
+      styleId,
+      familyId: runtimeStyle.familyId,
+      aiSeed: runtimeStyle.seed,
+      isAiLab: runtimeStyle.isAiLab,
+      variantIndex: safeIndex,
+      variantCount: variants.length,
+      flavor: selected.flavor
+    };
   }
 
   async function applyRandomMagicLayout(context) {
@@ -3801,4 +4149,5 @@
 
   window.openMagicLayoutForPage = openMagicLayoutForPage;
   window.applyQuickAiMagicLayoutForPage = applyQuickAiMagicLayoutForPage;
+  window.applyDemoMagicVariantForPage = applyDemoMagicVariantForPage;
 })();

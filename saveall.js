@@ -68,6 +68,106 @@ function showAppToast(message, type = "success") {
 }
 window.showAppToast = showAppToast;
 
+function showPriceEditDialog(options = {}) {
+    return new Promise((resolve) => {
+        let modal = document.getElementById("priceEditModal");
+        if (modal) modal.remove();
+
+        const title = String(options.title || "Edycja ceny").trim();
+        const message = String(options.message || "Podaj nową cenę produktu.").trim();
+        const confirmText = String(options.confirmText || "Zapisz cenę").trim();
+        const cancelText = String(options.cancelText || "Anuluj").trim();
+        const initialValue = String(options.value ?? "").trim();
+
+        modal = document.createElement("div");
+        modal.id = "priceEditModal";
+        modal.style.cssText = `
+            position: fixed;
+            inset: 0;
+            background: rgba(8, 15, 27, 0.56);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000003;
+            backdrop-filter: blur(6px);
+            padding: 20px;
+        `;
+        modal.innerHTML = `
+            <div style="width:min(520px, calc(100vw - 32px)); background:radial-gradient(360px 180px at 100% 0%, rgba(56,189,248,0.10), transparent 54%), linear-gradient(180deg,#121a2a 0%,#0a101b 100%); border:1px solid rgba(255,255,255,0.08); border-radius:22px; padding:22px; box-shadow:0 28px 70px rgba(0,0,0,0.42); font-family:Inter,Arial,sans-serif;">
+                <div style="display:flex; align-items:flex-start; gap:14px;">
+                    <div style="width:46px; height:46px; flex:0 0 46px; border-radius:16px; background:rgba(56,189,248,0.14); color:#7dd3fc; display:flex; align-items:center; justify-content:center; font-size:18px; border:1px solid rgba(255,255,255,0.06);">
+                        <i class="fas fa-tag"></i>
+                    </div>
+                    <div style="min-width:0;">
+                        <h3 style="margin:0; font-size:24px; line-height:1.2; color:#f5f7fb; font-weight:800;">${title}</h3>
+                        <p style="margin:10px 0 0 0; color:#b7c2d8; font-size:14px; line-height:1.55;">${message}</p>
+                    </div>
+                </div>
+                <div style="margin-top:18px;">
+                    <label for="priceEditInput" style="display:block; margin-bottom:8px; color:#dbe7f5; font-size:13px; font-weight:700; letter-spacing:0.02em;">Nowa cena</label>
+                    <input id="priceEditInput" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" value="${initialValue.replace(/"/g, "&quot;")}" placeholder="Np. 1,49" style="width:100%; padding:14px 16px; border:1px solid rgba(125,211,252,0.30); border-radius:14px; font-size:26px; font-weight:800; letter-spacing:0.02em; outline:none; background:rgba(255,255,255,0.04); color:#f8fbff; box-shadow:inset 0 1px 0 rgba(255,255,255,0.04);">
+                    <div id="priceEditHint" style="margin-top:8px; color:#8fa3bf; font-size:12px; line-height:1.45;">Akceptowane formaty: <strong style="color:#dbeafe;">1,49</strong> albo <strong style="color:#dbeafe;">1.49</strong>.</div>
+                    <div id="priceEditError" style="display:none; margin-top:8px; color:#ff8ea1; font-size:13px; font-weight:700;">Wpisz poprawną cenę, np. 1,49.</div>
+                </div>
+                <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:22px; flex-wrap:wrap;">
+                    <button id="priceEditCancelBtn" type="button" style="padding:11px 16px; border:1px solid rgba(255,255,255,0.08); background:linear-gradient(180deg,#202838 0%,#151d2b 100%); color:#f5f7fb; border-radius:12px; cursor:pointer; font-weight:700; font-size:14px;">${cancelText}</button>
+                    <button id="priceEditOkBtn" type="button" style="padding:11px 18px; border:none; background:linear-gradient(135deg,#22c55e 0%,#14b8a6 100%); color:#06121a; border-radius:12px; cursor:pointer; font-weight:800; font-size:14px; box-shadow:0 14px 30px rgba(20,184,166,0.22);">${confirmText}</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        const input = modal.querySelector("#priceEditInput");
+        const errorEl = modal.querySelector("#priceEditError");
+        const setErrorVisible = (visible) => {
+            if (errorEl) errorEl.style.display = visible ? "block" : "none";
+            if (input) input.style.borderColor = visible ? "#ff8ea1" : "rgba(125,211,252,0.30)";
+        };
+        const cleanup = (result) => {
+            document.removeEventListener("keydown", onKey, true);
+            modal.remove();
+            resolve(result);
+        };
+        const submit = () => {
+            const raw = String(input?.value || "").trim();
+            const parsed = parseFloat(raw.replace(",", ".").replace(/[^0-9.]/g, ""));
+            if (!Number.isFinite(parsed)) {
+                setErrorVisible(true);
+                input?.focus();
+                input?.select?.();
+                return;
+            }
+            setErrorVisible(false);
+            cleanup(parsed);
+        };
+        const onKey = (ev) => {
+            if (!document.getElementById("priceEditModal")) {
+                document.removeEventListener("keydown", onKey, true);
+                return;
+            }
+            if (ev.key === "Escape") {
+                ev.preventDefault();
+                cleanup(null);
+            }
+            if (ev.key === "Enter") {
+                ev.preventDefault();
+                submit();
+            }
+        };
+
+        document.addEventListener("keydown", onKey, true);
+        input?.focus();
+        input?.select?.();
+        input?.addEventListener("input", () => setErrorVisible(false));
+        modal.querySelector("#priceEditCancelBtn").onclick = () => cleanup(null);
+        modal.querySelector("#priceEditOkBtn").onclick = submit;
+        modal.onclick = (event) => {
+            if (event.target === modal) cleanup(null);
+        };
+    });
+}
+window.showPriceEditDialog = showPriceEditDialog;
+
 function dataUrlToBlob(dataUrl) {
     const [meta, base64] = dataUrl.split(",");
     const mime = meta.match(/data:([^;]+);/i)?.[1] || "application/octet-stream";
@@ -3030,21 +3130,31 @@ async function renderPreviewFromData(data, opts = {}) {
             continue;
         }
         if (obj.type === "image") {
-            const img = await getImg(obj.src);
+            if (obj.visible === false) continue;
+            const renderSrc = obj.thumbSrc || obj.editorSrc || obj.src;
+            const img = await getImg(renderSrc);
             if (!img) continue;
-            const w = img.naturalWidth * (obj.scaleX || 1) * scale;
-            const h = img.naturalHeight * (obj.scaleY || 1) * scale;
+            const drawBaseW = Number(obj.width) > 0 ? Number(obj.width) : (img.naturalWidth || img.width || 0);
+            const drawBaseH = Number(obj.height) > 0 ? Number(obj.height) : (img.naturalHeight || img.height || 0);
+            const w = drawBaseW * (obj.scaleX || 1) * scale;
+            const h = drawBaseH * (obj.scaleY || 1) * scale;
             const x = obj.x * scale;
             const y = obj.y * scale;
+            const crop = obj.crop && typeof obj.crop === "object" ? obj.crop : null;
+            const cropX = Number(crop?.x) >= 0 ? Number(crop.x) : 0;
+            const cropY = Number(crop?.y) >= 0 ? Number(crop.y) : 0;
+            const cropW = Number(crop?.width) > 0 ? Number(crop.width) : (img.naturalWidth || img.width || drawBaseW);
+            const cropH = Number(crop?.height) > 0 ? Number(crop.height) : (img.naturalHeight || img.height || drawBaseH);
             ctx.save();
+            ctx.globalAlpha = obj.opacity ?? 1;
             if (obj.rotation) {
                 const cx = x + w / 2;
                 const cy = y + h / 2;
                 ctx.translate(cx, cy);
                 ctx.rotate((obj.rotation * Math.PI) / 180);
-                ctx.drawImage(img, -w / 2, -h / 2, w, h);
+                ctx.drawImage(img, cropX, cropY, cropW, cropH, -w / 2, -h / 2, w, h);
             } else {
-                ctx.drawImage(img, x, y, w, h);
+                ctx.drawImage(img, cropX, cropY, cropW, cropH, x, y, w, h);
             }
             ctx.restore();
             continue;

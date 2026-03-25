@@ -9385,12 +9385,16 @@ if (currency === 'pln' || currency === 'zł' || currency === 'zl') unit = `zł /
     priceGroup.moveToTop();
 
     // ✅ Edycja ceny po dwukliku na grupie ceny
-    priceGroup.on("dblclick dbltap", () => {
+    priceGroup.on("dblclick dbltap", async () => {
         const current = `${priceMain.text()}.${priceDecimal.text()}`;
-        const raw = prompt("Podaj nową cenę (np. 1,49):", current.replace(".", ","));
-        if (raw == null) return;
-
-        const parsed = parseFloat(String(raw).replace(",", ".").replace(/[^0-9.]/g, ""));
+        const parsed = typeof window.showPriceEditDialog === "function"
+            ? await window.showPriceEditDialog({
+                title: "Edytuj cenę",
+                message: "Zmień wartość ceny dla zaznaczonego produktu.",
+                confirmText: "Zapisz",
+                value: current.replace(".", ",")
+            })
+            : parseFloat(String(prompt("Podaj nową cenę (np. 1,49):", current.replace(".", ",")) || "").replace(",", ".").replace(/[^0-9.]/g, ""));
         if (!Number.isFinite(parsed)) return;
 
         const [newMain, newDecimal] = parsed.toFixed(2).split(".");
