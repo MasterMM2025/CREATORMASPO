@@ -1,4 +1,35 @@
 {
+  "hosting": {
+    "site": "pdf-creator-f7a8b",
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      ".firebaserc",
+      "**/.*",
+      "**/node_modules/**",
+      ".codex-staging/**",
+      "functions/**",
+      "imports/**",
+      "*.xlsx"
+    ],
+    "headers": [
+      {
+        "source": "**/*.@(html|js|css)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, no-store, must-revalidate"
+          }
+        ]
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "/",
+        "destination": "/kreator.html"
+      }
+    ]
+  },
   "functions": [
     {
       "source": "functions",
