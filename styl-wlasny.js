@@ -3208,7 +3208,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     if (window.__stylWlasnyHelper1Loaded || document.getElementById("stylWlasnyHelper1Script")) return;
     const s = document.createElement("script");
     s.id = "stylWlasnyHelper1Script";
-    s.src = "styl-wlasny-1.js";
+    s.src = "styl-wlasny-1.js?v=20260325-style-price-toggle-v01";
     s.async = true;
     s.onload = () => { window.__stylWlasnyHelper1Loaded = true; };
     s.onerror = () => {};
