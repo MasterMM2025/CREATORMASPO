@@ -1,0 +1,5 @@
+exclude:
+  - imports
+  - functions
+  - .codex-staging
+  - "*.xlsx"
