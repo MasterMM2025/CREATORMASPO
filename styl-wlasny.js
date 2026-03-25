@@ -498,6 +498,7 @@
   const CUSTOM_STYLE_LAZY_IMAGE_INITIAL_PAGES = 3;
   const CUSTOM_STYLE_LAZY_IMAGE_VIEWPORT_MARGIN = 420;
   const customPreviewVisibility = {
+    showPrice: true,
     showFlag: false,
     showBarcode: false
   };
@@ -1779,6 +1780,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     modal.querySelector("#customAddFamilyProductBtn")?.classList.add("custom-style-btn--ghost");
     modal.querySelector("#customClearEditorBtn")?.classList.add("custom-style-btn--ghost");
     modal.querySelector("#customStyleClose")?.classList.add("custom-style-btn--icon");
+    modal.querySelector("#customShowPriceToggleMark")?.classList.add("custom-style-toggle-mark");
     modal.querySelector("#customShowFlagToggleMark")?.classList.add("custom-style-toggle-mark");
     modal.querySelector("#customShowBarcodeToggleMark")?.classList.add("custom-style-toggle-mark");
     modal.querySelector("#customPreviewCard")?.classList.add("custom-style-preview-card");
@@ -1918,6 +1920,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const override = customPriceOverrides.get(product.id);
     if (typeof override === "string" && override.trim()) return override.trim();
     return String(product.netto || "").trim();
+  }
+
+  function hasPriceValue(value) {
+    return normalizeEditablePriceValue(value) !== "";
   }
 
   function normalizeProduct(row, idx) {
@@ -2432,6 +2438,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     customPriceTextBold = true;
     customPriceTextUnderline = false;
     customPriceTextAlign = "left";
+    customPreviewVisibility.showPrice = true;
     customPreviewVisibility.showFlag = false;
     customPreviewVisibility.showBarcode = false;
   }
@@ -2535,6 +2542,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const priceUnderlineToggle = document.getElementById("customPriceUnderlineToggle");
     const priceAlignSelect = document.getElementById("customPriceAlignSelect");
     const familySpacingSelect = document.getElementById("customFamilySpacingSelect");
+    const showPriceToggleMark = document.getElementById("customShowPriceToggleMark");
     const showFlagToggleMark = document.getElementById("customShowFlagToggleMark");
     const showBarcodeToggleMark = document.getElementById("customShowBarcodeToggleMark");
 
@@ -2552,6 +2560,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     refreshFontSelectOptions(priceFontSelect, normalizeFontOption(customPriceFontFamily, "Arial"));
     if (priceAlignSelect) priceAlignSelect.value = normalizeAlignOption(customPriceTextAlign, "left");
     if (familySpacingSelect) familySpacingSelect.value = String(normalizeFamilySpacingTightness(customFamilySpacingTightness, 0.12));
+    applyToggleMark(showPriceToggleMark, !!customPreviewVisibility.showPrice);
     applyToggleMark(showFlagToggleMark, !!customPreviewVisibility.showFlag);
     applyToggleMark(showBarcodeToggleMark, !!customPreviewVisibility.showBarcode);
     applyMiniToggleButton(metaBoldToggle, !!customMetaTextBold);
@@ -5039,6 +5048,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const useCustomSinglePalette = useSingleLikeDirectLayout && isCustomSingleStyle(selectedLayoutStyleId);
     const exactCustomSinglePriceLayout = useCustomSinglePalette && String(singleSpec.text.priceTextOffsetMode || "").trim().toLowerCase() === "absolute";
     const isStyle2FamilyTwoFinal = !isSingleDirectLayout && selectedLayoutStyleId === "styl-numer-2" && imageUrls.length === 2;
+    const directPriceSource = Object.prototype.hasOwnProperty.call(catalogEntry || {}, "CENA")
+      ? catalogEntry.CENA
+      : "";
+    const hidePriceDirectByData = catalogEntry?.HIDE_PRICE === true || !hasPriceValue(directPriceSource);
     const hidePriceBadgeDirect = useCustomSinglePalette && !!singleSpec.text.hidePriceBadge;
     const noPriceCircleDirect = useCustomSinglePalette && (!!singleSpec.text.noPriceCircle || hidePriceBadgeDirect);
     const isRoundedRectPriceDirect = useCustomSinglePalette && !hidePriceBadgeDirect && !noPriceCircleDirect && singleSpec.text.priceShape === "roundedRect";
@@ -5046,7 +5059,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const hideNameDirect = useCustomSinglePalette && !!singleSpec.text.hideName;
     const hideIndexDirect = useCustomSinglePalette && !!singleSpec.text.hideIndex;
     const hidePackageDirect = useCustomSinglePalette && !!singleSpec.text.hidePackage;
-    const hidePriceDirect = useCustomSinglePalette && !!singleSpec.text.hidePrice;
+    const hidePriceDirect = hidePriceDirectByData || (useCustomSinglePalette && !!singleSpec.text.hidePrice);
     const hideBarcodeDirect = useCustomSinglePalette && !!singleSpec.text.hideBarcode;
     const hideFlagDirect = useCustomSinglePalette && !!singleSpec.text.hideFlag;
     const metaScaleMultiplierDirect = useCustomSinglePalette ? Math.max(0.8, Number(singleSpec.text.metaScaleMultiplier || 1)) : 1;
@@ -5425,7 +5438,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       }
     }
 
-    const priceParts = formatPrice(catalogEntry?.CENA || "0.00");
+    const priceParts = formatPrice(directPriceSource);
     const priceCurrencySymbol = getEffectiveCurrencySymbol(catalogEntry, priceParts.currency);
     const priceUnitSuffix = isWeightProduct(catalogEntry) ? "KG" : "SZT.";
     const priceScale = Number.isFinite(Number(catalogEntry?.PRICE_TEXT_SCALE))
@@ -5796,10 +5809,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
               </div>
             </div>
 
-              <div id="customStyleInfo" class="custom-style-status custom-style-info" style="margin-top:12px;padding:8px 10px;border:1px dashed #cbd5e1;border-radius:10px;background:#fff;font-size:10px;color:#334155;min-height:70px;">
+            <div id="customStyleInfo" class="custom-style-status custom-style-info" style="margin-top:12px;padding:8px 10px;border:1px dashed #cbd5e1;border-radius:10px;background:#fff;font-size:10px;color:#334155;min-height:70px;">
               Ładowanie produktów...
             </div>
               <div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <button id="customShowPriceToggle" type="button" style="display:inline-flex;align-items:center;gap:8px;border:1px solid #d7dfec;background:#fff;color:#0f172a;border-radius:8px;padding:6px 9px;font-size:10px;cursor:pointer;">
+                  <span id="customShowPriceToggleMark" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;font-size:12px;font-weight:700;line-height:1;color:#0f172a;">✓</span>
+                  Cena
+                </button>
                 <button id="customShowFlagToggle" type="button" style="display:inline-flex;align-items:center;gap:8px;border:1px solid #d7dfec;background:#fff;color:#0f172a;border-radius:8px;padding:6px 9px;font-size:10px;cursor:pointer;">
                   <span id="customShowFlagToggleMark" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;font-size:12px;font-weight:700;line-height:1;color:#0f172a;">✓</span>
                   Flaga
@@ -7069,10 +7086,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const singleSpec = getSingleDirectLayoutSpec(selectedLayoutStyleId, hasImageBadgePreview);
     const elegantPreviewPriceScale = getElegantPricePreviewScale(selectedLayoutStyleId);
     const isSingleDirectPreview = !!DIRECT_CUSTOM_MODULE_MODE && (!hasFamilyPreview || !!singleSpec.familyDirect?.useSingleLayout);
+    const previewPriceSource = Object.prototype.hasOwnProperty.call(previewCatalogEntry, "CENA")
+      ? previewCatalogEntry.CENA
+      : getDisplayPrice(previewProduct);
+    const hidePriceFromData = previewCatalogEntry?.HIDE_PRICE === true || !hasPriceValue(previewPriceSource);
     const hideNamePreview = isSingleDirectPreview && !!singleSpec.text.hideName;
     const hideIndexPreview = isSingleDirectPreview && !!singleSpec.text.hideIndex;
     const hidePackagePreview = isSingleDirectPreview && !!singleSpec.text.hidePackage;
-    const hidePricePreview = isSingleDirectPreview && !!singleSpec.text.hidePrice;
+    const hidePricePreview = hidePriceFromData || (isSingleDirectPreview && !!singleSpec.text.hidePrice);
     const hideBarcodePreview = isSingleDirectPreview && !!singleSpec.text.hideBarcode;
     const hideFlagPreview = isSingleDirectPreview && !!singleSpec.text.hideFlag;
     applyPreviewLayoutMode(isSingleDirectPreview, selectedLayoutStyleId);
@@ -7095,7 +7116,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       updateFamilyIndexPreviewText();
     }
 
-    const price = formatPrice(previewCatalogEntry?.CENA || getDisplayPrice(previewProduct));
+    const price = formatPrice(previewPriceSource);
     const currencySymbol = getEffectiveCurrencySymbol(previewCatalogEntry, price.currency);
     const metaAlign = normalizeAlignOption(previewCatalogEntry?.TEXT_ALIGN || customMetaTextAlign, "left");
     const useCustomSingleTextPalette = isSingleDirectPreview && isCustomSingleStyle(selectedLayoutStyleId);
@@ -7406,8 +7427,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const name = getDisplayName(base);
     const ean = scientificToPlain(base.ean);
     const countryRaw = String(base?.raw?.["text-left 3"] || "RUMUNIA").trim();
+    const displayPrice = getDisplayPrice(base);
     const includeBarcode = !!customPreviewVisibility.showBarcode;
     const includeFlag = !!customPreviewVisibility.showFlag;
+    const includePrice = !!customPreviewVisibility.showPrice && hasPriceValue(displayPrice);
     const family = useFamilyContext
       ? (Array.isArray(currentFamilyProducts) ? currentFamilyProducts : [])
       : [];
@@ -7449,7 +7472,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       CUSTOM_PACKAGE_VALUE: String(base.packageValue || "").trim(),
       CUSTOM_PACKAGE_UNIT: String(base.packageUnit || "").trim(),
       CUSTOM_PACKAGE_INFO_TEXT: buildPackageInfoText(base),
-      CENA: getDisplayPrice(base) || "0.00",
+      CENA: includePrice ? displayPrice : "",
+      HIDE_PRICE: !includePrice,
       PRICE_BG_COLOR: customPriceCircleColor || "#d71920",
       PRICE_BG_STYLE_ID: selectedPriceBadgeStyle?.id || "solid",
       PRICE_BG_IMAGE_URL: priceBadgeImageUrl || "",
@@ -8920,8 +8944,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const moduleLayoutSelect = document.getElementById("customModuleLayoutSelect");
     const priceLayoutSelect = document.getElementById("customPriceLayoutSelect");
     const applyStyleToImportedBtn = document.getElementById("customApplyStyleToImportedBtn");
+    const showPriceToggle = document.getElementById("customShowPriceToggle");
     const showFlagToggle = document.getElementById("customShowFlagToggle");
     const showBarcodeToggle = document.getElementById("customShowBarcodeToggle");
+    const showPriceToggleMark = document.getElementById("customShowPriceToggleMark");
     const showFlagToggleMark = document.getElementById("customShowFlagToggleMark");
     const showBarcodeToggleMark = document.getElementById("customShowBarcodeToggleMark");
     const priceColorInput = document.getElementById("customPriceColorInput");
@@ -9021,6 +9047,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           customPriceTextUnderline,
           customPriceTextAlign,
           customFamilySpacingTightness,
+          showPrice: !!customPreviewVisibility.showPrice,
           showFlag: !!customPreviewVisibility.showFlag,
           showBarcode: !!customPreviewVisibility.showBarcode
         },
@@ -9037,6 +9064,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     const buildDraftSettingsForImport = (rowMeta) => {
       const forceTnz = !!rowMeta?.tnz;
+      const hasExplicitPrice = !!rowMeta && Object.prototype.hasOwnProperty.call(rowMeta, "price");
+      const showPrice = !!customPreviewVisibility.showPrice && (!hasExplicitPrice || hasPriceValue(rowMeta?.price));
       return {
         customModuleLayoutStyleId: customModuleLayoutStyleId || "default",
         customPriceLayoutStyleId: String(customPriceLayoutStyleId || "").trim(),
@@ -9055,6 +9084,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         customPriceTextUnderline: !!customPriceTextUnderline,
         customPriceTextAlign: normalizeAlignOption(customPriceTextAlign, "left"),
         customFamilySpacingTightness: normalizeFamilySpacingTightness(customFamilySpacingTightness, 0.12),
+        showPrice,
         showFlag: !!customPreviewVisibility.showFlag,
         showBarcode: !!customPreviewVisibility.showBarcode
       };
@@ -9582,7 +9612,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       const nextPackageValue = firstNonEmptyText(base?.packageValue, row?.packageValue, excelProduct?.packageValue);
       const nextPackageUnit = firstNonEmptyText(base?.packageUnit, row?.packageUnit, excelProduct?.packageUnit);
       const nextEan = firstNonEmptyText(base?.ean, row?.ean, excelProduct?.ean);
-      const nextNetto = firstNonEmptyText(row?.price, base?.netto, excelProduct?.netto, "0.00");
+      const nextNetto = readExcelCellAsText(row?.price);
       const nextBrand = firstNonEmptyText(base?.brand, row?.brand, excelProduct?.brand);
       const nextRaw = Object.assign({}, excelProduct?.raw || {}, base?.raw || {}, {
         INDEKS: nextIndex,
@@ -9604,7 +9634,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         packageValue: nextPackageValue,
         packageUnit: nextPackageUnit,
         ean: nextEan,
-        netto: nextNetto || String(base?.netto || excelProduct?.netto || "0.00"),
+        netto: nextNetto,
         brand: nextBrand,
         indexNorm: normalizeText(nextIndex),
         nameNorm: normalizeText(nextName),
@@ -9613,6 +9643,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         IMPORTED_GROUP_KEY: String(row?.groupKey || "").trim(),
         IMPORTED_ASSIGNED_PAGE: Number.isFinite(row?.assignedPageNumber) ? row.assignedPageNumber : null,
         IMPORTED_SOURCE: base ? "database" : "excel-fallback",
+        IMPORTED_PRICE_AVAILABLE: hasPriceValue(nextNetto),
         IMPORTED_MISSING_IN_DB: !base
       });
     };
@@ -9875,7 +9906,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
               familyBaseImageUrl: firstUrl,
               familyProducts,
               nameOverrides: {},
-              settings: buildDraftSettingsForImport({ tnz: hasTnz }),
+              settings: buildDraftSettingsForImport({ tnz: hasTnz, price: baseEntry?.row?.price }),
               importMeta: {
                 source: "excel",
                 isNativeGroup: true,
@@ -9945,6 +9976,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
 
     const applyAllControlValuesFromState = () => {
       const priceLayoutSelect = document.getElementById("customPriceLayoutSelect");
+      const showPriceToggleMark = document.getElementById("customShowPriceToggleMark");
+      if (showPriceToggleMark) applyToggleMark(showPriceToggleMark, !!customPreviewVisibility.showPrice);
       if (showFlagToggleMark) applyToggleMark(showFlagToggleMark, !!customPreviewVisibility.showFlag);
       if (showBarcodeToggleMark) applyToggleMark(showBarcodeToggleMark, !!customPreviewVisibility.showBarcode);
       if (priceColorInput) priceColorInput.value = customPriceCircleColor || "#d71920";
@@ -10005,6 +10038,10 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         const priceAlign = escapeHtml(String(draft.settings?.customPriceTextAlign || "left"));
         const curr = escapeHtml(String(draft.settings?.customCurrencySymbol || "£"));
         const styleName = escapeHtml((PRICE_BADGE_STYLE_OPTIONS.find((o) => o.id === draft.settings?.customPriceBadgeStyleId)?.label) || "Kolor koła");
+        const priceStateLabel = draft.settings?.showPrice === false ? "ukryta" : styleName;
+        const priceTypographyLabel = draft.settings?.showPrice === false
+          ? "Cena: ukryta"
+          : `Cena: ${priceFont}, ${priceAlign}${draft.settings?.customPriceTextBold ? ", B" : ""}${draft.settings?.customPriceTextUnderline ? ", U" : ""}`;
         const isGroupedImport = !!(draft?.importMeta?.source === "excel" && draft?.importMeta?.isNativeGroup);
         const isSingleImport = !!(draft?.importMeta?.source === "excel" && !draft?.importMeta?.isNativeGroup);
         const isTnzImport = !!(draft?.importMeta?.tnz || String(draft?.settings?.customPriceBadgeStyleId || "").includes("tnz"));
@@ -10024,9 +10061,9 @@ const CUSTOM_PRODUCT_LAYOUTS = {
               <div class="custom-style-heading" style="font-size:10px;font-weight:700;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">[${index}] ${title}</div>
               ${groupLabel ? `<div style="font-size:9px;font-weight:700;color:#f9a8d4;margin-top:2px;">${groupLabel}</div>` : ``}
               ${pageLabel}
-              <div style="font-size:9px;color:#cbd5e1;margin-top:2px;">Rodzina: ${familyCount} • Waluta: ${curr} • Cena: ${styleName}</div>
+              <div style="font-size:9px;color:#cbd5e1;margin-top:2px;">Rodzina: ${familyCount} • Waluta: ${curr} • Cena: ${priceStateLabel}</div>
               <div class="custom-style-muted" style="font-size:9px;color:#64748b;margin-top:2px;">Teksty: ${metaFont}, ${metaAlign}${draft.settings?.customMetaTextBold ? ", B" : ""}${draft.settings?.customMetaTextUnderline ? ", U" : ""}</div>
-              <div class="custom-style-muted" style="font-size:9px;color:#64748b;">Cena: ${priceFont}, ${priceAlign}${draft.settings?.customPriceTextBold ? ", B" : ""}${draft.settings?.customPriceTextUnderline ? ", U" : ""}</div>
+              <div class="custom-style-muted" style="font-size:9px;color:#64748b;">${priceTypographyLabel}</div>
             </div>
             <div style="display:flex;flex-direction:column;gap:6px;">
               <button data-action="edit" type="button" style="border:1px solid rgba(34,211,238,.32);background:rgba(8,145,178,.16);color:#67e8f9;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;">Edytuj</button>
@@ -10070,6 +10107,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       customPriceTextUnderline = !!s.customPriceTextUnderline;
       customPriceTextAlign = normalizeAlignOption(s.customPriceTextAlign || customPriceTextAlign, "left");
       customFamilySpacingTightness = normalizeFamilySpacingTightness(s.customFamilySpacingTightness, customFamilySpacingTightness);
+      customPreviewVisibility.showPrice = s.showPrice !== false;
       customPreviewVisibility.showFlag = !!s.showFlag;
       customPreviewVisibility.showBarcode = !!s.showBarcode;
       customNameOverrides.clear();
@@ -10595,6 +10633,14 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       showBarcodeToggle.onclick = () => {
         customPreviewVisibility.showBarcode = !customPreviewVisibility.showBarcode;
         applyToggleMark(showBarcodeToggleMark, !!customPreviewVisibility.showBarcode);
+        renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
+      };
+    }
+    if (showPriceToggle) {
+      applyToggleMark(showPriceToggleMark, !!customPreviewVisibility.showPrice);
+      showPriceToggle.onclick = () => {
+        customPreviewVisibility.showPrice = !customPreviewVisibility.showPrice;
+        applyToggleMark(showPriceToggleMark, !!customPreviewVisibility.showPrice);
         renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
       };
     }
