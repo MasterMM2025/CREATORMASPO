@@ -1,6 +1,20 @@
 (function () {
   "use strict";
 
+  const REMOVE_BG_PROVIDER_STORAGE_KEY = "removeBg.provider";
+  const PREMIUM_REMOVE_BG_COOLDOWN_MS = 3 * 60 * 1000;
+  const LOCAL_REMOVE_BG_COOLDOWN_MS = 45 * 1000;
+  const premiumRemoveBgRuntime = {
+    disabledUntil: 0,
+    lastReason: ""
+  };
+  const localAiRemoveBgRuntime = {
+    disabledUntil: 0,
+    lastReason: "",
+    healthCheckedAt: 0,
+    healthyUntil: 0
+  };
+
   function loadImageFromSrc(src) {
     return new Promise((resolve, reject) => {
       const tryLoad = (mode) => {
@@ -49,7 +63,6 @@
     const s = String(src || "").trim();
     if (!s) throw new Error("Brak zrodla obrazu.");
     if (s.startsWith("data:")) return s;
-    if (s.startsWith("blob:")) return s;
 
     try {
       const ctrl = new AbortController();
@@ -102,6 +115,60 @@
     const data = imageData.data;
     const mask = new Uint8Array(w * h);
     const visited = new Uint8Array(w * h);
+
+    function collectRegionStats(x0, y0, x1, y1) {
+      const minX = Math.max(0, Math.min(w, Math.floor(x0)));
+      const minY = Math.max(0, Math.min(h, Math.floor(y0)));
+      const maxX = Math.max(minX, Math.min(w, Math.ceil(x1)));
+      const maxY = Math.max(minY, Math.min(h, Math.ceil(y1)));
+      let count = 0;
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      let sumLuma = 0;
+      let sumSat = 0;
+
+      for (let y = minY; y < maxY; y++) {
+        for (let x = minX; x < maxX; x++) {
+          const idx = (y * w + x) * 4;
+          const a = data[idx + 3];
+          if (a < 8) continue;
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+          const max = Math.max(r, g, b);
+          const min = Math.min(r, g, b);
+          const sat = max === 0 ? 0 : ((max - min) / max) * 100;
+          const luma = r * 0.299 + g * 0.587 + b * 0.114;
+          sumR += r;
+          sumG += g;
+          sumB += b;
+          sumLuma += luma;
+          sumSat += sat;
+          count++;
+        }
+      }
+
+      if (!count) {
+        return {
+          count: 0,
+          meanR: 0,
+          meanG: 0,
+          meanB: 0,
+          meanLuma: 0,
+          meanSat: 0
+        };
+      }
+
+      return {
+        count,
+        meanR: sumR / count,
+        meanG: sumG / count,
+        meanB: sumB / count,
+        meanLuma: sumLuma / count,
+        meanSat: sumSat / count
+      };
+    }
 
     function estimateBorderBackgroundStats() {
       const band = Math.max(1, Math.min(6, Math.round(Math.min(w, h) * 0.012)));
@@ -169,6 +236,18 @@
     }
 
     const borderStats = estimateBorderBackgroundStats();
+    const centerStats = collectRegionStats(w * 0.22, h * 0.18, w * 0.78, h * 0.88);
+    const riskyLowContrastSubject = !!(
+      borderStats &&
+      centerStats.count >= 20 &&
+      centerStats.meanLuma >= Math.max(155, THRESHOLD_LUMA - 35) &&
+      centerStats.meanSat <= Math.min(24, MAX_SAT_FOR_BG + 6) &&
+      Math.hypot(
+        centerStats.meanR - borderStats.meanR,
+        centerStats.meanG - borderStats.meanG,
+        centerStats.meanB - borderStats.meanB
+      ) <= Math.max(26, borderStats.distThreshold * 0.78)
+    );
 
     function isBackground(r, g, b) {
       const luma = r * 0.299 + g * 0.587 + b * 0.114;
@@ -302,8 +381,747 @@
       if (data[i] < FINAL_ALPHA_CUTOFF) data[i] = 0;
     }
 
+    function evaluateForegroundPreservation() {
+      const centerX0 = Math.max(0, Math.floor(w * 0.2));
+      const centerY0 = Math.max(0, Math.floor(h * 0.18));
+      const centerX1 = Math.min(w, Math.ceil(w * 0.8));
+      const centerY1 = Math.min(h, Math.ceil(h * 0.88));
+      const centerArea = Math.max(1, (centerX1 - centerX0) * (centerY1 - centerY0));
+      const opaqueAlphaCutoff = Math.max(40, FINAL_ALPHA_CUTOFF + 10);
+      let opaqueCount = 0;
+      let alphaSum = 0;
+      let centerOpaqueCount = 0;
+      let centerAlphaSum = 0;
+      let minX = w;
+      let minY = h;
+      let maxX = -1;
+      let maxY = -1;
+
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const alpha = data[(y * w + x) * 4 + 3];
+          alphaSum += alpha;
+          const inCenter = x >= centerX0 && x < centerX1 && y >= centerY0 && y < centerY1;
+          if (inCenter) centerAlphaSum += alpha;
+          if (alpha < opaqueAlphaCutoff) continue;
+          opaqueCount++;
+          if (inCenter) centerOpaqueCount++;
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+
+      const bboxAreaRatio = maxX >= minX && maxY >= minY
+        ? (((maxX - minX + 1) * (maxY - minY + 1)) / (w * h))
+        : 0;
+
+      return {
+        opaqueRatio: opaqueCount / (w * h),
+        alphaRatio: alphaSum / (w * h * 255),
+        centerOpaqueRatio: centerOpaqueCount / centerArea,
+        centerAlphaRatio: centerAlphaSum / (centerArea * 255),
+        bboxAreaRatio
+      };
+    }
+
+    const preservation = evaluateForegroundPreservation();
+    const unsafeLowContrastRemoval = riskyLowContrastSubject && (
+      preservation.bboxAreaRatio < 0.24 ||
+      preservation.centerAlphaRatio < 0.24 ||
+      (preservation.alphaRatio < 0.22 && preservation.centerOpaqueRatio < 0.16)
+    );
+    if (unsafeLowContrastRemoval && !options.allowUnsafeLowContrastRemoval) {
+      throw new Error("LOCAL_UNSAFE_FOR_LOW_CONTRAST_SUBJECT");
+    }
+
     cctx.putImageData(imageData, 0, 0);
     return c.toDataURL("image/png");
+  }
+
+  async function evaluateResultAlphaPreservation(imgData) {
+    const srcRaw = String(imgData || "").trim();
+    if (!srcRaw) {
+      return {
+        opaqueRatio: 0,
+        alphaRatio: 0,
+        centerOpaqueRatio: 0,
+        centerAlphaRatio: 0,
+        bboxAreaRatio: 0
+      };
+    }
+
+    const src = await normalizeSourceForPixelRead(srcRaw);
+    const imageEl = await loadImageFromSrc(src);
+    const w = Math.max(1, Number(imageEl.naturalWidth || imageEl.width || 1));
+    const h = Math.max(1, Number(imageEl.naturalHeight || imageEl.height || 1));
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const cctx = c.getContext("2d", { willReadFrequently: true });
+    if (!cctx) {
+      return {
+        opaqueRatio: 0,
+        alphaRatio: 0,
+        centerOpaqueRatio: 0,
+        centerAlphaRatio: 0,
+        bboxAreaRatio: 0
+      };
+    }
+
+    cctx.drawImage(imageEl, 0, 0, w, h);
+    const imageData = cctx.getImageData(0, 0, w, h);
+    const data = imageData.data;
+    const centerX0 = Math.max(0, Math.floor(w * 0.2));
+    const centerY0 = Math.max(0, Math.floor(h * 0.18));
+    const centerX1 = Math.min(w, Math.ceil(w * 0.8));
+    const centerY1 = Math.min(h, Math.ceil(h * 0.88));
+    const centerArea = Math.max(1, (centerX1 - centerX0) * (centerY1 - centerY0));
+    const opaqueAlphaCutoff = 40;
+    let opaqueCount = 0;
+    let alphaSum = 0;
+    let centerOpaqueCount = 0;
+    let centerAlphaSum = 0;
+    let minX = w;
+    let minY = h;
+    let maxX = -1;
+    let maxY = -1;
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const alpha = data[(y * w + x) * 4 + 3];
+        alphaSum += alpha;
+        const inCenter = x >= centerX0 && x < centerX1 && y >= centerY0 && y < centerY1;
+        if (inCenter) centerAlphaSum += alpha;
+        if (alpha < opaqueAlphaCutoff) continue;
+        opaqueCount++;
+        if (inCenter) centerOpaqueCount++;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+
+    return {
+      opaqueRatio: opaqueCount / (w * h),
+      alphaRatio: alphaSum / (w * h * 255),
+      centerOpaqueRatio: centerOpaqueCount / centerArea,
+      centerAlphaRatio: centerAlphaSum / (centerArea * 255),
+      bboxAreaRatio: maxX >= minX && maxY >= minY
+        ? (((maxX - minX + 1) * (maxY - minY + 1)) / (w * h))
+        : 0
+    };
+  }
+
+  function shouldRejectLocalAiResult(preservation) {
+    if (!preservation || typeof preservation !== "object") return true;
+    return !!(
+      preservation.bboxAreaRatio < 0.16 ||
+      preservation.centerAlphaRatio < 0.22 ||
+      (preservation.alphaRatio < 0.16 && preservation.centerOpaqueRatio < 0.18)
+    );
+  }
+
+  async function cleanupPrimarySubjectAlpha(imgData) {
+    const srcRaw = String(imgData || "").trim();
+    if (!srcRaw) return srcRaw;
+
+    const src = await normalizeSourceForPixelRead(srcRaw);
+    const imageEl = await loadImageFromSrc(src);
+    const w = Math.max(1, Number(imageEl.naturalWidth || imageEl.width || 1));
+    const h = Math.max(1, Number(imageEl.naturalHeight || imageEl.height || 1));
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const cctx = c.getContext("2d", { willReadFrequently: true });
+    if (!cctx) return srcRaw;
+
+    cctx.drawImage(imageEl, 0, 0, w, h);
+    const imageData = cctx.getImageData(0, 0, w, h);
+    const data = imageData.data;
+    const alphaHist = new Uint32Array(256);
+    for (let i = 0; i < w * h; i++) {
+      alphaHist[data[i * 4 + 3]]++;
+    }
+
+    let nonZeroAlphaCount = 0;
+    for (let value = 8; value < 256; value++) nonZeroAlphaCount += alphaHist[value];
+
+    function percentileAlpha(pct) {
+      const target = Math.max(1, Math.floor(nonZeroAlphaCount * Math.max(0, Math.min(1, pct))));
+      let acc = 0;
+      for (let value = 8; value < 256; value++) {
+        acc += alphaHist[value];
+        if (acc >= target) return value;
+      }
+      return 255;
+    }
+
+    if (nonZeroAlphaCount < Math.max(120, (w * h) * 0.01)) return srcRaw;
+
+    const strongCutoff = Math.max(60, Math.min(168, percentileAlpha(0.84)));
+    const looseCutoff = Math.max(22, Math.min(72, strongCutoff - 34));
+    const strong = new Uint8Array(w * h);
+    const loose = new Uint8Array(w * h);
+    const strongVisited = new Uint8Array(w * h);
+    const looseVisited = new Uint8Array(w * h);
+
+    for (let i = 0; i < w * h; i++) {
+      const alpha = data[i * 4 + 3];
+      if (alpha >= looseCutoff) loose[i] = 1;
+      if (alpha >= strongCutoff) strong[i] = 1;
+    }
+
+    const centerX = w * 0.5;
+    const centerY = h * 0.52;
+    let bestScore = -Infinity;
+    let bestCorePixels = null;
+    let bestBounds = null;
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const startIdx = y * w + x;
+        if (!strong[startIdx] || strongVisited[startIdx]) continue;
+
+        const stack = [startIdx];
+        const pixels = [];
+        strongVisited[startIdx] = 1;
+        let minX = x;
+        let minY = y;
+        let maxX = x;
+        let maxY = y;
+        let sumX = 0;
+        let sumY = 0;
+
+        while (stack.length) {
+          const idx = stack.pop();
+          const px = idx % w;
+          const py = (idx / w) | 0;
+          pixels.push(idx);
+          sumX += px;
+          sumY += py;
+          if (px < minX) minX = px;
+          if (py < minY) minY = py;
+          if (px > maxX) maxX = px;
+          if (py > maxY) maxY = py;
+
+          const neighbors = [
+            idx - 1,
+            idx + 1,
+            idx - w,
+            idx + w
+          ];
+          for (let n = 0; n < neighbors.length; n++) {
+            const nextIdx = neighbors[n];
+            if (nextIdx < 0 || nextIdx >= w * h) continue;
+            const nx = nextIdx % w;
+            const ny = (nextIdx / w) | 0;
+            if (Math.abs(nx - px) + Math.abs(ny - py) !== 1) continue;
+            if (!strong[nextIdx] || strongVisited[nextIdx]) continue;
+            strongVisited[nextIdx] = 1;
+            stack.push(nextIdx);
+          }
+        }
+
+        const area = pixels.length;
+        if (area < Math.max(180, (w * h) * 0.0025)) continue;
+        const cx = sumX / area;
+        const cy = sumY / area;
+        const centerDistance = Math.abs(cx - centerX) + Math.abs(cy - centerY);
+        const touchesBorder = minX <= 0 || minY <= 0 || maxX >= (w - 1) || maxY >= (h - 1);
+        const score = area - (centerDistance * 3.8) - (touchesBorder ? area * 0.14 : 0);
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestCorePixels = pixels;
+          bestBounds = { minX, minY, maxX, maxY };
+        }
+      }
+    }
+
+    if (!bestCorePixels || !bestBounds) return srcRaw;
+
+    const keep = new Uint8Array(w * h);
+    const coreSet = new Uint8Array(w * h);
+    for (let i = 0; i < bestCorePixels.length; i++) {
+      const idx = bestCorePixels[i];
+      keep[idx] = 1;
+      coreSet[idx] = 1;
+    }
+
+    const coreArea = bestCorePixels.length;
+    const expandedMinX = Math.max(0, bestBounds.minX - Math.max(12, Math.round((bestBounds.maxX - bestBounds.minX + 1) * 0.18)));
+    const expandedMinY = Math.max(0, bestBounds.minY - Math.max(12, Math.round((bestBounds.maxY - bestBounds.minY + 1) * 0.12)));
+    const expandedMaxX = Math.min(w - 1, bestBounds.maxX + Math.max(12, Math.round((bestBounds.maxX - bestBounds.minX + 1) * 0.18)));
+    const expandedMaxY = Math.min(h - 1, bestBounds.maxY + Math.max(12, Math.round((bestBounds.maxY - bestBounds.minY + 1) * 0.12)));
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const startIdx = y * w + x;
+        if (!loose[startIdx] || looseVisited[startIdx]) continue;
+
+        const stack = [startIdx];
+        const pixels = [];
+        looseVisited[startIdx] = 1;
+        let minX = x;
+        let minY = y;
+        let maxX = x;
+        let maxY = y;
+        let touchesCore = !!coreSet[startIdx];
+
+        while (stack.length) {
+          const idx = stack.pop();
+          const px = idx % w;
+          const py = (idx / w) | 0;
+          pixels.push(idx);
+          if (px < minX) minX = px;
+          if (py < minY) minY = py;
+          if (px > maxX) maxX = px;
+          if (py > maxY) maxY = py;
+          if (coreSet[idx]) touchesCore = true;
+
+          const neighbors = [
+            idx - 1,
+            idx + 1,
+            idx - w,
+            idx + w
+          ];
+          for (let n = 0; n < neighbors.length; n++) {
+            const nextIdx = neighbors[n];
+            if (nextIdx < 0 || nextIdx >= w * h) continue;
+            const nx = nextIdx % w;
+            const ny = (nextIdx / w) | 0;
+            if (Math.abs(nx - px) + Math.abs(ny - py) !== 1) continue;
+            if (!loose[nextIdx] || looseVisited[nextIdx]) continue;
+            looseVisited[nextIdx] = 1;
+            stack.push(nextIdx);
+          }
+        }
+
+        const area = pixels.length;
+        const overlapsExpandedMain = !(
+          maxX < expandedMinX ||
+          minX > expandedMaxX ||
+          maxY < expandedMinY ||
+          minY > expandedMaxY
+        );
+        const largeEnough = area >= Math.max(180, Math.round(coreArea * 0.08));
+        const shouldKeep = touchesCore || (largeEnough && overlapsExpandedMain);
+        if (!shouldKeep) continue;
+        for (let i = 0; i < pixels.length; i++) {
+          keep[pixels[i]] = 1;
+        }
+      }
+    }
+
+    for (let i = 0; i < w * h; i++) {
+      if (keep[i]) continue;
+      data[i * 4 + 3] = 0;
+    }
+
+    cctx.putImageData(imageData, 0, 0);
+    return c.toDataURL("image/png");
+  }
+
+  async function dehaloCutoutImage(imgData, options = {}) {
+    const srcRaw = String(imgData || "").trim();
+    if (!srcRaw) return srcRaw;
+
+    const src = await normalizeSourceForPixelRead(srcRaw);
+    const imageEl = await loadImageFromSrc(src);
+    const w = Math.max(1, Number(imageEl.naturalWidth || imageEl.width || 1));
+    const h = Math.max(1, Number(imageEl.naturalHeight || imageEl.height || 1));
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const cctx = c.getContext("2d", { willReadFrequently: true });
+    if (!cctx) return srcRaw;
+
+    cctx.drawImage(imageEl, 0, 0, w, h);
+    const imageData = cctx.getImageData(0, 0, w, h);
+    const data = imageData.data;
+    const passes = Number.isFinite(options.dehaloPasses) ? Math.max(1, Math.min(4, Number(options.dehaloPasses))) : 3;
+
+    for (let pass = 0; pass < passes; pass++) {
+      const source = new Uint8ClampedArray(data);
+      let changed = false;
+
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const idx = (y * w + x) * 4;
+          const alpha = source[idx + 3];
+          if (alpha >= 250) continue;
+
+          let weightSum = 0;
+          let sumR = 0;
+          let sumG = 0;
+          let sumB = 0;
+
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const nIdx = ((y + dy) * w + (x + dx)) * 4;
+              const nAlpha = source[nIdx + 3];
+              if (nAlpha < Math.max(40, alpha + 12)) continue;
+              const weight = Math.pow(nAlpha / 255, 1.5);
+              weightSum += weight;
+              sumR += source[nIdx] * weight;
+              sumG += source[nIdx + 1] * weight;
+              sumB += source[nIdx + 2] * weight;
+            }
+          }
+
+          if (weightSum <= 0) continue;
+          const avgR = sumR / weightSum;
+          const avgG = sumG / weightSum;
+          const avgB = sumB / weightSum;
+          const blend = alpha <= 8
+            ? 1
+            : alpha <= 96
+              ? 1
+              : alpha <= 180
+                ? 0.92
+                : alpha <= 235
+                  ? 0.78
+                  : 0.55;
+
+          data[idx] = Math.round((source[idx] * (1 - blend)) + (avgR * blend));
+          data[idx + 1] = Math.round((source[idx + 1] * (1 - blend)) + (avgG * blend));
+          data[idx + 2] = Math.round((source[idx + 2] * (1 - blend)) + (avgB * blend));
+          changed = true;
+        }
+      }
+
+      if (!changed) break;
+    }
+
+    cctx.putImageData(imageData, 0, 0);
+    return c.toDataURL("image/png");
+  }
+
+  function isDataUrl(value) {
+    return String(value || "").trim().startsWith("data:");
+  }
+
+  function isHttpUrl(value) {
+    return /^https?:\/\//i.test(String(value || "").trim());
+  }
+
+  function normalizeProviderName(value) {
+    const raw = String(value || "").trim().toLowerCase();
+    if (!raw) return "";
+    if (raw === "remove.bg") return "removebg";
+    if (raw === "removebg") return "removebg";
+    if (raw === "photoroom") return "photoroom";
+    if (raw === "auto") return "auto";
+    return "";
+  }
+
+  function getStoredRemoveBgProvider() {
+    try {
+      return normalizeProviderName(window.localStorage && window.localStorage.getItem(REMOVE_BG_PROVIDER_STORAGE_KEY));
+    } catch (_err) {
+      return "";
+    }
+  }
+
+  function getPreferredRemoveBgProvider(options = {}) {
+    return (
+      normalizeProviderName(options.provider) ||
+      normalizeProviderName(window.REMOVE_BG_PROVIDER) ||
+      getStoredRemoveBgProvider() ||
+      "auto"
+    );
+  }
+
+  function hasPremiumRemoveBgConfigured() {
+    try {
+      if (normalizeProviderName(window.REMOVE_BG_PROVIDER)) return true;
+      if (getStoredRemoveBgProvider()) return true;
+      if (String(window.REMOVE_BG_BACKEND_URL || "").trim()) return true;
+    } catch (_err) {}
+    return false;
+  }
+
+  function isLikelyLocalDevHost(hostname) {
+    const host = String(hostname || "").trim().toLowerCase();
+    return (
+      host === "127.0.0.1" ||
+      host === "localhost" ||
+      host === "::1" ||
+      host.endsWith(".local")
+    );
+  }
+
+  function getLocalRemoveBgBaseUrl(options = {}) {
+    const explicit = String(
+      options.localAiBaseUrl ||
+      window.REMOVE_BG_LOCAL_BASE_URL ||
+      ""
+    ).trim();
+    if (explicit) return explicit.replace(/\/+$/, "");
+    try {
+      const origin = String(window.location && window.location.origin || "").trim();
+      const hostname = String(window.location && window.location.hostname || "").trim();
+      if (origin && !isLikelyLocalDevHost(hostname)) {
+        return origin.replace(/\/+$/, "");
+      }
+    } catch (_err) {}
+    return "http://127.0.0.1:5103";
+  }
+
+  function getLocalRemoveBgApiUrl(options = {}) {
+    const explicit = String(options.localAiUrl || window.REMOVE_BG_LOCAL_URL || "").trim();
+    if (explicit) return explicit;
+    return `${getLocalRemoveBgBaseUrl(options)}/api/remove-background`;
+  }
+
+  function getLocalRemoveBgHealthUrl(options = {}) {
+    const explicit = String(options.localAiHealthUrl || window.REMOVE_BG_LOCAL_HEALTH_URL || "").trim();
+    if (explicit) return explicit;
+    return `${getLocalRemoveBgBaseUrl(options)}/api/health`;
+  }
+
+  function getRemoveBgBackendUrl(options = {}) {
+    const raw = String(
+      options.backendUrl ||
+      window.REMOVE_BG_BACKEND_URL ||
+      "/api/remove-background"
+    ).trim();
+    return raw;
+  }
+
+  function shouldTryPremiumRemoveBg(options = {}) {
+    if (options.usePremium === false) return false;
+    if (options.usePremium !== true && !hasPremiumRemoveBgConfigured()) return false;
+    return Date.now() >= premiumRemoveBgRuntime.disabledUntil;
+  }
+
+  function shouldTryLocalAiRemoveBg(options = {}) {
+    if (options.useLocalAi === false) return false;
+    return true;
+  }
+
+  function disablePremiumRemoveBgTemporarily(reason) {
+    premiumRemoveBgRuntime.disabledUntil = Date.now() + PREMIUM_REMOVE_BG_COOLDOWN_MS;
+    premiumRemoveBgRuntime.lastReason = String(reason || "premium remove bg unavailable");
+  }
+
+  function disableLocalAiRemoveBgTemporarily(reason) {
+    localAiRemoveBgRuntime.disabledUntil = Date.now() + LOCAL_REMOVE_BG_COOLDOWN_MS;
+    localAiRemoveBgRuntime.lastReason = String(reason || "local ai remove bg unavailable");
+    localAiRemoveBgRuntime.healthyUntil = 0;
+    localAiRemoveBgRuntime.healthCheckedAt = Date.now();
+  }
+
+  function shouldCooldownLocalAiError(err) {
+    const status = Number(err && err.status);
+    if ([0, 502, 503, 504].includes(status)) return true;
+    const msg = String(err && err.message ? err.message : err || "").toLowerCase();
+    return (
+      msg.includes("local_ai_server_unavailable") ||
+      msg.includes("failed to fetch") ||
+      msg.includes("networkerror") ||
+      msg.includes("load failed") ||
+      msg.includes("aborted")
+    );
+  }
+
+  async function ensureLocalAiServerHealthy(options = {}) {
+    const now = Date.now();
+    if (localAiRemoveBgRuntime.healthyUntil > now) return true;
+    if (localAiRemoveBgRuntime.healthCheckedAt && (now - localAiRemoveBgRuntime.healthCheckedAt) < 2500) {
+      return false;
+    }
+
+    localAiRemoveBgRuntime.healthCheckedAt = now;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1400);
+
+    try {
+      const response = await fetch(getLocalRemoveBgHealthUrl(options), {
+        method: "GET",
+        mode: "cors",
+        cache: "no-store",
+        signal: ctrl.signal
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      localAiRemoveBgRuntime.healthyUntil = Date.now() + 15000;
+      localAiRemoveBgRuntime.disabledUntil = 0;
+      return true;
+    } catch (err) {
+      disableLocalAiRemoveBgTemporarily(err && err.message ? err.message : err);
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function shouldCooldownPremiumError(err) {
+    const status = Number(err && err.status);
+    if ([404, 405, 501, 503].includes(status)) return true;
+    const msg = String(err && err.message ? err.message : err || "").toLowerCase();
+    return (
+      msg.includes("failed to fetch") ||
+      msg.includes("networkerror") ||
+      msg.includes("aborted") ||
+      msg.includes("brak skonfigurowanego providera")
+    );
+  }
+
+  function shouldStopPremiumRetries(err) {
+    const status = Number(err && err.status);
+    if ([400, 401, 403, 404, 405, 413, 422, 429, 500, 501, 502, 503].includes(status)) return true;
+    const msg = String(err && err.message ? err.message : err || "").toLowerCase();
+    return msg.includes("provider") || msg.includes("fetch") || msg.includes("nie udalo sie");
+  }
+
+  function getFileNameFromSource(src) {
+    const raw = String(src || "").trim();
+    if (!raw) return "upload.png";
+    if (isDataUrl(raw)) return "upload.png";
+    try {
+      const parsed = new URL(raw, window.location.href);
+      const tail = String(parsed.pathname || "").split("/").pop() || "upload.png";
+      const safe = tail.replace(/[^a-zA-Z0-9._-]+/g, "-");
+      if (!safe) return "upload.png";
+      return /\.[a-z0-9]{2,8}$/i.test(safe) ? safe : `${safe}.png`;
+    } catch (_err) {
+      return "upload.png";
+    }
+  }
+
+  async function sourceToPremiumPayload(src) {
+    const normalized = await normalizeSourceForPixelRead(src);
+    if (isDataUrl(normalized)) {
+      return {
+        imageDataUrl: normalized,
+        filename: getFileNameFromSource(src)
+      };
+    }
+    if (isHttpUrl(normalized)) {
+      return {
+        imageUrl: normalized,
+        filename: getFileNameFromSource(normalized)
+      };
+    }
+    throw new Error("Nie udalo sie przygotowac obrazu do premium remove background.");
+  }
+
+  async function readPremiumError(response) {
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    try {
+      if (contentType.includes("application/json")) {
+        const payload = await response.json();
+        return String(payload && (payload.error || payload.message) || "").trim();
+      }
+      return String(await response.text() || "").trim().slice(0, 240);
+    } catch (_err) {
+      return "";
+    }
+  }
+
+  async function removeBackgroundViaPremiumProxy(src, options = {}) {
+    const backendUrl = getRemoveBgBackendUrl(options);
+    if (!backendUrl) throw new Error("Brak URL backendu premium remove background.");
+
+    const payload = await sourceToPremiumPayload(src);
+    const ctrl = new AbortController();
+    const remoteTimeoutMs = Number.isFinite(options.remoteTimeoutMs) ? Number(options.remoteTimeoutMs) : 30000;
+    const timer = setTimeout(() => ctrl.abort(), remoteTimeoutMs);
+
+    let response;
+    try {
+      response = await fetch(backendUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          provider: getPreferredRemoveBgProvider(options),
+          imageDataUrl: payload.imageDataUrl || "",
+          imageUrl: payload.imageUrl || "",
+          filename: payload.filename || "upload.png"
+        }),
+        signal: ctrl.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!response.ok) {
+      const details = await readPremiumError(response);
+      const err = new Error(details || `Premium remove background HTTP ${response.status}`);
+      err.status = response.status;
+      throw err;
+    }
+
+    const blob = await response.blob();
+    if (!blob || !blob.size) {
+      throw new Error("Premium remove background zwrocil pusty wynik.");
+    }
+
+    return {
+      cleanedDataUrl: await blobToDataUrl(blob),
+      provider: String(response.headers.get("x-remove-bg-provider") || "premium").trim() || "premium"
+    };
+  }
+
+  async function removeBackgroundViaLocalAiServer(src, options = {}) {
+    const localApiUrl = getLocalRemoveBgApiUrl(options);
+    if (!localApiUrl) throw new Error("Brak URL lokalnego serwera AI.");
+
+    const isHealthy = await ensureLocalAiServerHealthy(options);
+    if (!isHealthy) {
+      throw new Error("LOCAL_AI_SERVER_UNAVAILABLE");
+    }
+
+    const payload = await sourceToPremiumPayload(src);
+    const ctrl = new AbortController();
+    const timeoutMs = Number.isFinite(options.localAiTimeoutMs) ? Number(options.localAiTimeoutMs) : 45000;
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+
+    let response;
+    try {
+      response = await fetch(localApiUrl, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          imageDataUrl: payload.imageDataUrl || "",
+          imageUrl: payload.imageUrl || "",
+          filename: payload.filename || "upload.png"
+        }),
+        signal: ctrl.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!response.ok) {
+      const details = await readPremiumError(response);
+      const err = new Error(details || `Local AI remove background HTTP ${response.status}`);
+      err.status = response.status;
+      throw err;
+    }
+
+    const blob = await response.blob();
+    if (!blob || !blob.size) {
+      throw new Error("Lokalny serwer AI zwrocil pusty wynik.");
+    }
+
+    localAiRemoveBgRuntime.healthyUntil = Date.now() + 15000;
+
+    return {
+      cleanedDataUrl: await blobToDataUrl(blob),
+      provider: String(response.headers.get("x-remove-bg-provider") || "local-ai").trim() || "local-ai"
+    };
   }
 
   function uniquePush(arr, value) {
@@ -342,7 +1160,7 @@
     return out;
   }
 
-  async function applyCleanedToKonvaNode(node, cleanedDataUrl) {
+  async function applyCleanedToKonvaNode(node, cleanedDataUrl, meta = {}) {
     const loaded = await loadImageFromSrc(cleanedDataUrl);
     const oldAttrs = node && node.getAttrs ? { ...node.getAttrs() } : {};
     let srcBefore = "";
@@ -431,6 +1249,8 @@
     if (typeof node.setAttr === "function") {
       node.setAttr("originalSrc", cleanedDataUrl);
       node.setAttr("originalSrcBeforeRmbg", srcBeforeRmbg || srcBefore || cleanedDataUrl);
+      if (meta.provider) node.setAttr("removeBgProvider", meta.provider);
+      node.setAttr("removeBgProcessedAt", Date.now());
     }
   }
 
@@ -445,23 +1265,98 @@
     }
 
     let cleaned = "";
+    let providerUsed = "local";
     let lastErr = null;
+    let localAiErr = null;
+    let premiumErr = null;
+    let premiumTried = false;
+    let localAiTried = false;
+
+    if (shouldTryLocalAiRemoveBg(options)) {
+      localAiTried = true;
+      for (let i = 0; i < candidates.length; i++) {
+        const src = candidates[i];
+        try {
+          const localAiResult = await removeBackgroundViaLocalAiServer(src, options);
+          cleaned = String(localAiResult && localAiResult.cleanedDataUrl || "").trim();
+          providerUsed = String(localAiResult && localAiResult.provider || "local-ai").trim() || "local-ai";
+          if (cleaned) {
+            const preservation = await evaluateResultAlphaPreservation(cleaned);
+            if (shouldRejectLocalAiResult(preservation)) {
+              cleaned = "";
+              throw new Error("LOCAL_AI_LOW_CONFIDENCE_RESULT");
+            }
+          }
+          if (cleaned) break;
+        } catch (err) {
+          lastErr = err;
+          localAiErr = err;
+          if (String(err && err.message ? err.message : err) === "LOCAL_AI_SERVER_UNAVAILABLE") {
+            break;
+          }
+          if (shouldCooldownLocalAiError(err)) {
+            disableLocalAiRemoveBgTemporarily(err && err.message ? err.message : err);
+          }
+          continue;
+        }
+      }
+    }
+
+    if (shouldTryPremiumRemoveBg(options)) {
+      premiumTried = true;
+      for (let i = 0; i < candidates.length; i++) {
+        const src = candidates[i];
+        try {
+          const premiumResult = await removeBackgroundViaPremiumProxy(src, options);
+          cleaned = String(premiumResult && premiumResult.cleanedDataUrl || "").trim();
+          providerUsed = String(premiumResult && premiumResult.provider || "premium").trim() || "premium";
+          if (cleaned) break;
+        } catch (err) {
+          lastErr = err;
+          premiumErr = err;
+          if (shouldCooldownPremiumError(err)) {
+            disablePremiumRemoveBgTemporarily(err && err.message ? err.message : err);
+          }
+          if (shouldStopPremiumRetries(err)) break;
+        }
+      }
+    }
+
     const localTimeoutMs = Number.isFinite(options.localTimeoutMs) ? Number(options.localTimeoutMs) : 12000;
-    for (let i = 0; i < candidates.length; i++) {
-      const src = candidates[i];
-      try {
-        cleaned = await Promise.race([
-          removeBackgroundLocalFloodFill(src, options),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("LOCAL_TIMEOUT")), localTimeoutMs))
-        ]);
-        if (cleaned) break;
-      } catch (err) {
-        lastErr = err;
+    if (!cleaned) {
+      for (let i = 0; i < candidates.length; i++) {
+        const src = candidates[i];
+        try {
+          cleaned = await Promise.race([
+            removeBackgroundLocalFloodFill(src, options),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("LOCAL_TIMEOUT")), localTimeoutMs))
+          ]);
+          providerUsed = "local";
+          if (cleaned) break;
+        } catch (err) {
+          if (String(err && err.message ? err.message : err) === "LOCAL_UNSAFE_FOR_LOW_CONTRAST_SUBJECT") {
+            if (localAiTried && localAiErr && String(localAiErr && localAiErr.message ? localAiErr.message : localAiErr) !== "LOCAL_AI_SERVER_UNAVAILABLE") {
+              const localAiMsg = String(localAiErr && localAiErr.message ? localAiErr.message : localAiErr || "").trim();
+              if (localAiMsg === "LOCAL_AI_LOW_CONFIDENCE_RESULT") {
+                lastErr = new Error("Lokalne AI nie dalo pewnego wyniku dla jasnego zdjecia, a tryb prosty tez wycina obiekt.");
+              } else {
+                lastErr = new Error(localAiMsg || "Lokalny BiRefNet nie dal wyniku dla tego zdjecia, a tryb prosty zostal zablokowany, bo wycina obiekt.");
+              }
+            } else if (premiumTried && premiumErr) {
+              lastErr = new Error("To zdjecie ma jasny produkt na jasnym tle. Lokalny tryb zostal zablokowany, bo wycina obiekt. Skonfiguruj premium remove background w functions/.env i wdroz endpoint.");
+            } else {
+              lastErr = new Error("To zdjecie ma jasny produkt na jasnym tle. Uruchom lokalny serwer BiRefNet albo premium AI, bo prosty tryb wycina obiekt.");
+            }
+          } else {
+            lastErr = err;
+          }
+        }
       }
     }
 
     if (!cleaned) throw lastErr || new Error("Brak wyniku z usuwania tla.");
-    await applyCleanedToKonvaNode(node, cleaned);
+    cleaned = await dehaloCutoutImage(cleaned, options);
+    await applyCleanedToKonvaNode(node, cleaned, { provider: providerUsed });
     return cleaned;
   }
 
@@ -532,21 +1427,34 @@
   }
 
   function resolveTargetImageNode(page, obj) {
+    const resolved = resolveTargetImageNodes(page, obj);
+    return resolved[0] || null;
+  }
+
+  function resolveTargetImageNodes(page, obj) {
+    const seen = new Set();
+    const out = [];
+    const pushFound = (node) => {
+      const found = findUsableImageInNode(node);
+      if (!found || seen.has(found)) return;
+      seen.add(found);
+      out.push(found);
+    };
+
     const selected = page && Array.isArray(page.selectedNodes) ? page.selectedNodes : [];
     for (let i = 0; i < selected.length; i++) {
-      const found = findUsableImageInNode(selected[i]);
-      if (found) return found;
+      pushFound(selected[i]);
     }
     try {
       if (page && page.transformer && typeof page.transformer.nodes === "function") {
         const trNodes = page.transformer.nodes() || [];
         for (let i = 0; i < trNodes.length; i++) {
-          const found = findUsableImageInNode(trNodes[i]);
-          if (found) return found;
+          pushFound(trNodes[i]);
         }
       }
     } catch (_err) {}
-    return findUsableImageInNode(obj);
+    pushFound(obj);
+    return out;
   }
 
   function ensureRemoveBgUiStyles() {
@@ -708,36 +1616,64 @@
     const setupProductImageDrag = typeof ctx.setupProductImageDrag === "function" ? ctx.setupProductImageDrag : null;
     const options = ctx.options && typeof ctx.options === "object" ? ctx.options : {};
 
-    const targetImg = resolveTargetImageNode(page, obj);
-    if (!targetImg) {
+    const targetImgs = resolveTargetImageNodes(page, obj);
+    if (!targetImgs.length) {
       const msg = "Zaznacz zdjęcie produktu, aby usunąć tło.";
       toast(msg, "error");
       throw new Error(msg);
     }
 
-    const progressUi = showRemoveBgProcessingOverlay(targetImg);
-    toast("Usuwanie tła…", "info");
-    try {
-      await removeBgFromKonvaNode(targetImg, options);
-      progressUi.success();
-    } catch (err) {
-      progressUi.error();
+    const isBatch = targetImgs.length > 1;
+    const selectionSnapshot = page && Array.isArray(page.selectedNodes)
+      ? page.selectedNodes.filter(Boolean).slice()
+      : [];
+    const processed = [];
+    const failed = [];
+
+    toast(
+      isBatch ? `Usuwanie tła z ${targetImgs.length} zdjęć…` : "Usuwanie tła…",
+      "info"
+    );
+
+    for (let i = 0; i < targetImgs.length; i++) {
+      const targetImg = targetImgs[i];
+      const progressUi = showRemoveBgProcessingOverlay(targetImg);
+      try {
+        await removeBgFromKonvaNode(targetImg, options);
+        progressUi.success();
+
+        if (typeof targetImg.clearCache === "function") targetImg.clearCache();
+        targetImg.listening(true);
+        targetImg.draggable(true);
+
+        if (setupProductImageDrag && layer) {
+          try { setupProductImageDrag(targetImg, layer); } catch (_err) {}
+        }
+
+        processed.push(targetImg);
+      } catch (err) {
+        progressUi.error();
+        failed.push({ node: targetImg, err });
+        if (!isBatch) throw err;
+      }
+    }
+
+    if (!processed.length) {
+      const err = failed[0] && failed[0].err ? failed[0].err : new Error("Nie udało się usunąć tła.");
       throw err;
     }
 
-    if (typeof targetImg.clearCache === "function") targetImg.clearCache();
-    targetImg.listening(true);
-    targetImg.draggable(true);
-
-    if (setupProductImageDrag && layer) {
-      try { setupProductImageDrag(targetImg, layer); } catch (_err) {}
-    }
-
     if (page && page.transformer && typeof page.transformer.nodes === "function") {
-      page.transformer.nodes([targetImg]);
+      if (isBatch) {
+        page.transformer.nodes(selectionSnapshot.length ? selectionSnapshot : processed);
+      } else {
+        page.transformer.nodes([processed[0]]);
+      }
     }
     if (page && Array.isArray(page.selectedNodes)) {
-      page.selectedNodes = [targetImg];
+      page.selectedNodes = isBatch
+        ? (selectionSnapshot.length ? selectionSnapshot : processed.slice())
+        : [processed[0]];
     }
     if (layer && typeof layer.batchDraw === "function") {
       layer.batchDraw();
@@ -746,11 +1682,41 @@
       page.transformerLayer.batchDraw();
     }
 
-    toast("Usunięto tło zdjęcia.", "success");
-    return targetImg;
+    if (failed.length) {
+      toast(
+        `Usunięto tło z ${processed.length} z ${targetImgs.length} zdjęć.`,
+        failed.length < targetImgs.length ? "warning" : "error"
+      );
+    } else {
+      toast(
+        isBatch ? `Usunięto tło z ${processed.length} zdjęć.` : "Usunięto tło zdjęcia.",
+        "success"
+      );
+    }
+
+    return isBatch ? processed : processed[0];
   }
 
   window.removeBackgroundLocalFloodFill = removeBackgroundLocalFloodFill;
   window.removeBgFromKonvaNode = removeBgFromKonvaNode;
+  window.configureRemoveBg = function configureRemoveBg(config = {}) {
+    if (!config || typeof config !== "object") return;
+    const provider = normalizeProviderName(config.provider);
+    if (provider) {
+      try { window.localStorage.setItem(REMOVE_BG_PROVIDER_STORAGE_KEY, provider); } catch (_err) {}
+    }
+    if (typeof config.backendUrl === "string") {
+      window.REMOVE_BG_BACKEND_URL = String(config.backendUrl).trim();
+    }
+    if (typeof config.localAiBaseUrl === "string") {
+      window.REMOVE_BG_LOCAL_BASE_URL = String(config.localAiBaseUrl).trim();
+    }
+    if (typeof config.localAiUrl === "string") {
+      window.REMOVE_BG_LOCAL_URL = String(config.localAiUrl).trim();
+    }
+    if (typeof config.localAiHealthUrl === "string") {
+      window.REMOVE_BG_LOCAL_HEALTH_URL = String(config.localAiHealthUrl).trim();
+    }
+  };
   window.runRemoveBgAction = runRemoveBgAction;
 })();

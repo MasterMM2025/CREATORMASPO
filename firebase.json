@@ -25,6 +25,10 @@
     ],
     "rewrites": [
       {
+        "source": "/api/remove-background",
+        "function": "removeBackground"
+      },
+      {
         "source": "/",
         "destination": "/kreator.html"
       }

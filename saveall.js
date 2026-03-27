@@ -68,6 +68,45 @@ function showAppToast(message, type = "success") {
 }
 window.showAppToast = showAppToast;
 
+function parseLoosePriceNumber(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "number") {
+        return Number.isFinite(value) ? value : null;
+    }
+
+    const raw = String(value).trim();
+    if (!raw) return null;
+
+    const compact = raw
+        .replace(/\s+/g, "")
+        .replace(/[^0-9,.\-]/g, "");
+    if (!compact || compact === "-" || compact === "," || compact === "." || compact === "-," || compact === "-.") {
+        return null;
+    }
+
+    const negative = compact.startsWith("-");
+    const unsigned = negative ? compact.slice(1) : compact;
+    if (!unsigned) return null;
+
+    const lastComma = unsigned.lastIndexOf(",");
+    const lastDot = unsigned.lastIndexOf(".");
+    let normalized = unsigned;
+
+    if (lastComma >= 0 || lastDot >= 0) {
+        const separatorIndex = Math.max(lastComma, lastDot);
+        const integerPart = unsigned.slice(0, separatorIndex).replace(/[.,]/g, "");
+        const decimalPart = unsigned.slice(separatorIndex + 1).replace(/[.,]/g, "");
+        normalized = `${integerPart || "0"}${decimalPart ? `.${decimalPart}` : ""}`;
+    } else {
+        normalized = unsigned.replace(/[.,]/g, "");
+    }
+
+    if (!normalized || normalized === ".") return null;
+
+    const parsed = Number(`${negative ? "-" : ""}${normalized}`);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
 function showPriceEditDialog(options = {}) {
     return new Promise((resolve) => {
         let modal = document.getElementById("priceEditModal");
@@ -130,7 +169,7 @@ function showPriceEditDialog(options = {}) {
         };
         const submit = () => {
             const raw = String(input?.value || "").trim();
-            const parsed = parseFloat(raw.replace(",", ".").replace(/[^0-9.]/g, ""));
+            const parsed = parseLoosePriceNumber(raw);
             if (!Number.isFinite(parsed)) {
                 setErrorVisible(true);
                 input?.focus();
@@ -1936,7 +1975,8 @@ function createSavedImageNodeFromObject(obj, page) {
                 draggable: obj.draggable !== false,
                 listening: obj.listening !== false,
                 visible: obj.visible !== false,
-                opacity: obj.opacity ?? 1
+                opacity: obj.opacity ?? 1,
+                name: obj.name || ""
             });
             if (safeCrop && typeof k.crop === "function") {
                 k.crop(safeCrop);
@@ -2001,6 +2041,25 @@ function createSavedImageNodeFromObject(obj, page) {
             }
             if (obj.imageFX && typeof window.applyImageFX === "function") {
                 try { window.applyImageFX(k); } catch (_e) {}
+            }
+            if ((obj.isCatalogBanner || obj.name === "banner") && typeof window.bindCatalogBannerNode === "function") {
+                window.bindCatalogBannerNode(page, k, {
+                    state: {
+                        x: Number(obj.x) || 0,
+                        y: Number(obj.y) || 0,
+                        scaleX: Number(obj.scaleX) || 1,
+                        scaleY: Number(obj.scaleY) || 1,
+                        rotation: Number(obj.rotation) || 0,
+                        width: Math.max(1, Number(obj.width) || Number(img.naturalWidth) || 1),
+                        height: Math.max(1, Number(obj.height) || Number(img.naturalHeight) || 1)
+                    },
+                    sourceWidth: Math.max(1, Number(obj.width) || Number(img.naturalWidth) || 1),
+                    sourceHeight: Math.max(1, Number(obj.height) || Number(img.naturalHeight) || 1),
+                    bannerUrl: String(obj.src || renderSrc || thumbSrc || "").trim(),
+                    originalSrc: String(obj.src || renderSrc || thumbSrc || "").trim(),
+                    editorSrc: String(renderSrc || obj.src || thumbSrc || "").trim(),
+                    thumbSrc: String(thumbSrc || renderSrc || obj.src || "").trim()
+                });
             }
             resolve(k);
         };
@@ -2851,6 +2910,8 @@ function collectProjectData() {
                     stroke: node.stroke ? node.stroke() : null,
                     strokeWidth: node.strokeWidth ? node.strokeWidth() : 0,
                     imageFX: (node.getAttr && node.getAttr("imageFX")) ? cloneStyleValue(node.getAttr("imageFX")) : null,
+                    name: node.name ? node.name() : "",
+                    isCatalogBanner: !!(node.getAttr("isCatalogBanner") || (node.name && node.name() === "banner")),
                     slotIndex: role.slotIndex,
                     src: (
                         (typeof window.getNodeImageSource === "function")

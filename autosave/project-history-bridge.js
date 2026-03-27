@@ -58,6 +58,7 @@
         : null,
       previewFn: typeof (options && options.previewFn) === 'function' ? options.previewFn : null,
       projectIdentityFn: typeof (options && options.projectIdentityFn) === 'function' ? options.projectIdentityFn : null,
+      transitionApplyFn: typeof (options && options.transitionApplyFn) === 'function' ? options.transitionApplyFn : null,
       storeKey: options && options.storeKey ? String(options.storeKey) : 'main',
       autosaveDebounceMs: Number(options && options.autosaveDebounceMs) > 0 ? Number(options.autosaveDebounceMs) : 1400,
       autosaveArchiveLimit: Number(options && options.autosaveArchiveLimit) > 0 ? Number(options.autosaveArchiveLimit) : 30,
@@ -223,6 +224,34 @@
       return await history.pendingApplyPromise;
     }
 
+    async function applyStateTransition(nextEntry, reason, currentEntryOverride) {
+      if (!nextEntry) return false;
+      const currentEntry = currentEntryOverride || history.current || null;
+
+      if (typeof config.transitionApplyFn === 'function') {
+        try {
+          const handled = await maybeCall(
+            config.transitionApplyFn,
+            currentEntry ? currentEntry.data : null,
+            nextEntry.data,
+            {
+              source: reason || 'history',
+              currentEntry,
+              nextEntry
+            }
+          );
+          if (handled) {
+            history.current = nextEntry;
+            history.currentHash = nextEntry.hash || null;
+            updateButtons();
+            return true;
+          }
+        } catch (_e) {}
+      }
+
+      return await applyStateEntry(nextEntry, reason);
+    }
+
     async function snapshotNow(source, force) {
       history.pendingSnapshotPromise = history.pendingSnapshotPromise.then(async () => {
         try {
@@ -296,7 +325,7 @@
       if (!history.undo.length || history.isApplying || history.restoreInProgress) return;
       const prev = history.undo[history.undo.length - 1];
       const currentBefore = history.current;
-      const ok = await applyStateEntry(prev, 'undo');
+      const ok = await applyStateTransition(prev, 'undo', currentBefore);
       if (!ok) return;
       history.undo.pop();
       if (currentBefore) {
@@ -312,7 +341,7 @@
       if (!history.redo.length || history.isApplying || history.restoreInProgress) return;
       const next = history.redo[history.redo.length - 1];
       const currentBefore = history.current;
-      const ok = await applyStateEntry(next, 'redo');
+      const ok = await applyStateTransition(next, 'redo', currentBefore);
       if (!ok) return;
       history.redo.pop();
       if (currentBefore) {
@@ -387,13 +416,14 @@
       const meta = detail && typeof detail === 'object' ? detail : null;
       const source = String((meta && meta.historySource) || 'canvasModified');
       const historyMode = String((meta && meta.historyMode) || '').toLowerCase();
+      const forceHistorySnapshot = !!(meta && meta.forceHistorySnapshot);
 
       if (historyMode === 'immediate') {
         if (history.debounceTimer) {
           clearTimeout(history.debounceTimer);
           history.debounceTimer = null;
         }
-        snapshotNow(source, false);
+        snapshotNow(source, forceHistorySnapshot);
         return;
       }
 

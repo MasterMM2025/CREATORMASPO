@@ -64,6 +64,8 @@ node_modules/
 
 # dotenv environment variables file
 .env
+.venv-local-ai/
+__pycache__/
 
 # dataconnect generated files
 .dataconnect

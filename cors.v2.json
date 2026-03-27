@@ -10,7 +10,8 @@
       "http://127.0.0.1:8123",
       "http://localhost:8123",
       "https://marcin870119.github.io",
-      "https://mastermm2025.github.io"
+      "https://mastermm2025.github.io",
+      "https://preview-creator.web.app"
     ],
     "method": ["GET", "HEAD", "OPTIONS"],
     "responseHeader": ["Content-Type", "Authorization"],

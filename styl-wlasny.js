@@ -1901,18 +1901,79 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     return String(product.index || "").trim();
   }
 
+  function parseLoosePriceNumber(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+
+    const raw = String(value).trim();
+    if (!raw) return null;
+
+    const compact = raw
+      .replace(/\s+/g, "")
+      .replace(/[^0-9,.\-]/g, "");
+    if (!compact || compact === "-" || compact === "," || compact === "." || compact === "-," || compact === "-.") {
+      return null;
+    }
+
+    const negative = compact.startsWith("-");
+    const unsigned = negative ? compact.slice(1) : compact;
+    if (!unsigned) return null;
+
+    const lastComma = unsigned.lastIndexOf(",");
+    const lastDot = unsigned.lastIndexOf(".");
+    let normalized = unsigned;
+
+    if (lastComma >= 0 || lastDot >= 0) {
+      const separatorIndex = Math.max(lastComma, lastDot);
+      const integerPart = unsigned.slice(0, separatorIndex).replace(/[.,]/g, "");
+      const decimalPart = unsigned.slice(separatorIndex + 1).replace(/[.,]/g, "");
+      normalized = `${integerPart || "0"}${decimalPart ? `.${decimalPart}` : ""}`;
+    } else {
+      normalized = unsigned.replace(/[.,]/g, "");
+    }
+
+    if (!normalized || normalized === ".") return null;
+
+    const parsed = Number(`${negative ? "-" : ""}${normalized}`);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   function normalizeEditablePriceValue(value) {
-    const raw = String(value || "").trim();
-    if (!raw) return "";
-    const normalized = raw.replace(",", ".").replace(/[^0-9.]/g, "");
-    if (!normalized) return "";
-    const dotIndex = normalized.indexOf(".");
-    const clean = dotIndex >= 0
-      ? `${normalized.slice(0, dotIndex + 1)}${normalized.slice(dotIndex + 1).replace(/\./g, "")}`
-      : normalized;
-    const parsed = parseFloat(clean);
+    const parsed = parseLoosePriceNumber(value);
     if (!Number.isFinite(parsed)) return "";
     return parsed.toFixed(2);
+  }
+
+  function persistEditedPriceForSlot(page, slotIndex, normalizedPrice) {
+    if (!page || !Number.isFinite(slotIndex) || !normalizedPrice) return;
+    if (!Array.isArray(page.products)) return;
+    const entry = page.products[slotIndex];
+    if (!entry || typeof entry !== "object") return;
+    entry.CENA = normalizedPrice;
+    entry.HIDE_PRICE = false;
+    if (Object.prototype.hasOwnProperty.call(entry, "CENA_NETTO_FV") || entry.CENA_NETTO_FV != null) {
+      entry.CENA_NETTO_FV = normalizedPrice;
+    }
+  }
+
+  function resolveEditablePriceSlotIndex(node) {
+    const externalResolver = window.resolveDirectSlotIndexFromNode;
+    if (typeof externalResolver === "function") {
+      try {
+        const resolved = Number(externalResolver(node));
+        if (Number.isFinite(resolved) && resolved >= 0) return resolved;
+      } catch (_err) {}
+    }
+
+    let current = node;
+    while (current) {
+      const slotIndex = readDirectSlotAttrIndex(current, "slotIndex");
+      if (Number.isFinite(slotIndex)) return slotIndex;
+      const preservedSlotIndex = readDirectSlotAttrIndex(current, "preservedSlotIndex");
+      if (Number.isFinite(preservedSlotIndex)) return preservedSlotIndex;
+      current = typeof current.getParent === "function" ? current.getParent() : null;
+    }
+    return null;
   }
 
   function getDisplayPrice(product) {
@@ -2258,7 +2319,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
   function formatPrice(nettoRaw) {
     const src = String(nettoRaw || "").trim();
     const currency = src.includes("£") ? "£" : (src.includes("€") ? "€" : "£");
-    const value = parseFloat(src.replace(",", ".").replace(/[^0-9.]/g, ""));
+    const value = parseLoosePriceNumber(src);
     const safe = Number.isFinite(value) ? value : 0;
     const parts = safe.toFixed(2).split(".");
     return {
@@ -4710,7 +4771,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const layer = priceGroup.getLayer ? priceGroup.getLayer() : null;
     const parentGroup = priceGroup.getParent ? priceGroup.getParent() : null;
     const directModuleId = String(priceGroup.getAttr?.("directModuleId") || "");
-    const slotIndex = readDirectSlotAttrIndex(priceGroup, "slotIndex");
+    const slotIndex = resolveEditablePriceSlotIndex(priceGroup);
     const rectBgSibling = findDirectPriceBadgeNode(layer, parentGroup, directModuleId, slotIndex, "rect");
     const circleBg = findDirectPriceBadgeNode(layer, parentGroup, directModuleId, slotIndex, "circle");
     const rectBgChild = children.find((n) => n && n.getAttr && n.getAttr("isDirectPriceRectBg"));
@@ -5005,11 +5066,20 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           confirmText: "Zapisz",
           value: String(current).replace(".", ",")
         })
-        : parseFloat(String(prompt("Podaj nową cenę (np. 1,49):", String(current).replace(".", ",")) || "").replace(",", ".").replace(/[^0-9.]/g, ""));
+        : parseLoosePriceNumber(prompt("Podaj nową cenę (np. 1,49):", String(current).replace(".", ",")) || "");
       if (!Number.isFinite(parsed)) return;
-      const [nm, nd] = parsed.toFixed(2).split(".");
+      const normalizedPrice = parsed.toFixed(2);
+      const [nm, nd] = normalizedPrice.split(".");
       main.text(nm);
       dec.text(nd);
+      persistEditedPriceForSlot(page, slotIndex, normalizedPrice);
+      priceGroup.setAttr?.("priceRawValue", normalizedPrice);
+      if (page && Number.isFinite(slotIndex)) {
+        try {
+          await rebuildDirectModuleLayoutsOnPage(page, { slotIndexes: [slotIndex] });
+          return;
+        } catch (_err) {}
+      }
       realign();
     });
     priceGroup.on("transformend.directPriceResize", applyPriceGroupTransformAsRealResize);
@@ -5917,9 +5987,13 @@ const CUSTOM_PRODUCT_LAYOUTS = {
               <div class="custom-style-heading" style="font-size:11px;font-weight:700;color:#0f172a;">Podgląd modułu 1:1 (styl elegancki)</div>
               <label for="customModuleLayoutSelect" style="display:inline-flex;align-items:center;gap:6px;font-size:10px;color:#334155;">
                 Styl modułu
-                <select id="customModuleLayoutSelect" style="max-width:170px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:6px;font-size:10px;background:#fff;color:#0f172a;">
-                  ${MODULE_LAYOUT_STYLE_OPTIONS.map((opt) => `<option value="${escapeHtml(opt.id)}">${escapeHtml(opt.label)}</option>`).join("")}
-                </select>
+                <div style="display:inline-flex;align-items:center;gap:4px;">
+                  <button id="customModuleLayoutPrevBtn" type="button" title="Poprzedni styl" aria-label="Poprzedni styl" style="width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#0f172a;font-size:12px;font-weight:700;cursor:pointer;line-height:1;">←</button>
+                  <select id="customModuleLayoutSelect" style="max-width:170px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:6px;font-size:10px;background:#fff;color:#0f172a;">
+                    ${MODULE_LAYOUT_STYLE_OPTIONS.map((opt) => `<option value="${escapeHtml(opt.id)}">${escapeHtml(opt.label)}</option>`).join("")}
+                  </select>
+                  <button id="customModuleLayoutNextBtn" type="button" title="Następny styl" aria-label="Następny styl" style="width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#0f172a;font-size:12px;font-weight:700;cursor:pointer;line-height:1;">→</button>
+                </div>
               </label>
               <button id="customApplyStyleToImportedBtn" type="button" style="border:1px solid #0b8f84;background:#fff;color:#0b8f84;border-radius:6px;padding:4px 8px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;">Zastosuj do zaimportowanych</button>
             </div>
@@ -8942,6 +9016,8 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     const openDraftTrayBtn = document.getElementById("customOpenDraftTrayBtn");
     const clearEditorBtn = document.getElementById("customClearEditorBtn");
     const moduleLayoutSelect = document.getElementById("customModuleLayoutSelect");
+    const moduleLayoutPrevBtn = document.getElementById("customModuleLayoutPrevBtn");
+    const moduleLayoutNextBtn = document.getElementById("customModuleLayoutNextBtn");
     const priceLayoutSelect = document.getElementById("customPriceLayoutSelect");
     const applyStyleToImportedBtn = document.getElementById("customApplyStyleToImportedBtn");
     const showPriceToggle = document.getElementById("customShowPriceToggle");
@@ -9198,17 +9274,55 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       return Math.max(0, pagesList.length - before);
     };
 
-    const buildAutoPlacementPointersForPage = (page, itemCount, options = {}) => {
-      const total = Math.max(0, Number(itemCount) || 0);
-      if (!page?.stage || total <= 0) return [];
+    const CUSTOM_LAYOUT_OBJECT_PADDING_MM = 3;
+    const CUSTOM_LAYOUT_OBJECT_PADDING_PX = (96 / 25.4) * CUSTOM_LAYOUT_OBJECT_PADDING_MM;
 
-      const stageW = Math.max(1, Number(page.stage.width?.() || window.W || 0));
-      const stageH = Math.max(1, Number(page.stage.height?.() || window.H || 0));
-      const { w: moduleWRaw, h: moduleHRaw } = getCustomModuleDimensions(page);
-      const moduleW = Math.max(120, Number(moduleWRaw) || 0);
-      const moduleH = Math.max(96, Number(moduleHRaw) || 0);
-      const gapX = Math.max(16, Math.round(moduleW * 0.08));
-      const gapY = Math.max(18, Math.round(moduleH * 0.08));
+    const normalizeAutoPlacementRect = (rect) => {
+      if (!rect) return null;
+      const x = Number(rect.x);
+      const y = Number(rect.y);
+      const width = Math.max(0, Number(rect.width));
+      const height = Math.max(0, Number(rect.height));
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !(width > 0) || !(height > 0)) return null;
+      return { x, y, width, height };
+    };
+
+    const expandAutoPlacementRect = (rect, padX = 0, padY = padX, stageW = Infinity, stageH = Infinity) => {
+      const safeRect = normalizeAutoPlacementRect(rect);
+      if (!safeRect) return null;
+      const safePadX = Math.max(0, Number(padX) || 0);
+      const safePadY = Math.max(0, Number(padY) || safePadX);
+      let nextX = safeRect.x - safePadX;
+      let nextY = safeRect.y - safePadY;
+      let nextRight = safeRect.x + safeRect.width + safePadX;
+      let nextBottom = safeRect.y + safeRect.height + safePadY;
+      if (Number.isFinite(stageW)) {
+        nextX = Math.max(0, nextX);
+        nextRight = Math.min(Math.max(0, stageW), nextRight);
+      }
+      if (Number.isFinite(stageH)) {
+        nextY = Math.max(0, nextY);
+        nextBottom = Math.min(Math.max(0, stageH), nextBottom);
+      }
+      const width = nextRight - nextX;
+      const height = nextBottom - nextY;
+      if (!(width > 0) || !(height > 0)) return null;
+      return { x: nextX, y: nextY, width, height };
+    };
+
+    const autoPlacementRectsIntersect = (a, b) => {
+      const rectA = normalizeAutoPlacementRect(a);
+      const rectB = normalizeAutoPlacementRect(b);
+      if (!rectA || !rectB) return false;
+      return !(
+        rectA.x + rectA.width <= rectB.x ||
+        rectB.x + rectB.width <= rectA.x ||
+        rectA.y + rectA.height <= rectB.y ||
+        rectB.y + rectB.height <= rectA.y
+      );
+    };
+
+    const buildPreferredAutoPlacementPointers = (stageW, stageH, moduleW, moduleH, gapX, gapY, total) => {
       const maxCols = Math.max(1, Math.floor((stageW + gapX) / (moduleW + gapX)));
       const maxRows = Math.max(1, Math.floor((stageH + gapY) / (moduleH + gapY)));
       let cols = Math.min(maxCols, Math.max(1, Math.ceil(Math.sqrt(total))));
@@ -9242,8 +9356,123 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         }
       });
 
-      const offset = Math.max(0, Math.min(out.length, Number(options.offset) || 0));
-      return out.slice(offset);
+      return out;
+    };
+
+    const buildDenseAutoPlacementPointers = (stageW, stageH, moduleW, moduleH, gapX, gapY) => {
+      const stepX = Math.max(24, Math.round(moduleW + gapX));
+      const stepY = Math.max(24, Math.round(moduleH + gapY));
+      const maxCols = Math.max(1, Math.floor((Math.max(0, stageW - moduleW)) / stepX) + 1);
+      const maxRows = Math.max(1, Math.floor((Math.max(0, stageH - moduleH)) / stepY) + 1);
+      const contentW = moduleW + (Math.max(0, maxCols - 1) * stepX);
+      const contentH = moduleH + (Math.max(0, maxRows - 1) * stepY);
+      const baseStartX = Math.max(moduleW / 2, ((stageW - contentW) / 2) + (moduleW / 2));
+      const baseStartY = Math.max(moduleH / 2, ((stageH - contentH) / 2) + (moduleH / 2));
+      const phaseOffsets = [
+        { x: 0, y: 0 },
+        { x: stepX * 0.5, y: 0 },
+        { x: -stepX * 0.5, y: 0 },
+        { x: 0, y: stepY * 0.5 },
+        { x: 0, y: -stepY * 0.5 },
+        { x: stepX * 0.5, y: stepY * 0.5 },
+        { x: -stepX * 0.5, y: stepY * 0.5 },
+        { x: stepX * 0.5, y: -stepY * 0.5 },
+        { x: -stepX * 0.5, y: -stepY * 0.5 },
+        { x: stepX * 0.25, y: stepY * 0.25 },
+        { x: -stepX * 0.25, y: stepY * 0.25 },
+        { x: stepX * 0.25, y: -stepY * 0.25 },
+        { x: -stepX * 0.25, y: -stepY * 0.25 }
+      ];
+      const out = [];
+      const seen = new Set();
+
+      phaseOffsets.forEach((phase) => {
+        for (let rowIndex = 0; rowIndex < maxRows; rowIndex += 1) {
+          for (let colIndex = 0; colIndex < maxCols; colIndex += 1) {
+            const x = baseStartX + phase.x + (colIndex * stepX);
+            const y = baseStartY + phase.y + (rowIndex * stepY);
+            if (x < moduleW / 2 || x > (stageW - moduleW / 2)) continue;
+            if (y < moduleH / 2 || y > (stageH - moduleH / 2)) continue;
+            const key = `${Math.round(x * 100) / 100}:${Math.round(y * 100) / 100}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({
+              x: Number(x.toFixed(2)),
+              y: Number(y.toFixed(2))
+            });
+          }
+        }
+      });
+
+      return out;
+    };
+
+    const buildAutoPlacementPointersForPage = (page, itemCount) => {
+      const total = Math.max(0, Number(itemCount) || 0);
+      if (!page?.stage || total <= 0) return [];
+
+      const stageW = Math.max(1, Number(page.stage.width?.() || window.W || 0));
+      const stageH = Math.max(1, Number(page.stage.height?.() || window.H || 0));
+      const { w: moduleWRaw, h: moduleHRaw } = getCustomModuleDimensions(page);
+      const moduleW = Math.max(120, Number(moduleWRaw) || 0);
+      const moduleH = Math.max(96, Number(moduleHRaw) || 0);
+      const gapX = Math.max(16, Math.round(moduleW * 0.08));
+      const gapY = Math.max(18, Math.round(moduleH * 0.08));
+      const collisionGuard = window.__catalogLayoutCollisionGuard || null;
+      const obstaclePaddingPx = Number.isFinite(Number(collisionGuard?.defaultPaddingPx))
+        ? Number(collisionGuard.defaultPaddingPx)
+        : CUSTOM_LAYOUT_OBJECT_PADDING_PX;
+      const existingModulePaddingX = Math.max(8, Math.round(gapX * 0.4));
+      const existingModulePaddingY = Math.max(8, Math.round(gapY * 0.4));
+      const candidateReservationX = Math.max(6, Math.round(gapX * 0.35));
+      const candidateReservationY = Math.max(6, Math.round(gapY * 0.35));
+      const blockedRects = [];
+
+      if (typeof collisionGuard?.collectNonProductObstacleRects === "function") {
+        blockedRects.push(
+          ...collisionGuard.collectNonProductObstacleRects(page, {
+            paddingPx: obstaclePaddingPx
+          }).filter(Boolean)
+        );
+      }
+
+      if (typeof window.getCatalogPageProductModuleRects === "function") {
+        const existingRects = window.getCatalogPageProductModuleRects(page);
+        existingRects.forEach((rect) => {
+          const expanded = expandAutoPlacementRect(rect, existingModulePaddingX, existingModulePaddingY, stageW, stageH);
+          if (expanded) blockedRects.push(expanded);
+        });
+      }
+
+      const preferred = buildPreferredAutoPlacementPointers(stageW, stageH, moduleW, moduleH, gapX, gapY, total);
+      const dense = buildDenseAutoPlacementPointers(stageW, stageH, moduleW, moduleH, gapX, gapY);
+      const candidatePointers = [];
+      const seenPointers = new Set();
+
+      [...preferred, ...dense].forEach((pointer) => {
+        const key = `${pointer.x}:${pointer.y}`;
+        if (seenPointers.has(key)) return;
+        seenPointers.add(key);
+        candidatePointers.push(pointer);
+      });
+
+      const selected = [];
+      candidatePointers.forEach((pointer) => {
+        if (selected.length >= total) return;
+        const candidateRect = {
+          x: pointer.x - (moduleW / 2),
+          y: pointer.y - (moduleH / 2),
+          width: moduleW,
+          height: moduleH
+        };
+        const collides = blockedRects.some((rect) => autoPlacementRectsIntersect(candidateRect, rect));
+        if (collides) return;
+        selected.push(pointer);
+        const reserved = expandAutoPlacementRect(candidateRect, candidateReservationX, candidateReservationY, stageW, stageH);
+        if (reserved) blockedRects.push(reserved);
+      });
+
+      return selected;
     };
 
     const collectCatalogEntryImageUrlsFromImport = (catalogEntry, mappedImagesByIndex) => {
@@ -9404,24 +9633,20 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           continue;
         }
         reportProgressState(`Dodawanie layoutu: strona ${pageNumber} (${pageDrafts.length} moduł${pageDrafts.length === 1 ? "" : "y"})...`, processedCount);
-        const existingCount = (Array.isArray(page.products) ? page.products.filter(Boolean).length : 0);
-        const pointers = buildAutoPlacementPointersForPage(page, existingCount + pageDrafts.length, {
-          offset: existingCount
-        });
+        const pointers = buildAutoPlacementPointersForPage(page, pageDrafts.length);
         for (let idx = 0; idx < pageDrafts.length; idx += 1) {
           const draft = pageDrafts[idx];
-          const pointer = pointers[idx] || {
-            x: Number(page.stage.width?.() || 0) / 2,
-            y: Number(page.stage.height?.() || 0) / 2
-          };
-          const result = await placeDraftSnapshotDirectToPage(String(draft?.id || ""), {
-            stage: page.stage,
-            pageNumber: page.number,
-            pointer,
-            silent: true,
-            deferRender: true,
-            bulkPlacement: true
-          });
+          const pointer = pointers[idx] || null;
+          const result = pointer
+            ? await placeDraftSnapshotDirectToPage(String(draft?.id || ""), {
+                stage: page.stage,
+                pageNumber: page.number,
+                pointer,
+                silent: true,
+                deferRender: true,
+                bulkPlacement: true
+              })
+            : { ok: false, error: "no_free_space_for_module" };
           processedCount += 1;
           if (result?.ok) {
             placedCount += 1;
@@ -10000,6 +10225,43 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         const v = normalizeFamilySpacingTightness(customFamilySpacingTightness, 0.12);
         familySpacingSelect.value = String(v);
       }
+      refreshModuleLayoutArrowButtons();
+    };
+
+    const refreshModuleLayoutArrowButtons = () => {
+      const enabledOptions = Array.from(moduleLayoutSelect?.options || []).filter((opt) => {
+        if (!opt || opt.disabled) return false;
+        return String(opt.value || "").trim() !== "";
+      });
+      const enabled = enabledOptions.length > 1;
+      [moduleLayoutPrevBtn, moduleLayoutNextBtn].forEach((btn) => {
+        if (!btn) return;
+        btn.disabled = !enabled;
+        btn.style.opacity = enabled ? "1" : "0.45";
+        btn.style.cursor = enabled ? "pointer" : "default";
+      });
+    };
+
+    const cycleModuleLayoutSelection = (direction = 1) => {
+      if (!moduleLayoutSelect) return;
+      const enabledOptions = Array.from(moduleLayoutSelect.options || []).filter((opt) => {
+        if (!opt || opt.disabled) return false;
+        return String(opt.value || "").trim() !== "";
+      });
+      if (enabledOptions.length <= 1) {
+        refreshModuleLayoutArrowButtons();
+        return;
+      }
+      const currentValue = String(moduleLayoutSelect.value || "");
+      let currentIndex = enabledOptions.findIndex((opt) => String(opt.value || "") === currentValue);
+      if (currentIndex < 0) currentIndex = 0;
+      const nextIndex = (currentIndex + direction + enabledOptions.length) % enabledOptions.length;
+      const nextOption = enabledOptions[nextIndex];
+      if (!nextOption) return;
+      moduleLayoutSelect.value = String(nextOption.value || "default");
+      if (typeof moduleLayoutSelect.onchange === "function") moduleLayoutSelect.onchange();
+      else moduleLayoutSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      refreshModuleLayoutArrowButtons();
     };
 
     const renderDraftModulesList = () => {
@@ -10153,6 +10415,45 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     };
     customRestoreDraftToEditor = restoreDraftToEditor;
 
+    const syncEditorStateToActiveDraft = (options = {}) => {
+      const refreshDraftList = options.refreshDraftList !== false;
+      const activeDraftId = String(customActiveDraftId || "");
+      const snapshot = getCurrentEditorSnapshot();
+      if (!snapshot) {
+        storeCustomStyleEditorSnapshot(null);
+        return null;
+      }
+      if (!activeDraftId) {
+        storeCustomStyleEditorSnapshot(snapshot);
+        return snapshot;
+      }
+
+      let syncedDraft = null;
+      customDraftModules = (Array.isArray(customDraftModules) ? customDraftModules : []).map((draft) => {
+        if (String(draft?.id || "") !== activeDraftId) return draft;
+        syncedDraft = {
+          ...draft,
+          ...snapshot,
+          id: activeDraftId,
+          createdAt: Number.isFinite(Number(draft?.createdAt))
+            ? Number(draft.createdAt)
+            : (Number(snapshot.createdAt) || Date.now()),
+          settings: {
+            ...(draft?.settings && typeof draft.settings === "object" ? draft.settings : {}),
+            ...(snapshot.settings && typeof snapshot.settings === "object" ? snapshot.settings : {})
+          },
+          importMeta: draft?.importMeta && typeof draft.importMeta === "object"
+            ? { ...draft.importMeta }
+            : (snapshot.importMeta && typeof snapshot.importMeta === "object" ? { ...snapshot.importMeta } : null)
+        };
+        return syncedDraft;
+      });
+
+      storeCustomStyleEditorSnapshot(syncedDraft || snapshot);
+      if (syncedDraft && refreshDraftList) renderDraftModulesList();
+      return syncedDraft || snapshot;
+    };
+
     if (saveDraftBtn) {
       saveDraftBtn.onclick = () => {
         const snap = getCurrentEditorSnapshot();
@@ -10171,7 +10472,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     }
     if (openDraftTrayBtn) {
       openDraftTrayBtn.onclick = () => {
-        storeCustomStyleEditorSnapshot(getCurrentEditorSnapshot());
+        syncEditorStateToActiveDraft({ refreshDraftList: true });
         ensureStylWlasnyHelperScriptLoaded();
         const modal = document.getElementById("customStyleModal");
         if (modal) modal.style.display = "none";
@@ -10186,8 +10487,16 @@ const CUSTOM_PRODUCT_LAYOUTS = {
       applyStyleToImportedBtn.onclick = () => {
         const nextStyle = String(customModuleLayoutStyleId || "default");
         const nextPriceLayoutStyleId = String(customPriceLayoutStyleId || "").trim();
+        const nextPriceCircleColor = String(customPriceCircleColor || "#d71920");
+        const nextPriceBadgeStyleId = resolvePriceBadgeStyleId(customPriceBadgeStyleId || "solid", "solid");
+        const nextPriceTextColor = String(customPriceTextColor || "#ffffff");
         const nextCurrency = normalizeCustomCurrencySymbol(customCurrencySymbol, "£");
         const nextCurrencyCode = normalizeDirectCurrencyCode(nextCurrency) || "GBP";
+        const nextPriceTextScale = Number.isFinite(Number(customPriceTextScale)) ? Number(customPriceTextScale) : 1;
+        const nextPriceFontFamily = normalizeFontOption(customPriceFontFamily, "Arial");
+        const nextPriceTextBold = !!customPriceTextBold;
+        const nextPriceTextUnderline = !!customPriceTextUnderline;
+        const nextPriceTextAlign = normalizeAlignOption(customPriceTextAlign, "left");
         const importedDraftIds = new Set();
         let changed = 0;
 
@@ -10197,7 +10506,22 @@ const CUSTOM_PRODUCT_LAYOUTS = {
           if (draftId) importedDraftIds.add(draftId);
           const prev = String(draft?.settings?.customModuleLayoutStyleId || "default");
           const prevPriceLayout = String(draft?.settings?.customPriceLayoutStyleId || "").trim();
+          const isTnzDraft = !!draft?.importMeta?.tnz || String(draft?.settings?.customPriceBadgeStyleId || "").includes("tnz");
+          const effectiveNextPriceBadgeStyleId = isTnzDraft ? "kolko-czerwone-tnz" : nextPriceBadgeStyleId;
+          const prevPriceCircleColor = String(draft?.settings?.customPriceCircleColor || "#d71920");
+          const prevPriceBadgeStyleId = resolvePriceBadgeStyleId(
+            draft?.settings?.customPriceBadgeStyleId || (isTnzDraft ? "kolko-czerwone-tnz" : "solid"),
+            isTnzDraft ? "kolko-czerwone-tnz" : "solid"
+          );
+          const prevPriceTextColor = String(draft?.settings?.customPriceTextColor || "#ffffff");
           const prevCurrency = normalizeCustomCurrencySymbol(draft?.settings?.customCurrencySymbol || "£", "£");
+          const prevPriceTextScale = Number.isFinite(Number(draft?.settings?.customPriceTextScale))
+            ? Number(draft.settings.customPriceTextScale)
+            : 1;
+          const prevPriceFontFamily = normalizeFontOption(draft?.settings?.customPriceFontFamily || "Arial", "Arial");
+          const prevPriceTextBold = !!draft?.settings?.customPriceTextBold;
+          const prevPriceTextUnderline = !!draft?.settings?.customPriceTextUnderline;
+          const prevPriceTextAlign = normalizeAlignOption(draft?.settings?.customPriceTextAlign || "left", "left");
           const productId = String(draft?.productId || "");
           const linkedProduct = productId ? productsById.get(productId) : null;
           if (linkedProduct) {
@@ -10205,7 +10529,19 @@ const CUSTOM_PRODUCT_LAYOUTS = {
             linkedProduct.PRICE_CURRENCY_SYMBOL = nextCurrency;
             linkedProduct.PRICE_CURRENCY_CODE = nextCurrencyCode;
           }
-          if (prev === nextStyle && prevPriceLayout === nextPriceLayoutStyleId && prevCurrency === nextCurrency) return draft;
+          if (
+            prev === nextStyle &&
+            prevPriceLayout === nextPriceLayoutStyleId &&
+            prevPriceCircleColor === nextPriceCircleColor &&
+            prevPriceBadgeStyleId === effectiveNextPriceBadgeStyleId &&
+            prevPriceTextColor === nextPriceTextColor &&
+            prevCurrency === nextCurrency &&
+            prevPriceTextScale === nextPriceTextScale &&
+            prevPriceFontFamily === nextPriceFontFamily &&
+            prevPriceTextBold === nextPriceTextBold &&
+            prevPriceTextUnderline === nextPriceTextUnderline &&
+            prevPriceTextAlign === nextPriceTextAlign
+          ) return draft;
           changed += 1;
           return {
             ...draft,
@@ -10213,7 +10549,15 @@ const CUSTOM_PRODUCT_LAYOUTS = {
               ...(draft.settings || {}),
               customModuleLayoutStyleId: nextStyle,
               customPriceLayoutStyleId: nextPriceLayoutStyleId,
-              customCurrencySymbol: nextCurrency
+              customPriceCircleColor: nextPriceCircleColor,
+              customPriceBadgeStyleId: effectiveNextPriceBadgeStyleId,
+              customPriceTextColor: nextPriceTextColor,
+              customCurrencySymbol: nextCurrency,
+              customPriceTextScale: nextPriceTextScale,
+              customPriceFontFamily: nextPriceFontFamily,
+              customPriceTextBold: nextPriceTextBold,
+              customPriceTextUnderline: nextPriceTextUnderline,
+              customPriceTextAlign: nextPriceTextAlign
             }
           };
         });
@@ -10231,7 +10575,18 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         if (customLastEditorSnapshot?.importMeta?.source === "excel" && customLastEditorSnapshot?.settings) {
           customLastEditorSnapshot.settings.customModuleLayoutStyleId = nextStyle;
           customLastEditorSnapshot.settings.customPriceLayoutStyleId = nextPriceLayoutStyleId;
+          customLastEditorSnapshot.settings.customPriceCircleColor = nextPriceCircleColor;
+          customLastEditorSnapshot.settings.customPriceBadgeStyleId = resolvePriceBadgeStyleId(
+            customLastEditorSnapshot.settings.customPriceBadgeStyleId || nextPriceBadgeStyleId,
+            nextPriceBadgeStyleId
+          );
+          customLastEditorSnapshot.settings.customPriceTextColor = nextPriceTextColor;
           customLastEditorSnapshot.settings.customCurrencySymbol = nextCurrency;
+          customLastEditorSnapshot.settings.customPriceTextScale = nextPriceTextScale;
+          customLastEditorSnapshot.settings.customPriceFontFamily = nextPriceFontFamily;
+          customLastEditorSnapshot.settings.customPriceTextBold = nextPriceTextBold;
+          customLastEditorSnapshot.settings.customPriceTextUnderline = nextPriceTextUnderline;
+          customLastEditorSnapshot.settings.customPriceTextAlign = nextPriceTextAlign;
         }
 
         renderDraftModulesList();
@@ -10653,6 +11008,7 @@ const CUSTOM_PRODUCT_LAYOUTS = {
     }
     if (moduleLayoutSelect) {
       renderModuleLayoutSelectOptions(moduleLayoutSelect, customModuleLayoutStyleId || "default");
+      refreshModuleLayoutArrowButtons();
       moduleLayoutSelect.onchange = () => {
         customModuleLayoutStyleId = String(moduleLayoutSelect.value || "default");
         saveLastSelectedModuleLayoutStyleId(customModuleLayoutStyleId);
@@ -10672,8 +11028,25 @@ const CUSTOM_PRODUCT_LAYOUTS = {
         const suggestedText = String(styleText.priceColor || "").trim();
         customPriceTextColor = suggestedText || (styleHidesBadge ? "#d71920" : "#ffffff");
         if (priceTextColorInput) priceTextColorInput.value = customPriceTextColor;
+        refreshModuleLayoutArrowButtons();
         renderModulePreview(getEffectivePreviewProduct(), getEffectivePreviewImageUrl());
       };
+      moduleLayoutSelect.onkeydown = (e) => {
+        if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+        if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          cycleModuleLayoutSelection(-1);
+        } else if (e.key === "ArrowRight") {
+          e.preventDefault();
+          cycleModuleLayoutSelection(1);
+        }
+      };
+    }
+    if (moduleLayoutPrevBtn) {
+      moduleLayoutPrevBtn.onclick = () => cycleModuleLayoutSelection(-1);
+    }
+    if (moduleLayoutNextBtn) {
+      moduleLayoutNextBtn.onclick = () => cycleModuleLayoutSelection(1);
     }
     if (priceLayoutSelect) {
       renderCustomPriceLayoutSelectOptions(priceLayoutSelect, customPriceLayoutStyleId || "");

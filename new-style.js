@@ -58,6 +58,7 @@
   const LINE_TRANSFORMER_PADDING = 18;
   let firebaseStorageApiPromise = null;
   const workspaceBadgeImageCache = new Map();
+  let workspaceSharedTextMeasureProbe = null;
 
   const state = {
     products: null,
@@ -81,6 +82,8 @@
       layer: null,
       transformer: null,
       selectedNode: null,
+      selectedNodes: [],
+      multiDragState: null,
       loadStamp: 0,
       resizeRaf: 0,
       resizeBound: false,
@@ -579,6 +582,74 @@
     return list.find((item) => String(item?.id || "") === target) || null;
   }
 
+  function cloneResolvedPriceStyleSnapshot(priceStyleDef) {
+    const snapshot = priceStyleDef?.snapshot && typeof priceStyleDef.snapshot === "object"
+      ? cloneJsonSnapshot(priceStyleDef.snapshot)
+      : null;
+    if (!hasSnapshotNodes(snapshot)) return null;
+    const badgeMeta = {
+      badgeStyleId: String(priceStyleDef?.badgeStyleId || "").trim() || "solid",
+      badgeStylePath: String(priceStyleDef?.badgeStylePath || "").trim(),
+      badgeStyleUrl: String(priceStyleDef?.badgeStyleUrl || "").trim()
+    };
+    const badgeStyleUrl = String(badgeMeta.badgeStyleUrl || "").trim() || String(buildStorageMediaUrl(badgeMeta.badgeStylePath) || "").trim();
+    if (!badgeStyleUrl || badgeMeta.badgeStyleId === "solid") return snapshot;
+    const targetClassByKind = {
+      badgeRect: "Rect",
+      badgeCircle: "Circle"
+    };
+    const patchNode = (def) => {
+      if (!def || typeof def !== "object") return def;
+      const attrs = def?.attrs && typeof def.attrs === "object" ? def.attrs : {};
+      const kind = String(attrs.workspaceKind || "").trim();
+      const children = Array.isArray(def?.children) ? def.children : null;
+      if (!children || !targetClassByKind[kind]) {
+        return {
+          ...def,
+          children: children ? children.map((child) => patchNode(child)) : children
+        };
+      }
+      let applied = false;
+      return {
+        ...def,
+        children: children.map((child) => {
+          if (applied || !child || typeof child !== "object") return patchNode(child);
+          if (String(child.className || "") !== targetClassByKind[kind]) return patchNode(child);
+          const childAttrs = child?.attrs && typeof child.attrs === "object" ? child.attrs : {};
+          const childCustomAttrs = childAttrs?.customAttrs && typeof childAttrs.customAttrs === "object"
+            ? { ...childAttrs.customAttrs }
+            : {};
+          if (String(childCustomAttrs.shapeFillImageUrl || childCustomAttrs.priceBadgeStyleUrl || "").trim()) {
+            applied = true;
+            return patchNode(child);
+          }
+          applied = true;
+          return {
+            ...child,
+            attrs: {
+              ...childAttrs,
+              customAttrs: {
+                ...childCustomAttrs,
+                shapeFillImageUrl: badgeStyleUrl,
+                shapeFillFallbackColor: String(
+                  childCustomAttrs.shapeFillFallbackColor ||
+                  childCustomAttrs.workspaceSolidFill ||
+                  childAttrs.fill ||
+                  "#d71920"
+                ),
+                priceBadgeStyleId: badgeMeta.badgeStyleId,
+                priceBadgeStylePath: badgeMeta.badgeStylePath,
+                priceBadgeStyleUrl: badgeStyleUrl
+              }
+            }
+          };
+        })
+      };
+    };
+    snapshot.nodes = snapshot.nodes.map((node) => patchNode(node));
+    return snapshot;
+  }
+
   function getSavedPriceStylesOptionsHtml(selectedId = "") {
     const target = String(selectedId || "").trim();
     const list = loadCustomPriceStylesFromLocalStorage();
@@ -874,6 +945,45 @@
     )) || null;
   }
 
+  async function applyImageFillToShapeNode(shapeNode, url, fallbackColor = "") {
+    const shapeClass = String(shapeNode?.getClassName?.() || "");
+    if (shapeClass !== "Rect" && shapeClass !== "Circle") return false;
+    const safeUrl = String(url || "").trim();
+    if (!safeUrl) return false;
+
+    try {
+      shapeNode.setAttr("shapeFillImageUrl", safeUrl);
+      shapeNode.setAttr("shapeFillFallbackColor", String(fallbackColor || ""));
+    } catch (_err) {}
+
+    const image = await loadWorkspaceBadgeImage(safeUrl);
+    if (!image) return false;
+
+    const width = shapeClass === "Circle"
+      ? Math.max(1, Number(shapeNode.radius?.() || 1) * 2)
+      : Math.max(1, Number(shapeNode.width?.() || 1));
+    const height = shapeClass === "Circle"
+      ? Math.max(1, Number(shapeNode.radius?.() || 1) * 2)
+      : Math.max(1, Number(shapeNode.height?.() || 1));
+    const naturalW = Math.max(1, Number(image.naturalWidth || image.width || 1));
+    const naturalH = Math.max(1, Number(image.naturalHeight || image.height || 1));
+
+    if (typeof shapeNode.fillPatternImage === "function") shapeNode.fillPatternImage(null);
+    if (typeof shapeNode.fillPriority === "function") shapeNode.fillPriority("color");
+    if (typeof shapeNode.fillPatternScaleX === "function") shapeNode.fillPatternScaleX(1);
+    if (typeof shapeNode.fillPatternScaleY === "function") shapeNode.fillPatternScaleY(1);
+    if (typeof shapeNode.fillPatternX === "function") shapeNode.fillPatternX(0);
+    if (typeof shapeNode.fillPatternY === "function") shapeNode.fillPatternY(0);
+    if (typeof shapeNode.fill === "function") shapeNode.fill(String(fallbackColor || ""));
+    if (typeof shapeNode.fillPatternImage === "function") shapeNode.fillPatternImage(image);
+    if (typeof shapeNode.fillPatternRepeat === "function") shapeNode.fillPatternRepeat("no-repeat");
+    if (typeof shapeNode.fillPatternScaleX === "function") shapeNode.fillPatternScaleX(width / naturalW);
+    if (typeof shapeNode.fillPatternScaleY === "function") shapeNode.fillPatternScaleY(height / naturalH);
+    if (typeof shapeNode.fill === "function") shapeNode.fill("transparent");
+    if (typeof shapeNode.fillPriority === "function") shapeNode.fillPriority("pattern");
+    return true;
+  }
+
   async function applyBadgeStyleToGroup(group, styleMeta) {
     const shapeNode = getBadgeShapeNode(group);
     if (!shapeNode) return false;
@@ -912,24 +1022,8 @@
       return true;
     }
 
-    const image = await loadWorkspaceBadgeImage(previewUrl);
-    if (!image) return false;
-
-    const width = shapeClass === "Circle"
-      ? Math.max(1, Number(shapeNode.radius?.() || 1) * 2)
-      : Math.max(1, Number(shapeNode.width?.() || 1));
-    const height = shapeClass === "Circle"
-      ? Math.max(1, Number(shapeNode.radius?.() || 1) * 2)
-      : Math.max(1, Number(shapeNode.height?.() || 1));
-    const naturalW = Math.max(1, Number(image.naturalWidth || image.width || 1));
-    const naturalH = Math.max(1, Number(image.naturalHeight || image.height || 1));
-
-    if (typeof shapeNode.fillPatternImage === "function") shapeNode.fillPatternImage(image);
-    if (typeof shapeNode.fillPatternRepeat === "function") shapeNode.fillPatternRepeat("no-repeat");
-    if (typeof shapeNode.fillPatternScaleX === "function") shapeNode.fillPatternScaleX(width / naturalW);
-    if (typeof shapeNode.fillPatternScaleY === "function") shapeNode.fillPatternScaleY(height / naturalH);
-    if (typeof shapeNode.fill === "function") shapeNode.fill("transparent");
-    if (typeof shapeNode.fillPriority === "function") shapeNode.fillPriority("pattern");
+    const applied = await applyImageFillToShapeNode(shapeNode, previewUrl, solidFill);
+    if (!applied) return false;
     if (typeof shapeNode.stroke === "function") shapeNode.stroke("transparent");
     if (typeof shapeNode.strokeWidth === "function") shapeNode.strokeWidth(0);
     return true;
@@ -1239,33 +1333,68 @@
     nextWorkspaceLoadStamp();
   }
 
-  function syncTransformerForSelectedNode(node) {
+  function getWorkspaceSelectedNodes() {
+    const ws = getWorkspace();
+    const list = Array.isArray(ws?.selectedNodes) ? ws.selectedNodes.filter(Boolean) : [];
+    if (list.length) return list;
+    return ws?.selectedNode ? [ws.selectedNode].filter(Boolean) : [];
+  }
+
+  function syncTransformerForSelectedNode(selection) {
     const ws = getWorkspace();
     const transformer = ws?.transformer;
     if (!transformer || !window.Konva) return;
+    const nodes = Array.isArray(selection)
+      ? selection.filter(Boolean)
+      : [selection].filter(Boolean);
+    const node = nodes.length === 1 ? nodes[0] : null;
     const isRawLine = node instanceof window.Konva.Line;
     const isLineBox = isWorkspaceLineBox(node);
-    transformer.keepRatio(!(isRawLine || isLineBox));
+    transformer.keepRatio(nodes.length > 1 ? true : !(isRawLine || isLineBox));
     transformer.rotateEnabled(true);
     transformer.enabledAnchors(
-      isRawLine
+      nodes.length > 1
+        ? DEFAULT_TRANSFORMER_ANCHORS
+        : isRawLine
         ? LINE_TRANSFORMER_ANCHORS
         : (isLineBox ? LINE_BOX_TRANSFORMER_ANCHORS : DEFAULT_TRANSFORMER_ANCHORS)
     );
     transformer.centeredScaling(false);
-    transformer.padding(isRawLine ? LINE_TRANSFORMER_PADDING : DEFAULT_TRANSFORMER_PADDING);
+    transformer.padding(nodes.length > 1 ? DEFAULT_TRANSFORMER_PADDING : (isRawLine ? LINE_TRANSFORMER_PADDING : DEFAULT_TRANSFORMER_PADDING));
   }
 
-  function selectWorkspaceNode(node) {
+  function selectWorkspaceNode(node, options = {}) {
     const ws = getWorkspace();
     if (!ws.transformer || !ws.layer) return;
-    ws.selectedNode = node || null;
-    syncTransformerForSelectedNode(node || null);
-    ws.transformer.nodes(node ? [node] : []);
+    const additive = !!options.additive;
+    const toggle = options.toggle !== false;
+    const currentNodes = getWorkspaceSelectedNodes();
+    let nextNodes = [];
+    if (additive) {
+      if (!node) {
+        nextNodes = currentNodes.slice();
+      } else if (currentNodes.includes(node)) {
+        nextNodes = toggle ? currentNodes.filter((item) => item !== node) : currentNodes.slice();
+      } else {
+        nextNodes = [...currentNodes, node];
+      }
+    } else {
+      nextNodes = node ? [node] : [];
+    }
+    ws.multiDragState = null;
+    ws.selectedNodes = nextNodes;
+    ws.selectedNode = nextNodes.length ? nextNodes[nextNodes.length - 1] : null;
+    syncTransformerForSelectedNode(nextNodes);
+    ws.transformer.nodes(nextNodes);
     try { ws.transformer.forceUpdate?.(); } catch (_err) {}
-    setWorkspaceSelectedLabel(node ? (node.getAttr("workspaceLabel") || node.getClassName() || "element") : "brak");
-    syncTextStyleControlsFromNode(node || null);
-    syncBadgeColorControlFromWorkspace(node || null);
+    if (nextNodes.length > 1) {
+      setWorkspaceSelectedLabel(`zaznaczono ${nextNodes.length} elementy`);
+    } else {
+      const activeNode = nextNodes[0] || null;
+      setWorkspaceSelectedLabel(activeNode ? (activeNode.getAttr("workspaceLabel") || activeNode.getClassName() || "element") : "brak");
+    }
+    syncTextStyleControlsFromNode(ws.selectedNode || null);
+    syncBadgeColorControlFromWorkspace(ws.selectedNode || null);
     ws.layer.batchDraw();
   }
 
@@ -1301,8 +1430,8 @@
     const transformer = new window.Konva.Transformer({
       rotateEnabled: true,
       keepRatio: true,
-      rotationSnaps: [0, 90, 180, 270],
-      rotationSnapTolerance: 8,
+      rotationSnaps: [],
+      rotationSnapTolerance: 0,
       enabledAnchors: DEFAULT_TRANSFORMER_ANCHORS,
       borderStroke: "#22d3ee",
       anchorStroke: "#22d3ee",
@@ -1311,7 +1440,8 @@
       boundBoxFunc: (oldBox, newBox) => {
         const stageW = Number(getWorkspace().stage?.width?.() || MODULE_BASE_WIDTH);
         const stageH = Number(getWorkspace().stage?.height?.() || MODULE_BASE_HEIGHT);
-        const selectedNode = getWorkspace().selectedNode;
+        const selectedNodes = typeof transformer.nodes === "function" ? (transformer.nodes() || []) : [];
+        const selectedNode = selectedNodes.length === 1 ? selectedNodes[0] : null;
         const isLine = !!(window.Konva && selectedNode instanceof window.Konva.Line);
         const activeAnchor = String(transformer.getActiveAnchor?.() || "");
         const isLineVerticalResize = activeAnchor === "top-center" || activeAnchor === "bottom-center";
@@ -1386,7 +1516,23 @@
       );
       if (isTransformerHandle) return;
       const target = resolveSelectableTarget(rawTarget);
-      selectWorkspaceNode(target);
+      const isAdditiveSelection = !!(event?.evt?.shiftKey);
+      const currentSelection = getWorkspaceSelectedNodes();
+      const alreadySelected = !!target && currentSelection.includes(target);
+      if (isAdditiveSelection && !target) return;
+      if (!isAdditiveSelection && alreadySelected) {
+        ws.selectedNode = target;
+        syncTransformerForSelectedNode(currentSelection);
+        ws.transformer.nodes(currentSelection);
+        syncTextStyleControlsFromNode(target);
+        syncBadgeColorControlFromWorkspace(target);
+        ws.layer.batchDraw();
+        return;
+      }
+      selectWorkspaceNode(target, {
+        additive: isAdditiveSelection,
+        toggle: true
+      });
     });
 
     stage.on("dblclick dbltap", (event) => {
@@ -1398,10 +1544,23 @@
       if (editableText) beginTextEdit(editableText);
     });
 
+    transformer.on("transformend", () => {
+      const selectedNodes = getWorkspaceSelectedNodes();
+      if (selectedNodes.length <= 1) return;
+      selectedNodes.forEach((node) => {
+        if (!node || !node.getAttr?.("workspaceSelectable")) return;
+        normalizeScalableNode(node);
+      });
+      try { transformer.forceUpdate?.(); } catch (_err) {}
+      layer.batchDraw();
+    });
+
     state.workspace.stage = stage;
     state.workspace.layer = layer;
     state.workspace.transformer = transformer;
     state.workspace.selectedNode = null;
+    state.workspace.selectedNodes = [];
+    state.workspace.multiDragState = null;
     state.workspace.viewportInitialized = false;
 
     if (!state.workspace.resizeBound) {
@@ -1451,13 +1610,14 @@
     const maxHeight = Math.max(60, stageH - padding * 2);
     const minFontSize = Math.max(12, Number(options.minFontSize || 16));
     const shouldWrap = options.wrap !== false;
+    const wrapMode = String(options.wrapMode || "").trim() || getWorkspacePreferredWrapModeForTextNode(node);
     const textValue = typeof node.text === "function" ? String(node.text() || "") : "";
     const preferredWidth = Math.max(
       140,
       Math.min(maxWidth, Number(options.preferredWidth || maxWidth))
     );
 
-    if (shouldWrap && typeof node.wrap === "function") node.wrap("word");
+    if (shouldWrap && typeof node.wrap === "function") node.wrap(wrapMode);
     if (typeof node.width === "function") {
       const currentWidth = Number(node.width() || 0);
       const shouldSetWidth = !!options.forceWidth || textValue.length > 18 || currentWidth > maxWidth;
@@ -1479,6 +1639,13 @@
       if (nextFontSize <= minFontSize) break;
       nextFontSize -= 1;
       node.fontSize(nextFontSize);
+    }
+
+    if (typeof node.height === "function") {
+      node.height(getWorkspaceTextNodeAutoHeight(
+        node,
+        Math.max(24, Math.ceil(Number(node.fontSize() || nextFontSize || 12) * Math.max(0.7, Number(node.lineHeight?.() || 1.2))))
+      ));
     }
   }
 
@@ -1529,18 +1696,168 @@
       .reduce((maxWidth, line) => Math.max(maxWidth, Math.ceil(context.measureText(line || " ").width)), 0);
   }
 
+  function getWorkspaceSharedTextMeasureProbe() {
+    if (!window.Konva) return null;
+    const destroyed = !!(
+      workspaceSharedTextMeasureProbe &&
+      typeof workspaceSharedTextMeasureProbe.isDestroyed === "function" &&
+      workspaceSharedTextMeasureProbe.isDestroyed()
+    );
+    if (!workspaceSharedTextMeasureProbe || destroyed) {
+      workspaceSharedTextMeasureProbe = new window.Konva.Text({
+        listening: false,
+        visible: false
+      });
+    }
+    return workspaceSharedTextMeasureProbe;
+  }
+
+  function measureWorkspaceTextNodeWrappedLineCount(node, fallback = 1) {
+    const safeFallback = Math.max(1, Number(fallback) || 1);
+    if (!(node instanceof window.Konva.Text)) return safeFallback;
+    try {
+      const probe = getWorkspaceSharedTextMeasureProbe();
+      if (!probe) return safeFallback;
+      probe.setAttrs({
+        text: String(node.text?.() || ""),
+        fontFamily: String(node.fontFamily?.() || "Arial"),
+        fontSize: Math.max(1, Number(node.fontSize?.() || 12)),
+        fontStyle: String(node.fontStyle?.() || ""),
+        textDecoration: String(node.textDecoration?.() || ""),
+        lineHeight: Math.max(0.1, Number(node.lineHeight?.() || 1)),
+        letterSpacing: Number(node.letterSpacing?.() || 0),
+        wrap: String(node.wrap?.() || "word"),
+        align: String(node.align?.() || "left"),
+        width: Math.max(1, Number(node.width?.() || 1)),
+        height: 100000,
+        padding: Number(node.padding?.() || 0),
+        stroke: String(node.stroke?.() || ""),
+        strokeWidth: Number(node.strokeWidth?.() || 0),
+        listening: false
+      });
+      probe.getClientRect();
+      return Math.max(1, (Array.isArray(probe.textArr) ? probe.textArr.length : 0) || safeFallback);
+    } catch (_err) {
+      return safeFallback;
+    }
+  }
+
   function getWorkspaceTextNodeAutoHeight(node, fallback = 0) {
     if (!(node instanceof window.Konva.Text)) return Math.max(1, Number(fallback || 1));
-    const box = typeof node.getClientRect === "function"
-      ? node.getClientRect({ skipTransform: true, skipStroke: false })
-      : null;
-    const measuredHeight = Number(box?.height || 0);
-    const currentHeight = Number(node.height?.() || 0);
-    const fontHeight = Math.max(
+    const fallbackLineCount = Array.isArray(node.textArr) && node.textArr.length
+      ? node.textArr.length
+      : Math.max(1, String(node.text?.() || "").split("\n").length);
+    const fontSize = Math.max(
       1,
-      Math.ceil(Number(node.fontSize?.() || 12) * Math.max(1, Number(node.lineHeight?.() || 1)))
+      Number(node.fontSize?.() || 12)
     );
-    return Math.max(1, Math.ceil(measuredHeight || currentHeight || Number(fallback || fontHeight) || fontHeight));
+    const lineHeightFactor = Math.max(
+      0.1,
+      Number(node.lineHeight?.() || 1)
+    );
+    const fallbackTextHeight = Math.max(
+      1,
+      Number(node.textHeight || 0) || fontSize
+    );
+    const lineCount = measureWorkspaceTextNodeWrappedLineCount(node, fallbackLineCount);
+    const minHeight = Math.max(1, Number(fallback || 1));
+    return Math.max(minHeight, Math.ceil(lineCount * fallbackTextHeight * lineHeightFactor));
+  }
+
+  function getWorkspacePreferredWrapModeForTextNode(node) {
+    if (!(node instanceof window.Konva.Text)) return "word";
+    const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+    const textValue = String(node.text?.() || "");
+    if (kind === "indexText" || kind === "currencySymbol") return "none";
+    if (!kind || kind === "userText" || kind === "text" || kind === "nameText" || kind === "packageText") {
+      return /[\s\r\n]/.test(textValue) ? "word" : "char";
+    }
+    const currentWrap = String(node.wrap?.() || "").trim().toLowerCase();
+    if (currentWrap === "none" || currentWrap === "word" || currentWrap === "char") return currentWrap;
+    return /[\s\r\n]/.test(textValue) ? "word" : "char";
+  }
+
+  function isWorkspaceCanvaLikeResizableTextNode(node) {
+    if (!(node instanceof window.Konva.Text)) return false;
+    const parent = typeof node.getParent === "function" ? node.getParent() : null;
+    if (parent?.getAttr?.("workspaceKind") === "priceGroup") return false;
+    const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+    if (kind === "indexText" || kind === "currencySymbol") return false;
+    return !kind || kind === "userText" || kind === "text" || kind === "nameText" || kind === "packageText";
+  }
+
+  function getWorkspaceBoundedDragPosition(node, position) {
+    let nextPos = {
+      x: Number(position?.x || 0),
+      y: Number(position?.y || 0)
+    };
+    const boundFn = typeof node?.dragBoundFunc === "function" ? node.dragBoundFunc() : null;
+    if (typeof boundFn !== "function") return nextPos;
+    try {
+      const bounded = boundFn(nextPos);
+      if (bounded && Number.isFinite(Number(bounded.x)) && Number.isFinite(Number(bounded.y))) {
+        nextPos = {
+          x: Number(bounded.x),
+          y: Number(bounded.y)
+        };
+      }
+    } catch (_err) {}
+    return nextPos;
+  }
+
+  function beginWorkspaceMultiDrag(node) {
+    const ws = getWorkspace();
+    const selectedNodes = getWorkspaceSelectedNodes();
+    if (!ws || selectedNodes.length <= 1 || !selectedNodes.includes(node)) {
+      if (ws) ws.multiDragState = null;
+      return;
+    }
+    ws.multiDragState = {
+      leader: node,
+      leaderStartX: Number(node.x?.() || 0),
+      leaderStartY: Number(node.y?.() || 0),
+      members: selectedNodes
+        .filter((item) => item && item !== node && typeof item.x === "function" && typeof item.y === "function")
+        .map((item) => ({
+          node: item,
+          startX: Number(item.x() || 0),
+          startY: Number(item.y() || 0)
+        }))
+    };
+  }
+
+  function syncWorkspaceMultiDrag(node) {
+    const ws = getWorkspace();
+    const multiDragState = ws?.multiDragState;
+    if (!multiDragState || multiDragState.leader !== node) return false;
+    const dx = Number(node.x?.() || 0) - Number(multiDragState.leaderStartX || 0);
+    const dy = Number(node.y?.() || 0) - Number(multiDragState.leaderStartY || 0);
+    let moved = false;
+    multiDragState.members.forEach((entry) => {
+      if (!entry?.node) return;
+      const nextPos = getWorkspaceBoundedDragPosition(entry.node, {
+        x: Number(entry.startX || 0) + dx,
+        y: Number(entry.startY || 0) + dy
+      });
+      if (typeof entry.node.x === "function") entry.node.x(nextPos.x);
+      if (typeof entry.node.y === "function") entry.node.y(nextPos.y);
+      const kind = String(entry.node.getAttr?.("workspaceKind") || "").trim();
+      if (isBadgeWorkspaceKind(kind)) {
+        try { syncPriceGroupToBadgeNode(entry.node, { useStoredLayout: true }); } catch (_err) {}
+      }
+      moved = true;
+    });
+    if (moved) {
+      try { ws.transformer?.forceUpdate?.(); } catch (_err) {}
+    }
+    return moved;
+  }
+
+  function clearWorkspaceMultiDrag(node = null) {
+    const ws = getWorkspace();
+    if (!ws?.multiDragState) return;
+    if (node && ws.multiDragState.leader && ws.multiDragState.leader !== node) return;
+    ws.multiDragState = null;
   }
 
   function syncWorkspaceTextLayout(node, options = {}) {
@@ -2301,10 +2618,31 @@
     if (node instanceof window.Konva.Text) {
       const currentWidth = Number(node.width?.() || 0);
       const currentFontSize = Number(node.fontSize?.() || 0);
-      if (currentWidth > 0 && typeof node.width === "function") node.width(Math.max(20, currentWidth * sx));
-      if (currentFontSize > 0 && typeof node.fontSize === "function") node.fontSize(Math.max(8, currentFontSize * sy));
+      const currentHeight = Number(node.height?.() || 0);
+      const currentPadding = Number(node.padding?.() || 0);
+      const wrapMode = getWorkspacePreferredWrapModeForTextNode(node);
+      const nextWidth = currentWidth > 0
+        ? Math.max(20, currentWidth * sx)
+        : Math.max(24, Math.ceil(getWorkspaceMeasuredTextWidth(node) + 12));
+      const nextFontSize = currentFontSize > 0
+        ? Math.max(8, currentFontSize * sy)
+        : 8;
+      if (typeof node.wrap === "function") node.wrap(wrapMode);
+      if (typeof node.width === "function") node.width(nextWidth);
+      if (typeof node.fontSize === "function") node.fontSize(nextFontSize);
+      if (typeof node.padding === "function" && currentPadding > 0) {
+        node.padding(Math.max(0, currentPadding * Math.max(sx, sy)));
+      }
       node.scaleX(1);
       node.scaleY(1);
+      if (typeof node.height === "function") {
+        const minHeight = Math.max(24, Math.ceil(nextFontSize * Math.max(0.7, Number(node.lineHeight?.() || 1.2))));
+        if (wrapMode === "none") {
+          node.height(Math.max(minHeight, currentHeight > 0 ? currentHeight * sy : minHeight));
+        } else {
+          node.height(getWorkspaceTextNodeAutoHeight(node, minHeight));
+        }
+      }
       return;
     }
 
@@ -2512,18 +2850,22 @@
       const stageW = Number(ws.stage.width() || MODULE_BASE_WIDTH);
       const kind = String(node.getAttr?.("workspaceKind") || "").trim();
       const isGenericUserText = !kind || kind === "userText" || kind === "text";
+      const wrapMode = getWorkspacePreferredWrapModeForTextNode(node);
       const hasLineBreak = /[\r\n]/.test(String(node.text?.() || ""));
+      const shouldWrap = wrapMode !== "none";
       if (isGenericUserText) {
         fitTextNodeIntoWorkspace(node, {
           maxWidth: Math.round(stageW * (hasLineBreak ? 0.72 : 0.52)),
           preferredWidth: Math.round(stageW * (hasLineBreak ? 0.54 : 0.34)),
           fontSize: Number(node.fontSize?.() || 24),
           minFontSize: 12,
-          wrap: hasLineBreak
+          wrap: shouldWrap,
+          wrapMode,
+          forceWidth: shouldWrap
         });
         syncWorkspaceTextLayout(node, {
-          wrapMode: hasLineBreak ? "word" : "none",
-          tightWidth: !hasLineBreak,
+          wrapMode,
+          tightWidth: !shouldWrap,
           maxWidth: Math.round(stageW * (hasLineBreak ? 0.72 : 0.52)),
           minHeight: Math.max(24, Math.ceil(Number(node.fontSize?.() || 24) * 1.15))
         });
@@ -2564,9 +2906,11 @@
 
   function getEditableTextNodeFromSelected() {
     const ws = ensureWorkspaceEditor();
-    if (!ws?.selectedNode) return null;
-    if (ws.selectedNode instanceof window.Konva.Text) return ws.selectedNode;
-    return collectTextNodes(ws.selectedNode)[0] || null;
+    const selectedNodes = getWorkspaceSelectedNodes();
+    if (selectedNodes.length !== 1) return null;
+    const [selectedNode] = selectedNodes;
+    if (selectedNode instanceof window.Konva.Text) return selectedNode;
+    return collectTextNodes(selectedNode)[0] || null;
   }
 
   function computeFitSize(naturalW, naturalH, stageW, stageH, maxScale = 0.42) {
@@ -2682,6 +3026,36 @@
     if (typeof node.draggable === "function") node.draggable(true);
     if (typeof node.on === "function") {
       node.on("transformstart", () => {
+        if (node instanceof window.Konva.Text) {
+          const selectedNodes = getWorkspaceSelectedNodes();
+          const isSingleSelectedText = selectedNodes.length === 1 && selectedNodes[0] === node;
+          if (isSingleSelectedText) {
+            const activeAnchor = String(ws.transformer?.getActiveAnchor?.() || "");
+            const pointer = ws.stage?.getPointerPosition?.() || null;
+            const baseX = Number(node.x?.() || 0);
+            const baseY = Number(node.y?.() || 0);
+            const baseWidth = Math.max(24, Number(node.width?.() || 24));
+            node.__workspaceTextResizeState = {
+              x: baseX,
+              y: baseY,
+              width: baseWidth,
+              height: Math.max(24, Number(node.height?.() || 24)),
+              liveHeight: Math.max(24, Number(node.height?.() || 24)),
+              fontSize: Math.max(8, Number(node.fontSize?.() || 8)),
+              wrap: getWorkspacePreferredWrapModeForTextNode(node),
+              keepRatio: typeof ws.transformer?.keepRatio === "function" ? !!ws.transformer.keepRatio() : true,
+              activeAnchor,
+              startPointerX: pointer ? Number(pointer.x) || 0 : (baseX + (baseWidth / 2)),
+              rightEdge: baseX + baseWidth,
+              centerX: baseX + (baseWidth / 2),
+              padding: Math.max(0, Number(node.padding?.() || 0))
+            };
+            if (isWorkspaceCanvaLikeResizableTextNode(node) && typeof ws.transformer?.keepRatio === "function" && activeAnchor !== "rotater") {
+              ws.transformer.keepRatio(false);
+            }
+            try { node.setAttr("workspaceTransformAnchor", activeAnchor); } catch (_err) {}
+          }
+        }
         if (node instanceof window.Konva.Line) {
           const endpoints = getLineAbsoluteEndpoints(node);
           try { node.setAttr("workspaceLineTransformStart", endpoints || null); } catch (_err) {}
@@ -2697,6 +3071,247 @@
         if (isBadgeWorkspaceKind(kind)) captureBadgePriceLayoutState(node);
       });
       node.on("transform", () => {
+        if (node instanceof window.Konva.Text) {
+          const selectedNodes = getWorkspaceSelectedNodes();
+          const isSingleSelectedText = selectedNodes.length === 1 && selectedNodes[0] === node;
+          const activeAnchor = String(node.getAttr?.("workspaceTransformAnchor") || ws.transformer?.getActiveAnchor?.() || "");
+          if (isSingleSelectedText && activeAnchor && activeAnchor !== "rotater") {
+            const oldPos = typeof node.absolutePosition === "function"
+              ? node.absolutePosition()
+              : { x: Number(node.x?.() || 0), y: Number(node.y?.() || 0) };
+            let anchorBox = null;
+            try {
+              anchorBox = node.getClientRect({ relativeTo: ws.layer, skipShadow: true });
+            } catch (_err) {
+              anchorBox = null;
+            }
+            const anchorGuide = anchorBox ? {
+              left: Number(anchorBox.x || 0),
+              right: Number(anchorBox.x || 0) + Number(anchorBox.width || 0),
+              centerX: Number(anchorBox.x || 0) + (Number(anchorBox.width || 0) / 2),
+              top: Number(anchorBox.y || 0),
+              bottom: Number(anchorBox.y || 0) + Number(anchorBox.height || 0),
+              centerY: Number(anchorBox.y || 0) + (Number(anchorBox.height || 0) / 2)
+            } : null;
+            const resizeState = node.__workspaceTextResizeState || {
+              x: Number(node.x?.() || 0),
+              y: Number(node.y?.() || 0),
+              width: Math.max(24, Number(node.width?.() || 24)),
+              height: Math.max(24, Number(node.height?.() || 24)),
+              liveHeight: Math.max(24, Number(node.height?.() || 24)),
+              fontSize: Math.max(8, Number(node.fontSize?.() || 8)),
+              wrap: getWorkspacePreferredWrapModeForTextNode(node),
+              padding: Math.max(0, Number(node.padding?.() || 0)),
+              rightEdge: Number(node.x?.() || 0) + Math.max(24, Number(node.width?.() || 24)),
+              centerX: Number(node.x?.() || 0) + (Math.max(24, Number(node.width?.() || 24)) / 2)
+            };
+            const scaleX = Math.max(0.001, Math.abs(Number(node.scaleX?.() || 1)));
+            const scaleY = Math.max(0.001, Math.abs(Number(node.scaleY?.() || 1)));
+            const wrapMode = resizeState.wrap || getWorkspacePreferredWrapModeForTextNode(node);
+            const widthOnlyAnchor = activeAnchor === "middle-left" || activeAnchor === "middle-right";
+            const heightOnlyAnchor = activeAnchor === "top-center" || activeAnchor === "bottom-center";
+            const isCanvaLikeTextNode = isWorkspaceCanvaLikeResizableTextNode(node);
+            const pointer = ws.stage?.getPointerPosition?.() || null;
+
+            if (isCanvaLikeTextNode && Math.abs(Number(node.rotation?.() || 0)) < 0.01 && pointer) {
+              const minWidth = Math.max(40, Math.ceil((Number(resizeState.padding || 0) * 2) + 24));
+              const minFontSize = 8;
+              const minPadding = 0;
+              const deltaX = (Number(pointer.x) || 0) - (Number(resizeState.startPointerX || 0));
+              const isCornerAnchor = (
+                activeAnchor === "top-left" ||
+                activeAnchor === "top-right" ||
+                activeAnchor === "bottom-left" ||
+                activeAnchor === "bottom-right"
+              );
+              const isLeftAnchor = activeAnchor.includes("left");
+              const isRightAnchor = activeAnchor.includes("right");
+              const isCenterAnchor = activeAnchor.includes("center");
+              let nextWidth = Math.max(24, Number(resizeState.width || 24));
+              let nextX = Number(resizeState.x || 0);
+              let nextFontSize = Math.max(8, Number(resizeState.fontSize || 8));
+              let nextPadding = Math.max(0, Number(resizeState.padding || 0));
+
+              if (isCornerAnchor && isRightAnchor) {
+                nextWidth = Math.max(minWidth, Number(resizeState.width || 24) + deltaX);
+                const widthScale = nextWidth / Math.max(1, Number(resizeState.width || 1));
+                nextFontSize = Math.max(minFontSize, Number(resizeState.fontSize || 8) * widthScale);
+                nextPadding = Math.max(minPadding, Number(resizeState.padding || 0) * widthScale);
+              } else if (isCornerAnchor && isLeftAnchor) {
+                nextWidth = Math.max(minWidth, Number(resizeState.width || 24) - deltaX);
+                const widthScale = nextWidth / Math.max(1, Number(resizeState.width || 1));
+                nextX = Number(resizeState.rightEdge || 0) - nextWidth;
+                nextFontSize = Math.max(minFontSize, Number(resizeState.fontSize || 8) * widthScale);
+                nextPadding = Math.max(minPadding, Number(resizeState.padding || 0) * widthScale);
+              } else if (isRightAnchor) {
+                nextWidth = Math.max(minWidth, Number(resizeState.width || 24) + deltaX);
+              } else if (isLeftAnchor) {
+                nextWidth = Math.max(minWidth, Number(resizeState.width || 24) - deltaX);
+                nextX = Number(resizeState.rightEdge || 0) - nextWidth;
+              } else if (isCenterAnchor) {
+                nextWidth = Math.max(minWidth, Number(resizeState.width || 24) + (deltaX * 2));
+                nextX = Number(resizeState.centerX || 0) - (nextWidth / 2);
+              }
+
+              if (typeof node.wrap === "function") node.wrap(wrapMode);
+              if (typeof node.setAttrs === "function") {
+                node.setAttrs({
+                  x: nextX,
+                  y: Number(resizeState.y || 0),
+                  width: nextWidth,
+                  scaleX: 1,
+                  scaleY: 1
+                });
+              } else {
+                if (typeof node.x === "function") node.x(nextX);
+                if (typeof node.y === "function") node.y(Number(resizeState.y || 0));
+                if (typeof node.width === "function") node.width(nextWidth);
+                if (typeof node.scaleX === "function") node.scaleX(1);
+                if (typeof node.scaleY === "function") node.scaleY(1);
+              }
+              if (typeof node.fontSize === "function") node.fontSize(nextFontSize);
+              if (typeof node.padding === "function") node.padding(nextPadding);
+              if (typeof node.height === "function") {
+                const minHeight = Math.max(24, Math.ceil(nextFontSize * Math.max(0.7, Number(node.lineHeight?.() || 1.2))));
+                const targetHeight = getWorkspaceTextNodeAutoHeight(node, minHeight);
+                const previousLiveHeight = Math.max(minHeight, Number(resizeState.liveHeight || resizeState.height || minHeight));
+                const smoothedHeight = Math.max(minHeight, Math.ceil(previousLiveHeight + ((targetHeight - previousLiveHeight) * 0.45)));
+                node.height(smoothedHeight);
+                resizeState.liveHeight = smoothedHeight;
+              }
+              try { ws.transformer.forceUpdate?.(); } catch (_err) {}
+              ws.layer.batchDraw();
+              return;
+            }
+
+            let nextWidth = Math.max(24, Number(resizeState.width || 24) * scaleX);
+            let nextFontSize = Math.max(8, Number(resizeState.fontSize || 8));
+
+            if (widthOnlyAnchor) {
+              nextFontSize = Math.max(8, Number(resizeState.fontSize || 8));
+            } else if (heightOnlyAnchor) {
+              nextWidth = Math.max(24, Number(resizeState.width || 24));
+              nextFontSize = isCanvaLikeTextNode
+                ? Math.max(8, Number(resizeState.fontSize || 8))
+                : Math.max(8, Number(resizeState.fontSize || 8) * scaleY);
+            } else {
+              nextFontSize = Math.max(8, Number(resizeState.fontSize || 8) * scaleY);
+            }
+
+            if (typeof node.wrap === "function") node.wrap(wrapMode);
+            if (typeof node.setAttrs === "function") {
+              node.setAttrs({
+                width: nextWidth,
+                scaleX: 1,
+                scaleY: 1
+              });
+            } else {
+              if (typeof node.width === "function") node.width(nextWidth);
+              if (typeof node.scaleX === "function") node.scaleX(1);
+              if (typeof node.scaleY === "function") node.scaleY(1);
+            }
+            if (typeof node.fontSize === "function") node.fontSize(nextFontSize);
+
+            const minHeight = Math.max(24, Math.ceil(nextFontSize * 1.15));
+            if (typeof node.height === "function") {
+              if (wrapMode === "none") {
+                const requestedHeight = heightOnlyAnchor
+                  ? Math.max(minHeight, Number(resizeState.height || minHeight) * scaleY)
+                  : Math.max(minHeight, Number(resizeState.height || minHeight));
+                node.height(requestedHeight);
+                resizeState.liveHeight = requestedHeight;
+              } else {
+                const autoHeight = getWorkspaceTextNodeAutoHeight(node, minHeight);
+                const previousLiveHeight = Math.max(minHeight, Number(resizeState.liveHeight || resizeState.height || minHeight));
+                if (isCanvaLikeTextNode && heightOnlyAnchor) {
+                  const requestedHeight = Math.max(minHeight, Number(resizeState.height || minHeight) * scaleY);
+                  const targetHeight = Math.max(autoHeight, requestedHeight);
+                  node.height(targetHeight);
+                  resizeState.liveHeight = targetHeight;
+                } else {
+                  const smoothedHeight = Math.max(minHeight, Math.ceil(previousLiveHeight + ((autoHeight - previousLiveHeight) * 0.45)));
+                  node.height(smoothedHeight);
+                  resizeState.liveHeight = smoothedHeight;
+                }
+              }
+            }
+
+            if (isCanvaLikeTextNode && Math.abs(Number(node.rotation?.() || 0)) < 0.01) {
+              const baseX = Number(resizeState.x || 0);
+              const baseY = Number(resizeState.y || 0);
+              const baseWidth = Math.max(24, Number(resizeState.width || 24));
+              const baseHeight = Math.max(24, Number(resizeState.height || 24));
+              const nextHeight = Math.max(24, Number(node.height?.() || 24));
+              if (widthOnlyAnchor) {
+                if (activeAnchor === "middle-left" && typeof node.x === "function") {
+                  node.x(baseX + baseWidth - nextWidth);
+                } else if (typeof node.x === "function") {
+                  node.x(baseX);
+                }
+                if (typeof node.y === "function") node.y(baseY);
+                try { ws.transformer.forceUpdate?.(); } catch (_err) {}
+                ws.layer.batchDraw();
+                return;
+              }
+              if (heightOnlyAnchor) {
+                if (typeof node.x === "function") node.x(baseX);
+                if (activeAnchor === "top-center" && typeof node.y === "function") {
+                  node.y(baseY + baseHeight - nextHeight);
+                } else if (typeof node.y === "function") {
+                  node.y(baseY);
+                }
+                try { ws.transformer.forceUpdate?.(); } catch (_err) {}
+                ws.layer.batchDraw();
+                return;
+              }
+            }
+
+            let anchorRestored = false;
+            if (anchorGuide && activeAnchor) {
+              let nextBox = null;
+              try {
+                nextBox = node.getClientRect({ relativeTo: ws.layer, skipShadow: true });
+              } catch (_err) {
+                nextBox = null;
+              }
+              if (nextBox) {
+                let dx = 0;
+                let dy = 0;
+
+                if (activeAnchor.endsWith("left")) {
+                  dx = Number(anchorGuide.right || 0) - (Number(nextBox.x || 0) + Number(nextBox.width || 0));
+                } else if (activeAnchor.endsWith("right")) {
+                  dx = Number(anchorGuide.left || 0) - Number(nextBox.x || 0);
+                } else if (activeAnchor.endsWith("center")) {
+                  dx = Number(anchorGuide.centerX || 0) - (Number(nextBox.x || 0) + (Number(nextBox.width || 0) / 2));
+                }
+
+                const keepVerticalPosition = !!(isCanvaLikeTextNode && widthOnlyAnchor);
+                if (activeAnchor.startsWith("top")) {
+                  dy = Number(anchorGuide.bottom || 0) - (Number(nextBox.y || 0) + Number(nextBox.height || 0));
+                } else if (activeAnchor.startsWith("bottom")) {
+                  dy = Number(anchorGuide.top || 0) - Number(nextBox.y || 0);
+                } else if (activeAnchor.startsWith("middle") && !keepVerticalPosition) {
+                  dy = Number(anchorGuide.centerY || 0) - (Number(nextBox.y || 0) + (Number(nextBox.height || 0) / 2));
+                }
+
+                if ((dx || dy) && typeof node.position === "function") {
+                  node.position({
+                    x: Number(node.x?.() || 0) + dx,
+                    y: Number(node.y?.() || 0) + dy
+                  });
+                }
+                anchorRestored = true;
+              }
+            }
+            if (!anchorRestored && typeof node.absolutePosition === "function") {
+              node.absolutePosition(oldPos);
+            }
+            try { ws.transformer.forceUpdate?.(); } catch (_err) {}
+            ws.layer.batchDraw();
+            return;
+          }
+        }
         if (!(node instanceof window.Konva.Line)) return;
         if (node.getAttr?.("workspaceLineLiveNormalizing")) return;
         const transformAnchor = String(node.getAttr?.("workspaceTransformAnchor") || ws.transformer?.getActiveAnchor?.() || "");
@@ -2716,6 +3331,7 @@
         }
       });
       node.on("dragstart", () => {
+        beginWorkspaceMultiDrag(node);
         const kind = String(node.getAttr?.("workspaceKind") || "").trim();
         if (kind === "priceGroup") {
           try { node.setAttr("badgeAutoLayout", false); } catch (_err) {}
@@ -2724,20 +3340,30 @@
         if (isBadgeWorkspaceKind(kind)) captureBadgePriceLayoutState(node);
       });
       node.on("dragmove", () => {
+        let needsDraw = syncWorkspaceMultiDrag(node);
         const kind = String(node.getAttr?.("workspaceKind") || "").trim();
-        if (!isBadgeWorkspaceKind(kind)) return;
-        if (syncPriceGroupToBadgeNode(node, { useStoredLayout: true })) {
-          ws.layer.batchDraw();
+        if (isBadgeWorkspaceKind(kind) && syncPriceGroupToBadgeNode(node, { useStoredLayout: true })) {
+          needsDraw = true;
         }
+        if (needsDraw) ws.layer.batchDraw();
       });
       node.on("dragend", () => {
+        let needsDraw = syncWorkspaceMultiDrag(node);
         const kind = String(node.getAttr?.("workspaceKind") || "").trim();
-        if (!isBadgeWorkspaceKind(kind)) return;
-        if (syncPriceGroupToBadgeNode(node, { useStoredLayout: true })) {
-          ws.layer.batchDraw();
+        if (isBadgeWorkspaceKind(kind) && syncPriceGroupToBadgeNode(node, { useStoredLayout: true })) {
+          needsDraw = true;
         }
+        clearWorkspaceMultiDrag(node);
+        if (needsDraw) ws.layer.batchDraw();
       });
       node.on("transformend", () => {
+        if (node instanceof window.Konva.Text) {
+          const resizeState = node.__workspaceTextResizeState;
+          if (resizeState && typeof ws.transformer?.keepRatio === "function" && typeof resizeState.keepRatio === "boolean") {
+            ws.transformer.keepRatio(resizeState.keepRatio);
+          }
+          node.__workspaceTextResizeState = null;
+        }
         const transformAnchor = String(node.getAttr?.("workspaceTransformAnchor") || "");
         if (node instanceof window.Konva.Line && transformAnchor === "rotater") {
           node.scaleX(1);
@@ -2891,6 +3517,19 @@
     return [];
   }
 
+  function collectTextNodesFromWorkspaceSelection() {
+    const bucket = [];
+    const seen = new Set();
+    getWorkspaceSelectedNodes().forEach((node) => {
+      collectTextNodes(node).forEach((textNode) => {
+        if (!textNode || seen.has(textNode)) return;
+        seen.add(textNode);
+        bucket.push(textNode);
+      });
+    });
+    return bucket;
+  }
+
   function getTextFormatState(node) {
     const textNode = collectTextNodes(node)[0] || null;
     const fontStyle = String(textNode?.fontStyle?.() || "").toLowerCase();
@@ -2944,13 +3583,14 @@
 
   function toggleSelectedTextFormatting(format) {
     const ws = ensureWorkspaceEditor();
-    if (!ws?.selectedNode) return;
-    const targets = collectTextNodes(ws.selectedNode);
+    const selectedNodes = getWorkspaceSelectedNodes();
+    if (!ws || !selectedNodes.length) return;
+    const targets = collectTextNodesFromWorkspaceSelection();
     if (!targets.length) {
       setSaveStatus("Zaznacz tekst, zeby zmienic jego styl.", "error");
       return;
     }
-    const activeState = getTextFormatState(ws.selectedNode);
+    const activeState = getTextFormatState(ws.selectedNode || selectedNodes[0] || null);
     const enable = !activeState[format];
     targets.forEach((textNode) => {
       const current = getTextFormatState(textNode);
@@ -2966,12 +3606,13 @@
       }
     });
     ws.layer.batchDraw();
-    syncTextFormatButtons(ws.selectedNode);
+    syncTextFormatButtons(ws.selectedNode || selectedNodes[0] || null);
   }
 
   function applyTextStyleToSelected() {
     const ws = ensureWorkspaceEditor();
-    if (!ws || !ws.selectedNode) return;
+    const selectedNodes = getWorkspaceSelectedNodes();
+    if (!ws || !selectedNodes.length) return;
     const fontEl = document.getElementById(TEXT_FONT_ID);
     const colorEl = document.getElementById(TEXT_COLOR_ID);
     const sizeEl = document.getElementById(TEXT_SIZE_ID);
@@ -2980,7 +3621,7 @@
     const nextFont = String(fontEl.value || "Arial").trim() || "Arial";
     const nextColor = String(colorEl.value || "#e5eefb").trim() || "#e5eefb";
     const nextSize = Math.max(6, Math.min(280, Number(sizeEl.value) || 30));
-    if (ws.selectedNode?.getAttr?.("workspaceKind") === "priceGroup") {
+    if (selectedNodes.length === 1 && ws.selectedNode?.getAttr?.("workspaceKind") === "priceGroup") {
       const majorText = ws.selectedNode.findOne((node) => node?.getAttr?.("priceRole") === "major");
       const unitText = ws.selectedNode.findOne((node) => node?.getAttr?.("priceRole") === "unit");
       const minorText = ws.selectedNode.findOne((node) => node?.getAttr?.("priceRole") === "minor");
@@ -2997,7 +3638,7 @@
       ws.layer.batchDraw();
       return;
     }
-    const targets = collectTextNodes(ws.selectedNode);
+    const targets = collectTextNodesFromWorkspaceSelection();
     if (!targets.length) return;
     targets.forEach((textNode) => {
       if (typeof textNode.fontFamily === "function") textNode.fontFamily(nextFont);
@@ -3286,7 +3927,20 @@
     if (!node || typeof node.getClassName !== "function") return null;
     const className = String(node.getClassName() || "");
     const customAttrs = {};
-    ["priceRole", "priceMinorRatio", "priceUnitRatio", "badgeAutoLayout"].forEach((key) => {
+    [
+      "priceRole",
+      "priceMinorRatio",
+      "priceUnitRatio",
+      "badgeAutoLayout",
+      "shapeFillImageUrl",
+      "shapeFillFallbackColor",
+      "priceBadgeStyleId",
+      "priceBadgeStylePath",
+      "priceBadgeStyleUrl",
+      "workspaceSolidFill",
+      "workspaceSolidStroke",
+      "workspaceSolidStrokeWidth"
+    ].forEach((key) => {
       const value = node.getAttr?.(key);
       if (value === undefined || value === null || value === "") return;
       customAttrs[key] = value;
@@ -3788,6 +4442,14 @@
       Object.entries(customAttrs).forEach(([key, value]) => {
         try { node.setAttr(key, value); } catch (_err) {}
       });
+      const fillImageUrl = String(customAttrs.shapeFillImageUrl || customAttrs.priceBadgeStyleUrl || "").trim();
+      if (fillImageUrl) {
+        await applyImageFillToShapeNode(
+          node,
+          fillImageUrl,
+          String(customAttrs.shapeFillFallbackColor || customAttrs.workspaceSolidFill || attrs.fill || "")
+        );
+      }
       return node;
     }
 
@@ -3805,6 +4467,14 @@
       Object.entries(customAttrs).forEach(([key, value]) => {
         try { node.setAttr(key, value); } catch (_err) {}
       });
+      const fillImageUrl = String(customAttrs.shapeFillImageUrl || customAttrs.priceBadgeStyleUrl || "").trim();
+      if (fillImageUrl) {
+        await applyImageFillToShapeNode(
+          node,
+          fillImageUrl,
+          String(customAttrs.shapeFillFallbackColor || customAttrs.workspaceSolidFill || attrs.fill || "")
+        );
+      }
       return node;
     }
 
@@ -4298,9 +4968,7 @@
   }
 
   async function loadPriceStyleToWorkspace(priceStyleDef) {
-    const snapshot = priceStyleDef?.snapshot && typeof priceStyleDef.snapshot === "object"
-      ? cloneJsonSnapshot(priceStyleDef.snapshot)
-      : null;
+    const snapshot = cloneResolvedPriceStyleSnapshot(priceStyleDef);
     if (!hasSnapshotNodes(snapshot)) return false;
     const badgeMeta = {
       id: String(priceStyleDef?.badgeStyleId || "").trim() || "solid",
@@ -4317,9 +4985,7 @@
   }
 
   async function applyPriceStyleToProductWorkspace(priceStyleDef) {
-    const snapshot = priceStyleDef?.snapshot && typeof priceStyleDef.snapshot === "object"
-      ? cloneJsonSnapshot(priceStyleDef.snapshot)
-      : null;
+    const snapshot = cloneResolvedPriceStyleSnapshot(priceStyleDef);
     if (!hasSnapshotNodes(snapshot)) return false;
     const badgeMeta = {
       id: String(priceStyleDef?.badgeStyleId || "").trim() || "solid",
@@ -4491,30 +5157,35 @@
 
   function nudgeSelectedNodeBy(deltaX, deltaY) {
     const ws = ensureWorkspaceEditor();
-    if (!ws || !ws.selectedNode) return false;
-    const node = ws.selectedNode;
-    if (typeof node.x !== "function" || typeof node.y !== "function") return false;
-    const rawX = Number(node.x() || 0) + Number(deltaX || 0);
-    const rawY = Number(node.y() || 0) + Number(deltaY || 0);
-    let nextPos = { x: rawX, y: rawY };
-    const boundFn = typeof node.dragBoundFunc === "function" ? node.dragBoundFunc() : null;
-    if (typeof boundFn === "function") {
-      try {
-        const bounded = boundFn(nextPos);
-        if (bounded && Number.isFinite(Number(bounded.x)) && Number.isFinite(Number(bounded.y))) {
-          nextPos = {
-            x: Number(bounded.x),
-            y: Number(bounded.y)
-          };
-        }
-      } catch (_err) {}
-    }
-    node.x(nextPos.x);
-    node.y(nextPos.y);
-    const kind = String(node.getAttr?.("workspaceKind") || "").trim();
-    if (isBadgeWorkspaceKind(kind)) {
-      try { syncPriceGroupToBadgeNode(node, { useStoredLayout: true }); } catch (_err) {}
-    }
+    const nodes = getWorkspaceSelectedNodes();
+    if (!ws || !nodes.length) return false;
+    let moved = false;
+    nodes.forEach((node) => {
+      if (typeof node?.x !== "function" || typeof node?.y !== "function") return;
+      const rawX = Number(node.x() || 0) + Number(deltaX || 0);
+      const rawY = Number(node.y() || 0) + Number(deltaY || 0);
+      let nextPos = { x: rawX, y: rawY };
+      const boundFn = typeof node.dragBoundFunc === "function" ? node.dragBoundFunc() : null;
+      if (typeof boundFn === "function") {
+        try {
+          const bounded = boundFn(nextPos);
+          if (bounded && Number.isFinite(Number(bounded.x)) && Number.isFinite(Number(bounded.y))) {
+            nextPos = {
+              x: Number(bounded.x),
+              y: Number(bounded.y)
+            };
+          }
+        } catch (_err) {}
+      }
+      node.x(nextPos.x);
+      node.y(nextPos.y);
+      const kind = String(node.getAttr?.("workspaceKind") || "").trim();
+      if (isBadgeWorkspaceKind(kind)) {
+        try { syncPriceGroupToBadgeNode(node, { useStoredLayout: true }); } catch (_err) {}
+      }
+      moved = true;
+    });
+    if (!moved) return false;
     try { ws.transformer?.forceUpdate?.(); } catch (_err) {}
     ws.layer?.batchDraw?.();
     return true;
@@ -4556,8 +5227,11 @@
 
   function deleteSelectedNode() {
     const ws = ensureWorkspaceEditor();
-    if (!ws || !ws.selectedNode) return;
-    ws.selectedNode.destroy();
+    const nodes = getWorkspaceSelectedNodes();
+    if (!ws || !nodes.length) return;
+    nodes.forEach((node) => {
+      try { node.destroy(); } catch (_err) {}
+    });
     selectWorkspaceNode(null);
     ws.layer.batchDraw();
   }
@@ -4717,7 +5391,7 @@
       activeLoadedPriceStyleId = styleId;
       if (priceStyleNameInput) priceStyleNameInput.value = String(styleDef.label || "");
       refreshSavedPriceStylesSelect(styleId);
-      setDraftSnapshotForTab(BUILDER_TAB_PRICE, styleDef.snapshot || buildWorkspaceSnapshot());
+      setDraftSnapshotForTab(BUILDER_TAB_PRICE, cloneResolvedPriceStyleSnapshot(styleDef) || buildWorkspaceSnapshot());
       setSaveStatus(`Wczytano styl ceny: ${String(styleDef.label || styleId)}.`, "default");
       return;
     }

@@ -1,60 +1,35 @@
-// baner-konva.js – BANER 21 × 3 cm (Konva.js)
-
-const DPI = 96;
-const CM_TO_PX = DPI / 2.54;
-
-// Stałe rozmiary banera
-const BANNER_WIDTH_CM = 21;
-const BANNER_HEIGHT_CM = 3;
-
-const BANNER_WIDTH_PX = BANNER_WIDTH_CM * CM_TO_PX;   // ≈ 794 px
-const BANNER_HEIGHT_PX = BANNER_HEIGHT_CM * CM_TO_PX; // ≈ 113 px
+// baner-konva.js – baner skalowany do pelnej szerokosci aktualnej strony
 
 let bannerImage = null;        // surowy <img>
 let bannerDataURL = null;      // gotowy URL
-let bannerAddedPages = [];     // zapis referencji dla usuwania
 
 // ======================================================
 // DODAWANIE BANERA NA STRONĘ KONVA
 // ======================================================
 window.addBannerToPage = function(page) {
   // NIE dodawaj banera do okładki
-  if (page.isCover) return;
+  if (page.isCover) return Promise.resolve(null);
 
-  if (!bannerImage) return;
+  if (!bannerImage || !bannerDataURL) return Promise.resolve(null);
 
-  const layer = page.layer;
-
-  // usuń poprzedni baner
-  layer.getChildren().forEach(n => {
-    if (n.getAttr("name") === "banner") n.destroy();
-  });
-
-  // Konva.Image → MUSI używać dataURL, nie raw image
-  Konva.Image.fromURL(bannerDataURL, img => {
-
-    // Obliczenie skali zachowującej proporcje
-    const scaleX = BANNER_WIDTH_PX / bannerImage.width;
-    const scaleY = BANNER_HEIGHT_PX / bannerImage.height;
-    const scale = Math.min(scaleX, scaleY);
-
-    img.setAttrs({
-      x: 0,
-      y: 0,
-      scaleX: scale,
-      scaleY: scale,
-      name: "banner",
-      draggable: true,              // możesz przesuwać
-      listening: true
+  if (typeof window.addCatalogBannerToPage === "function") {
+    return window.addCatalogBannerToPage(page, {
+      bannerUrl: bannerDataURL,
+      originalSrc: bannerDataURL,
+      editorSrc: bannerDataURL,
+      thumbSrc: bannerDataURL,
+      renderSrc: bannerDataURL
+    }, {
+      sourceWidth: bannerImage.width,
+      sourceHeight: bannerImage.height,
+      resetState: true,
+      clearTransformer: true,
+      moveToTop: true,
+      y: 0
     });
+  }
 
-    layer.add(img);
-    img.moveToTop();
-    page.transformer.nodes([]);     // brak transformera dla banera
-    layer.batchDraw();
-
-    bannerAddedPages.push({ page, img });
-  });
+  return Promise.resolve(null);
 };
 
 // ======================================================
@@ -63,7 +38,7 @@ window.addBannerToPage = function(page) {
 window.importBanner = function() {
   const input = document.getElementById("bannerFileInput");
   const file = input?.files[0];
-  if (!file) return alert("Wybierz plik banera!");
+  if (!file) return;
 
   const reader = new FileReader();
   reader.onload = e => {
@@ -74,11 +49,17 @@ window.importBanner = function() {
       bannerImage = img;
 
       // Dodaj baner na wszystkie istniejące strony (oprócz okładki)
-      pages.forEach(p => {
-        if (!p.isCover) addBannerToPage(p);
+      const targetPages = (Array.isArray(pages) ? pages : []).filter(p => p && !p.isCover);
+      Promise.all(targetPages.map(p => addBannerToPage(p))).finally(() => {
+        const historyStage = document.activeStage || targetPages[0]?.stage || null;
+        if (historyStage && typeof window.dispatchCanvasModified === "function") {
+          window.dispatchCanvasModified(historyStage, {
+            historyMode: "immediate",
+            historySource: "banner-import"
+          });
+        }
       });
 
-      alert("Baner zaimportowany (21×3 cm)");
       input.value = "";
     };
     img.src = bannerDataURL;
@@ -91,16 +72,28 @@ window.importBanner = function() {
 // USUWANIE BANERA (Konva)
 // ======================================================
 window.removeBanner = function() {
-  bannerAddedPages.forEach(({ page, img }) => {
-    img.destroy();
-    page.layer.batchDraw();
+  const targetPages = (Array.isArray(window.pages) ? window.pages : []).filter(p => p && !p.isCover);
+  const changedPages = targetPages.filter((page) => {
+    if (typeof window.removeCatalogBannerFromPage === "function") {
+      return window.removeCatalogBannerFromPage(page, { clearTransformer: true });
+    }
+    const liveBanner = page?.layer?.findOne?.((node) => node?.getAttr?.("name") === "banner");
+    if (!liveBanner) return false;
+    liveBanner.destroy();
+    page.layer?.batchDraw?.();
+    return true;
   });
 
-  bannerAddedPages = [];
   bannerImage = null;
   bannerDataURL = null;
 
-  alert("Baner usunięty");
+  const historyStage = document.activeStage || changedPages[0]?.stage || null;
+  if (historyStage && typeof window.dispatchCanvasModified === "function") {
+    window.dispatchCanvasModified(historyStage, {
+      historyMode: "immediate",
+      historySource: "banner-remove"
+    });
+  }
 };
 
 // ======================================================
@@ -108,28 +101,9 @@ window.removeBanner = function() {
 // ======================================================
 document.addEventListener("DOMContentLoaded", () => {
   const bannerInput = document.getElementById("bannerFileInput");
-  const bannerZone = document.getElementById("bannerUpload");
 
-  if (bannerInput) {
+  if (bannerInput && !bannerInput.dataset.bannerImportBound) {
+    bannerInput.dataset.bannerImportBound = "1";
     bannerInput.addEventListener("change", importBanner);
-  }
-
-  if (bannerZone) {
-    bannerZone.addEventListener("click", () => bannerInput.click());
-
-    ["dragover", "dragenter"].forEach(evt =>
-      bannerZone.addEventListener(evt, e => e.preventDefault())
-    );
-
-    bannerZone.addEventListener("drop", ev => {
-      ev.preventDefault();
-      const file = ev.dataTransfer.files[0];
-      if (file && file.type.startsWith("image/")) {
-        const dt = new DataTransfer();
-        dt.items.add(file);
-        bannerInput.files = dt.files;
-        bannerInput.dispatchEvent(new Event("change"));
-      }
-    });
   }
 });

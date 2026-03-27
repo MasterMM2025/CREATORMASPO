@@ -1251,11 +1251,26 @@ window.openPageEdit = function(page) {
 
   document.getElementById('removeBannerBtn').onclick = () => {
     const targetPage = currentPage && !currentPage.isCover ? currentPage : page;
-    const old = targetPage?.layer?.findOne?.(o => o.getAttr('name') === 'banner');
-    if (old) {
-      old.destroy();
-      targetPage.settings.bannerUrl = null;
-      targetPage.layer.batchDraw();
+    if (!targetPage || targetPage.isCover) return;
+
+    let removed = false;
+    if (typeof window.removeCatalogBannerFromPage === 'function') {
+      removed = window.removeCatalogBannerFromPage(targetPage, { clearTransformer: true });
+    } else {
+      const old = targetPage?.layer?.findOne?.(o => o.getAttr('name') === 'banner');
+      if (old) {
+        old.destroy();
+        targetPage.settings.bannerUrl = null;
+        targetPage.layer.batchDraw();
+        removed = true;
+      }
+    }
+
+    if (removed && typeof window.dispatchCanvasModified === 'function') {
+      window.dispatchCanvasModified(targetPage.stage, {
+        historyMode: 'immediate',
+        historySource: 'page-edit-banner-remove'
+      });
     }
   };
 
@@ -1334,25 +1349,41 @@ document.getElementById('applyPageEditBtn').onclick = () => {
       if (bannerInput.files[0]) {
         const reader = new FileReader();
         reader.onload = e => {
-          Konva.Image.fromURL(e.target.result, img => {
-            const referencePage = currentPage && !currentPage.isCover ? currentPage : page;
-            const scale = Math.min(referencePage.stage.width() / img.width(), 113 / img.height());
-            img.scale({ x: scale, y: scale });
-            img.x(0);
-            img.y(0);
-            img.setAttr("name", "banner");
-            img.draggable(true);
-      
-            targetPages.forEach(p => {
-              if (p.isCover) return;
-      
-              const old = p.layer.findOne(n => n.getAttr("name") === "banner");
-              if (old) old.destroy();
-      
-              p.layer.add(img.clone());
-              p.layer.batchDraw();
+          const bannerSrc = String(e?.target?.result || '').trim();
+          if (!bannerSrc) return;
+          const rawBanner = new Image();
+          rawBanner.onload = () => {
+            const bannerTargets = targetPages.filter(p => p && !p.isCover);
+            Promise.all(bannerTargets.map((targetPage) => {
+              if (typeof window.addCatalogBannerToPage === 'function') {
+                return window.addCatalogBannerToPage(targetPage, {
+                  bannerUrl: bannerSrc,
+                  originalSrc: bannerSrc,
+                  editorSrc: bannerSrc,
+                  thumbSrc: bannerSrc,
+                  renderSrc: bannerSrc
+                }, {
+                  sourceWidth: rawBanner.width,
+                  sourceHeight: rawBanner.height,
+                  resetState: true,
+                  clearTransformer: true,
+                  moveToTop: true,
+                  y: 0
+                });
+              }
+              return Promise.resolve(null);
+            })).finally(() => {
+              bannerInput.value = '';
+              const historyStage = (currentPage && !currentPage.isCover ? currentPage : page)?.stage || bannerTargets[0]?.stage || null;
+              if (historyStage && typeof window.dispatchCanvasModified === 'function') {
+                window.dispatchCanvasModified(historyStage, {
+                  historyMode: 'immediate',
+                  historySource: 'page-edit-banner-apply'
+                });
+              }
             });
-          });
+          };
+          rawBanner.src = bannerSrc;
         };
         reader.readAsDataURL(bannerInput.files[0]);
       }
