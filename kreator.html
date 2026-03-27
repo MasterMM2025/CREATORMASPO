@@ -5,12 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Kreator PDF – Katalog produktów</title>
   <link rel="stylesheet" href="kreator.css?v=20260307-ui-scale-v28">
+  <link rel="stylesheet" href="fastcreator.css?v=20260327-fastcreator-v25">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style></style>
   <script>
     window.APP_FEATURE_FLAGS = Object.assign({}, window.APP_FEATURE_FLAGS || {}, {
-      quickCreator: false
+      quickCreator: true
     });
     window.isQuickCreatorEnabled = function () {
       return window.APP_FEATURE_FLAGS?.quickCreator !== false;
@@ -149,7 +150,7 @@
         <div class="start-hero-sub">Wróć do ostatnich katalogów albo zacznij nowy projekt w kilka minut.</div>
         <div style="margin-top:14px;">
           <button id="startCreateProjectBtn" class="share-btn" style="padding:10px 16px;">
-            <i class="fas fa-plus"></i> Utwórz nowy projekt
+            <i class="fas fa-plus"></i> Utwórz katalog
           </button>
         </div>
       </div>
@@ -209,7 +210,7 @@
             </div>
             <div class="upload-zone" id="bannerUpload">
               <i class="fas fa-image"></i>
-              <p>Przeciągnij baner tutaj lub <span class="file-label" onclick="document.getElementById('bannerFileInput').click()">kliknij, aby wybrać</span></p>
+              <p>Przeciągnij baner tutaj lub <span class="file-label">kliknij, aby wybrać</span></p>
               <input type="file" id="bannerFileInput" accept="image/*">
             </div>
             <div id="bannerPreview" class="upload-preview"></div>
@@ -222,7 +223,7 @@
             </div>
             <div class="upload-zone" id="backgroundUpload">
               <i class="fas fa-fill-drip"></i>
-              <p>Przeciągnij tło tutaj lub <span class="file-label" onclick="document.getElementById('backgroundFileInput').click()">kliknij, aby wybrać</span></p>
+              <p>Przeciągnij tło tutaj lub <span class="file-label">kliknij, aby wybrać</span></p>
               <input type="file" id="backgroundFileInput" accept="image/*">
             </div>
             <div id="backgroundPreview" class="upload-preview"></div>
@@ -253,7 +254,7 @@
             </div>
             <div class="upload-zone" id="coverUpload">
               <i class="fas fa-book"></i>
-              <p>Przeciągnij okładkę tutaj lub <span class="file-label" onclick="document.getElementById('coverFileInput').click()">kliknij, aby wybrać</span></p>
+              <p>Przeciągnij okładkę tutaj lub <span class="file-label">kliknij, aby wybrać</span></p>
               <input type="file" id="coverFileInput" accept="image/*">
             </div>
             <div id="coverPreview" class="upload-preview"></div>
@@ -709,13 +710,13 @@ window.APP_FONT_LOADER_PROMISE = window.loadDynamicFonts();
 <script src="removebg.js?v=20260228-rmbg-local10"></script>
   <script src="page-actions.js?v=20260312-page-actions-v01"></script>
   <script src="page-factory.js?v=20260313-text-anchor-fix-v02"></script>
-  <script src="importdanych.js?v=20260314-history-fix-v43"></script>
+  <script src="importdanych.js?v=20260327-history-local-undo-v45"></script>
 <script src="efekty-zdjec.js?v=20260309-imagefx-dark-v01"></script>
 <script src="magic-layout.js?v=20260315-magic-layout-v03"></script>
 <script src="autosave/project-history-store.js?v=20260314-history-fix-v09"></script>
 <script src="autosave/project-history-ui.js?v=20260301-autosave08"></script>
-<script src="autosave/project-history-bridge.js?v=20260314-autosave-history-v10"></script>
-<script src="autosave/autosave.js?v=20260313-autosave-history-v10"></script>
+<script src="autosave/project-history-bridge.js?v=20260327-autosave-history-v12"></script>
+<script src="autosave/autosave.js?v=20260327-autosave-history-v13"></script>
 <script src="styl-elegancki.js"></script>
 <script src="styles/styl-wlasny/registry.js?v=20260227-rmbg19"></script>
 <script src="styles/styl-wlasny/price-badges/kolko-czerwone.js?v=20260227-rmbg19"></script>
@@ -728,14 +729,14 @@ window.APP_FONT_LOADER_PROMISE = window.loadDynamicFonts();
 <script src="styles/styl-wlasny/module-layouts/styl-numer-3.js?v=20260307-style3-index-gray-italic-v05"></script>
 <script src="styl-wlasny.js?v=20260325-style-price-toggle-v38"></script>
 <script src="new-style.js?v=20260315-new-style-badge-runtime-v34"></script>
-<script src="baner.js"></script>
+<script src="baner.js?v=20260327-banner-history-v02"></script>
 <script src="tlo.js?v=20260307-gradient-bg-v06"></script>
 
 <!-- jeśli plik używa importów – musi być module -->
 <script type="module" src="importdanych-1.js?v=20260313-sidebar-add-fix-v14"></script>
 <script src="przesylaniedanych.js?v=20260318-maspo-upload-v01"></script>
 
-<script src="edycja.js?v=20260315-pageedit-currency-layout-v23"></script>
+<script src="edycja.js?v=20260327-pageedit-banner-history-v25"></script>
 <script src="edycja-1.js?v=20260313-text-toolbar-v03"></script>
 <script src="okladka.js"></script>
 <script src="dodajstrone.js?v=20260304-cross-page-dnd-v1"></script>
@@ -745,7 +746,8 @@ window.APP_FONT_LOADER_PROMISE = window.loadDynamicFonts();
 
 
 <!-- 🔥 3. Save/load system -->
-<script type="module" src="saveall.js?v=20260314-history-restore-v08"></script>
+<script type="module" src="saveall.js?v=20260327-history-restore-v10"></script>
+<script type="module" src="fastcreator.js?v=20260327-fastcreator-v25"></script>
 
   <!-- INICJALIZACJA -->
   <script>

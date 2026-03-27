@@ -1093,6 +1093,43 @@ function cloneProjectSerializableValue(value, fallback = null) {
     }
 }
 
+function parseLoosePriceNumber(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+
+    const raw = String(value).trim();
+    if (!raw) return null;
+
+    const compact = raw
+        .replace(/\s+/g, "")
+        .replace(/[^0-9,.\-]/g, "");
+    if (!compact || compact === "-" || compact === "," || compact === "." || compact === "-," || compact === "-.") {
+        return null;
+    }
+
+    const negative = compact.startsWith("-");
+    const unsigned = negative ? compact.slice(1) : compact;
+    if (!unsigned) return null;
+
+    const lastComma = unsigned.lastIndexOf(",");
+    const lastDot = unsigned.lastIndexOf(".");
+    let normalized = unsigned;
+
+    if (lastComma >= 0 || lastDot >= 0) {
+        const separatorIndex = Math.max(lastComma, lastDot);
+        const integerPart = unsigned.slice(0, separatorIndex).replace(/[.,]/g, "");
+        const decimalPart = unsigned.slice(separatorIndex + 1).replace(/[.,]/g, "");
+        normalized = `${integerPart || "0"}${decimalPart ? `.${decimalPart}` : ""}`;
+    } else {
+        normalized = unsigned.replace(/[.,]/g, "");
+    }
+
+    if (!normalized || normalized === ".") return null;
+
+    const parsed = Number(`${negative ? "-" : ""}${normalized}`);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
 function collectNodeSlotIndexes(node, bucket = new Set()) {
     if (!node || !node.getAttr) return bucket;
     const direct = Number(node.getAttr("slotIndex"));
@@ -3219,6 +3256,320 @@ window.getCatalogPageSettings = function() {
     };
 };
 
+window.getCatalogBannerTransform = function(page, sourceWidth, sourceHeight, options = {}) {
+    const stageWidth = Math.max(1, Number(page?.stage?.width?.() || window.W || 0));
+    const stageHeight = Math.max(1, Number(page?.stage?.height?.() || window.H || 0));
+    const safeSourceWidth = Math.max(1, Number(sourceWidth) || 1);
+    const safeSourceHeight = Math.max(1, Number(sourceHeight) || 1);
+    const targetWidth = Math.max(1, Number(options.targetWidth) || stageWidth);
+    const scale = targetWidth / safeSourceWidth;
+    const renderedWidth = safeSourceWidth * scale;
+    const renderedHeight = safeSourceHeight * scale;
+    const y = Math.max(0, Number(options.y) || 0);
+    return {
+        x: 0,
+        y: Math.min(y, Math.max(0, stageHeight - renderedHeight)),
+        scaleX: scale,
+        scaleY: scale,
+        width: renderedWidth,
+        height: renderedHeight
+    };
+};
+
+window.findCatalogBannerNode = function(page) {
+    const layer = page && page.layer;
+    if (!layer || typeof layer.findOne !== "function") return null;
+    return layer.findOne((node) => {
+        if (!node || !node.getAttr) return false;
+        const nodeName = typeof node.name === "function" ? String(node.name() || "") : String(node.getAttr("name") || "");
+        return node.getAttr("isCatalogBanner") === true || nodeName === "banner";
+    }) || null;
+};
+
+window.getCatalogBannerStateFromNode = function(node) {
+    if (!node) return null;
+    const width = Math.max(
+        1,
+        Number(
+            (typeof node.width === "function" ? node.width() : null) ||
+            (node.getAttr ? node.getAttr("bannerSourceWidth") : null) ||
+            1
+        ) || 1
+    );
+    const height = Math.max(
+        1,
+        Number(
+            (typeof node.height === "function" ? node.height() : null) ||
+            (node.getAttr ? node.getAttr("bannerSourceHeight") : null) ||
+            1
+        ) || 1
+    );
+    return {
+        x: Number(typeof node.x === "function" ? node.x() : 0) || 0,
+        y: Number(typeof node.y === "function" ? node.y() : 0) || 0,
+        scaleX: Number(typeof node.scaleX === "function" ? node.scaleX() : 1) || 1,
+        scaleY: Number(typeof node.scaleY === "function" ? node.scaleY() : 1) || 1,
+        rotation: Number(typeof node.rotation === "function" ? node.rotation() : 0) || 0,
+        width,
+        height
+    };
+};
+
+window.syncCatalogBannerStateFromNode = function(page, node, options = {}) {
+    if (!page || !node) return null;
+    if (!page.settings || typeof page.settings !== "object") page.settings = {};
+
+    const originalSrc = String(
+        options.originalSrc ||
+        options.bannerUrl ||
+        (node.getAttr && (node.getAttr("originalSrc") || node.getAttr("bannerUrl"))) ||
+        (node.getAttr && node.getAttr("editorSrc")) ||
+        (node.getAttr && node.getAttr("thumbSrc")) ||
+        ""
+    ).trim();
+    const editorSrc = String(
+        options.editorSrc ||
+        (node.getAttr && node.getAttr("editorSrc")) ||
+        originalSrc
+    ).trim();
+    const thumbSrc = String(
+        options.thumbSrc ||
+        (node.getAttr && node.getAttr("thumbSrc")) ||
+        editorSrc ||
+        originalSrc
+    ).trim();
+    const state = window.getCatalogBannerStateFromNode(node);
+
+    page.settings.bannerUrl = originalSrc || null;
+    page.settings.bannerEditorSrc = editorSrc || null;
+    page.settings.bannerThumbSrc = thumbSrc || null;
+    page.settings.bannerState = state;
+
+    return state;
+};
+
+window.bindCatalogBannerNode = function(page, node, options = {}) {
+    if (!page || !node) return node;
+
+    const sourceWidth = Math.max(
+        1,
+        Number(
+            options.sourceWidth ||
+            (options.state && options.state.width) ||
+            (typeof node.width === "function" ? node.width() : null) ||
+            (node.getAttr && node.getAttr("bannerSourceWidth")) ||
+            1
+        ) || 1
+    );
+    const sourceHeight = Math.max(
+        1,
+        Number(
+            options.sourceHeight ||
+            (options.state && options.state.height) ||
+            (typeof node.height === "function" ? node.height() : null) ||
+            (node.getAttr && node.getAttr("bannerSourceHeight")) ||
+            1
+        ) || 1
+    );
+    const fallbackState = window.getCatalogBannerTransform(page, sourceWidth, sourceHeight, {
+        y: Number(options.y) || 0
+    });
+    const state = (options.state && typeof options.state === "object") ? options.state : fallbackState;
+
+    if (typeof node.off === "function") {
+        node.off(".catalogBannerState");
+    }
+
+    if (typeof node.width === "function") node.width(sourceWidth);
+    if (typeof node.height === "function") node.height(sourceHeight);
+    if (typeof node.x === "function") node.x(Number(state.x) || 0);
+    if (typeof node.y === "function") node.y(Number(state.y) || 0);
+    if (typeof node.scaleX === "function") node.scaleX(Number(state.scaleX) || 1);
+    if (typeof node.scaleY === "function") node.scaleY(Number(state.scaleY) || 1);
+    if (typeof node.rotation === "function") node.rotation(Number(state.rotation) || 0);
+
+    node.setAttrs({
+        name: "banner",
+        isCatalogBanner: true,
+        bannerUrl: String(options.bannerUrl || options.originalSrc || options.editorSrc || "").trim() || null,
+        bannerSourceWidth: sourceWidth,
+        bannerSourceHeight: sourceHeight,
+        draggable: options.draggable !== false,
+        listening: options.listening !== false
+    });
+    node.dragBoundFunc?.((pos) => pos);
+
+    const originalSrc = String(
+        options.originalSrc ||
+        options.bannerUrl ||
+        (node.getAttr && node.getAttr("originalSrc")) ||
+        (node.getAttr && node.getAttr("editorSrc")) ||
+        ""
+    ).trim();
+    const editorSrc = String(
+        options.editorSrc ||
+        (node.getAttr && node.getAttr("editorSrc")) ||
+        originalSrc
+    ).trim();
+    const thumbSrc = String(
+        options.thumbSrc ||
+        (node.getAttr && node.getAttr("thumbSrc")) ||
+        editorSrc ||
+        originalSrc
+    ).trim();
+
+    if (typeof window.applyImageVariantsToKonvaNode === "function") {
+        window.applyImageVariantsToKonvaNode(node, {
+            original: originalSrc || editorSrc || thumbSrc,
+            editor: editorSrc || originalSrc || thumbSrc,
+            thumb: thumbSrc || editorSrc || originalSrc
+        });
+    } else {
+        node.setAttr("originalSrc", originalSrc || editorSrc || thumbSrc || null);
+        node.setAttr("editorSrc", editorSrc || originalSrc || thumbSrc || null);
+        node.setAttr("thumbSrc", thumbSrc || editorSrc || originalSrc || null);
+    }
+
+    const syncState = () => {
+        window.syncCatalogBannerStateFromNode(page, node, {
+            bannerUrl: originalSrc || editorSrc || thumbSrc,
+            originalSrc,
+            editorSrc,
+            thumbSrc
+        });
+    };
+
+    node.on?.("dragstart.catalogBannerState transformstart.catalogBannerState", () => {
+        page.__activeCatalogBannerNode = node;
+        page.__lastCatalogBannerTransformAt = Date.now();
+        syncState();
+    });
+    node.on?.("dragmove.catalogBannerState transform.catalogBannerState dragend.catalogBannerState transformend.catalogBannerState", syncState);
+    node.on?.("dragend.catalogBannerState transformend.catalogBannerState", () => {
+        page.__activeCatalogBannerNode = node;
+        page.__lastCatalogBannerTransformAt = Date.now();
+    });
+    syncState();
+
+    return node;
+};
+
+window.addCatalogBannerToPage = function(page, source, options = {}) {
+    return new Promise((resolve) => {
+        if (!page || page.isCover || !page.layer || !window.Konva) {
+            resolve(null);
+            return;
+        }
+
+        const sourceConfig = (source && typeof source === "object" && !Array.isArray(source))
+            ? source
+            : { renderSrc: source };
+        const renderSrc = String(
+            sourceConfig.renderSrc ||
+            sourceConfig.editorSrc ||
+            sourceConfig.originalSrc ||
+            sourceConfig.thumbSrc ||
+            ""
+        ).trim();
+        if (!renderSrc) {
+            resolve(null);
+            return;
+        }
+
+        const existingBanner = window.findCatalogBannerNode(page);
+        if (existingBanner) existingBanner.destroy();
+
+        Konva.Image.fromURL(renderSrc, (img) => {
+            if (!img || (typeof img.isDestroyed === "function" && img.isDestroyed())) {
+                resolve(null);
+                return;
+            }
+
+            const sourceWidth = Math.max(
+                1,
+                Number(
+                    options.sourceWidth ||
+                    sourceConfig.sourceWidth ||
+                    img.width?.() ||
+                    img.width ||
+                    1
+                ) || 1
+            );
+            const sourceHeight = Math.max(
+                1,
+                Number(
+                    options.sourceHeight ||
+                    sourceConfig.sourceHeight ||
+                    img.height?.() ||
+                    img.height ||
+                    1
+                ) || 1
+            );
+            const resolvedState = (options.state && typeof options.state === "object")
+                ? options.state
+                : (!options.resetState && page.settings && page.settings.bannerState)
+                    ? page.settings.bannerState
+                    : window.getCatalogBannerTransform(page, sourceWidth, sourceHeight, {
+                        y: Number(options.y) || 0
+                    });
+
+            window.bindCatalogBannerNode(page, img, {
+                state: resolvedState,
+                sourceWidth,
+                sourceHeight,
+                bannerUrl: String(
+                    sourceConfig.bannerUrl ||
+                    sourceConfig.originalSrc ||
+                    renderSrc
+                ).trim(),
+                originalSrc: String(sourceConfig.originalSrc || sourceConfig.bannerUrl || renderSrc).trim(),
+                editorSrc: String(sourceConfig.editorSrc || renderSrc).trim(),
+                thumbSrc: String(sourceConfig.thumbSrc || sourceConfig.editorSrc || renderSrc).trim(),
+                draggable: options.draggable !== false,
+                listening: options.listening !== false,
+                y: Number(options.y) || 0
+            });
+
+            page.layer.add(img);
+            if (options.moveToBottom) {
+                img.moveToBottom?.();
+            } else if (options.moveToTop !== false) {
+                img.moveToTop?.();
+            }
+            if (options.clearTransformer !== false && page.transformer?.nodes) {
+                page.transformer.nodes([]);
+            }
+            page.layer.batchDraw?.();
+            page.transformerLayer?.batchDraw?.();
+            resolve(img);
+        });
+    });
+};
+
+window.removeCatalogBannerFromPage = function(page, options = {}) {
+    if (!page || !page.layer) return false;
+    if (!page.settings || typeof page.settings !== "object") page.settings = {};
+
+    const bannerNode = window.findCatalogBannerNode(page);
+    if (bannerNode) {
+        const transformer = page.transformer;
+        if (options.clearTransformer !== false && transformer?.nodes) {
+            const currentNodes = Array.isArray(transformer.nodes()) ? transformer.nodes() : [];
+            if (currentNodes.includes(bannerNode)) transformer.nodes([]);
+        }
+        bannerNode.destroy();
+    }
+
+    page.settings.bannerUrl = null;
+    page.settings.bannerEditorSrc = null;
+    page.settings.bannerThumbSrc = null;
+    page.settings.bannerState = null;
+
+    page.layer.batchDraw?.();
+    page.transformerLayer?.batchDraw?.();
+    return !!bannerNode;
+};
+
 window.getPdfOrientationForCurrentCatalogPage = function() {
     const orientation = normalizePageOrientation(
         window.CATALOG_PAGE_ORIENTATION || inferPageOrientationFromSize(window.W, window.H)
@@ -4688,10 +5039,19 @@ const perPage = COLS * ROWS;
 
         document.getElementById('fileLabel').textContent = file.name;
         queueCreateZoomSlider();
-        window.dispatchEvent(new Event('excelImported'));
+        const excelImportSummary = {
+            fileName: String(file.name || ""),
+            productCount: Array.isArray(allProducts) ? allProducts.length : 0,
+            pageCount: Array.isArray(pages) ? pages.length : 0,
+            layoutMode: String(window.LAYOUT_MODE || "layout6")
+        };
+        window.lastExcelImportSummary = excelImportSummary;
+        window.dispatchEvent(new CustomEvent('excelImported', { detail: excelImportSummary }));
+        return excelImportSummary;
 
     } catch (e) {
         alert('Błąd: ' + e.message);
+        return null;
     }
 };
 
@@ -4847,6 +5207,9 @@ function createBasePageObjectLocal({ n, prods, stage, layer, transformerLayer, d
             fontFamily: 'Arial',
             textColor: '#000000',
             bannerUrl: null,
+            bannerEditorSrc: null,
+            bannerThumbSrc: null,
+            bannerState: null,
             currency: 'gbp',
             pageBgColor: '#ffffff'
         }
@@ -6724,7 +7087,10 @@ if (btnMagicLayoutAi) {
         }
 
         if (typeof window.applyQuickAiMagicLayoutForPage === "function") {
-            await window.applyQuickAiMagicLayoutForPage(page);
+            await window.applyQuickAiMagicLayoutForPage(page, {
+                randomRounds: 3,
+                maxRandomPresets: (Array.isArray(page?.products) ? page.products.filter(Boolean).length : 0) <= 4 ? 1200 : 900
+            });
         } else if (typeof window.openMagicLayoutForPage === "function") {
             window.openMagicLayoutForPage(page);
         } else {
@@ -8538,7 +8904,7 @@ stage.on("dblclick dbltap", (e) => {
     // === EVENTY TRANSFORMACJI ===
     // Nie wysyłamy canvasModified na dragstart — to powodowało
     // kosztowne snapshoty historii/autosave jeszcze przed realną zmianą.
-	    stage.on('dragend transformend', () => {
+	    stage.on('dragend transformend', (e) => {
         dragMovePendingNode = null;
         dragGuideStopsCache = null;
         dragGuideNode = null;
@@ -8551,9 +8917,50 @@ stage.on("dblclick dbltap", (e) => {
                 page.transformerLayer && page.transformerLayer.batchDraw && page.transformerLayer.batchDraw();
             }
         } catch (_e) {}
+        const eventTarget = e && e.target ? e.target : null;
+        const transformerNodes = (page.transformer && typeof page.transformer.nodes === "function")
+            ? normalizeSelection(page.transformer.nodes())
+            : [];
+        const selectedNodes = normalizeSelection(Array.isArray(page.selectedNodes) ? page.selectedNodes : []);
+        const transformCandidates = normalizeSelection([
+            eventTarget,
+            ...transformerNodes,
+            ...selectedNodes
+        ]);
+        let bannerNode = transformCandidates.find((node) =>
+            node &&
+            node.getAttr &&
+            (node.getAttr("isCatalogBanner") === true || String(node.getAttr("name") || "") === "banner")
+        ) || null;
+        if (!bannerNode) {
+            const recentBannerNode = page.__activeCatalogBannerNode;
+            const recentBannerTs = Number(page.__lastCatalogBannerTransformAt || 0);
+            const isRecentBannerTransform = (
+                recentBannerNode &&
+                typeof recentBannerNode.getLayer === "function" &&
+                recentBannerNode.getLayer() === page.layer &&
+                (Date.now() - recentBannerTs) < 240
+            );
+            if (isRecentBannerTransform) {
+                bannerNode = recentBannerNode;
+            }
+        }
+
         schedulePageTask(page, "canvasModifiedDispatch", () => {
-            dispatchCanvasModified(stage, { historyMode: 'immediate', historySource: 'transform' });
-        }, 50);
+            if (bannerNode && typeof window.syncCatalogBannerStateFromNode === "function") {
+                try { window.syncCatalogBannerStateFromNode(page, bannerNode); } catch (_e) {}
+            }
+            dispatchCanvasModified(stage, bannerNode
+                ? {
+                    historyMode: 'immediate',
+                    historySource: 'banner-transform',
+                    forceHistorySnapshot: true
+                }
+                : {
+                    historyMode: 'immediate',
+                    historySource: 'transform'
+                });
+        }, bannerNode ? 0 : 50);
     });
 
     pages.push(page);
@@ -9286,11 +9693,7 @@ if (showCena && p.CENA) {
 
     // --- rozbij cenę ---
     // 🔒 NORMALIZACJA CENY – MAX 2 MIEJSCA PO PRZECINKU
-let raw = String(p.CENA)
-.replace(',', '.')
-.replace(/[^0-9.]/g, '');
-
-let value = parseFloat(raw);
+let value = parseLoosePriceNumber(p.CENA);
 
 if (isNaN(value)) value = 0;
 
@@ -9394,12 +9797,25 @@ if (currency === 'pln' || currency === 'zł' || currency === 'zl') unit = `zł /
                 confirmText: "Zapisz",
                 value: current.replace(".", ",")
             })
-            : parseFloat(String(prompt("Podaj nową cenę (np. 1,49):", current.replace(".", ",")) || "").replace(",", ".").replace(/[^0-9.]/g, ""));
+            : parseLoosePriceNumber(prompt("Podaj nową cenę (np. 1,49):", current.replace(".", ",")) || "");
         if (!Number.isFinite(parsed)) return;
 
-        const [newMain, newDecimal] = parsed.toFixed(2).split(".");
+        const normalizedPrice = parsed.toFixed(2);
+        const [newMain, newDecimal] = normalizedPrice.split(".");
         priceMain.text(newMain);
         priceDecimal.text(newDecimal);
+        p.CENA = normalizedPrice;
+        p.HIDE_PRICE = false;
+        if (Object.prototype.hasOwnProperty.call(p, "CENA_NETTO_FV") || p.CENA_NETTO_FV != null) {
+            p.CENA_NETTO_FV = normalizedPrice;
+        }
+        if (Array.isArray(page.products) && page.products[i] && typeof page.products[i] === "object") {
+            page.products[i].CENA = normalizedPrice;
+            page.products[i].HIDE_PRICE = false;
+            if (Object.prototype.hasOwnProperty.call(page.products[i], "CENA_NETTO_FV") || page.products[i].CENA_NETTO_FV != null) {
+                page.products[i].CENA_NETTO_FV = normalizedPrice;
+            }
+        }
 
         const gap = 4;
         priceDecimal.x(priceMain.width() + gap);
@@ -9776,9 +10192,6 @@ addImageShadow(layer, img);
 
     // === BANER ===
     if (page.settings.bannerUrl) {
-        const oldBanner = layer.getChildren().find(o => o.getAttr('name') === 'banner');
-        if (oldBanner) oldBanner.destroy();
-
         (async () => {
             const src = String(page.settings.bannerUrl || "").trim();
             let variants = (typeof window.normalizeImageVariantPayload === "function")
@@ -9803,12 +10216,35 @@ addImageShadow(layer, img);
             const renderSrc = String(editorSrc || src || "").trim();
             if (!renderSrc) return;
 
+            if (typeof window.addCatalogBannerToPage === "function") {
+                await window.addCatalogBannerToPage(page, {
+                    bannerUrl: originalSrc || src || renderSrc,
+                    originalSrc: originalSrc || src || renderSrc,
+                    editorSrc: renderSrc,
+                    thumbSrc: thumbSrc || renderSrc,
+                    renderSrc
+                }, {
+                    state: page.settings.bannerState || null,
+                    clearTransformer: false,
+                    moveToBottom: true,
+                    y: 0
+                });
+                return;
+            }
+
             Konva.Image.fromURL(renderSrc, img => {
-                const scale = Math.min(W / img.width(), 113 / img.height());
-                img.scaleX(scale);
-                img.scaleY(scale);
-                img.x(0);
-                img.y(0);
+                const bannerTransform = (typeof window.getCatalogBannerTransform === "function")
+                    ? window.getCatalogBannerTransform(page, img.width(), img.height(), { y: 0 })
+                    : {
+                        x: 0,
+                        y: 0,
+                        scaleX: Math.max(1, Number(page?.stage?.width?.() || W || 1)) / Math.max(1, Number(img.width?.() || 1)),
+                        scaleY: Math.max(1, Number(page?.stage?.width?.() || W || 1)) / Math.max(1, Number(img.width?.() || 1))
+                    };
+                img.scaleX(bannerTransform.scaleX);
+                img.scaleY(bannerTransform.scaleY);
+                img.x(bannerTransform.x);
+                img.y(bannerTransform.y);
                 img.setAttr('name', 'banner');
                 img.draggable(true);
                 img.dragBoundFunc(pos => pos);
@@ -10426,11 +10862,19 @@ window.importImagesFromFiles = async function(filesOverride) {
             quickImagesBtn.classList.add('done');
         }
     }
+    const imageImportSummary = {
+        filesCount: Array.isArray(files) ? files.length : Number(files?.length || 0),
+        matchedCount: matched.length,
+        importedCount
+    };
+    window.lastImageImportSummary = imageImportSummary;
+    window.dispatchEvent(new CustomEvent('imagesImported', { detail: imageImportSummary }));
     if (typeof window.showAppToast === "function") {
         window.showAppToast(`Zaimportowano ${importedCount}/${matched.length} zdjec`, importedCount > 0 ? "success" : "error");
     } else {
         alert(`Zaimportowano ${importedCount}/${matched.length} zdjec`);
     }
+    return imageImportSummary;
 };
 
 window.applyCachedProductImages = async function() {
@@ -12858,7 +13302,7 @@ window.openPageEdit = function(page) {
     document.body.appendChild(panel);
 
     // ====== Zastosuj ======
-    document.getElementById("applyPageEdit").onclick = () => {
+    document.getElementById("applyPageEdit").onclick = async () => {
         const bgColor = document.getElementById("bgColorPicker").value;
         const bannerUrl = document.getElementById("bannerUrlInput").value.trim();
 
@@ -12869,10 +13313,40 @@ window.openPageEdit = function(page) {
         page.settings.pageBgColor = bgColor;
 
         // Baner
-        page.settings.bannerUrl = bannerUrl || null;
+        if (bannerUrl) {
+            if (typeof window.addCatalogBannerToPage === "function") {
+                await window.addCatalogBannerToPage(page, {
+                    bannerUrl,
+                    originalSrc: bannerUrl,
+                    editorSrc: bannerUrl,
+                    thumbSrc: bannerUrl,
+                    renderSrc: bannerUrl
+                }, {
+                    resetState: true,
+                    clearTransformer: false,
+                    moveToTop: true,
+                    y: 0
+                });
+            } else {
+                page.settings.bannerUrl = bannerUrl || null;
+                drawPage(page);
+            }
+        } else if (typeof window.removeCatalogBannerFromPage === "function") {
+            window.removeCatalogBannerFromPage(page, { clearTransformer: false });
+        } else {
+            page.settings.bannerUrl = null;
+            const oldBanner = page.layer.findOne(n => n.getAttr("name") === "banner");
+            if (oldBanner) oldBanner.destroy();
+        }
 
-        // Przerysuj stronę
-        drawPage(page);
+        page.layer.batchDraw?.();
+        page.transformerLayer?.batchDraw?.();
+        if (typeof window.dispatchCanvasModified === "function") {
+            window.dispatchCanvasModified(page.stage, {
+                historyMode: 'immediate',
+                historySource: 'page-settings-banner'
+            });
+        }
     };
 
     // ====== Zamknij ======

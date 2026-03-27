@@ -1508,6 +1508,190 @@
     }
   }
 
+  const CATALOG_LAYOUT_COLLISION_GUARD_KEY = "__catalogLayoutCollisionGuard";
+  const CATALOG_LAYOUT_OBSTACLE_PADDING_MM = 3;
+  const CATALOG_LAYOUT_OBSTACLE_PADDING_PX = (96 / 25.4) * CATALOG_LAYOUT_OBSTACLE_PADDING_MM;
+
+  function createCatalogLayoutCollisionGuard() {
+    const toNumber = (value, fallback = 0) => {
+      const num = Number(value);
+      return Number.isFinite(num) ? num : fallback;
+    };
+
+    const normalizeRect = (rect) => {
+      if (!rect) return null;
+      const x = toNumber(rect.x, NaN);
+      const y = toNumber(rect.y, NaN);
+      const width = Math.max(0, toNumber(rect.width, NaN));
+      const height = Math.max(0, toNumber(rect.height, NaN));
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !(width > 0) || !(height > 0)) return null;
+      return { x, y, width, height };
+    };
+
+    const expandRect = (rect, paddingX = 0, paddingY = paddingX, maxWidth = Infinity, maxHeight = Infinity) => {
+      const safeRect = normalizeRect(rect);
+      if (!safeRect) return null;
+      const padX = Math.max(0, toNumber(paddingX, 0));
+      const padY = Math.max(0, toNumber(paddingY, padX));
+      let nextX = safeRect.x - padX;
+      let nextY = safeRect.y - padY;
+      let nextRight = safeRect.x + safeRect.width + padX;
+      let nextBottom = safeRect.y + safeRect.height + padY;
+      if (Number.isFinite(maxWidth)) {
+        nextX = Math.max(0, nextX);
+        nextRight = Math.min(Math.max(0, maxWidth), nextRight);
+      }
+      if (Number.isFinite(maxHeight)) {
+        nextY = Math.max(0, nextY);
+        nextBottom = Math.min(Math.max(0, maxHeight), nextBottom);
+      }
+      const width = nextRight - nextX;
+      const height = nextBottom - nextY;
+      if (!(width > 0) || !(height > 0)) return null;
+      return { x: nextX, y: nextY, width, height };
+    };
+
+    const rectIntersects = (a, b) => {
+      const rectA = normalizeRect(a);
+      const rectB = normalizeRect(b);
+      if (!rectA || !rectB) return false;
+      return !(
+        rectA.x + rectA.width <= rectB.x ||
+        rectB.x + rectB.width <= rectA.x ||
+        rectA.y + rectA.height <= rectB.y ||
+        rectB.y + rectB.height <= rectA.y
+      );
+    };
+
+    const isCatalogProductNode = (node) => {
+      if (!node || typeof node.getAttr !== "function") return false;
+      const hasSlotBinding = Number.isFinite(Number(node.getAttr("slotIndex"))) || Number.isFinite(Number(node.getAttr("preservedSlotIndex")));
+      return !!(
+        node.getAttr("isAutoSlotGroup") ||
+        node.getAttr("isDirectCustomModuleGroup") ||
+        node.getAttr("isName") ||
+        node.getAttr("isIndex") ||
+        node.getAttr("isProductImage") ||
+        node.getAttr("isBarcode") ||
+        node.getAttr("isCountryBadge") ||
+        node.getAttr("isPriceGroup") ||
+        node.getAttr("isDirectPriceRectBg") ||
+        node.getAttr("isCustomPackageInfo") ||
+        node.getAttr("isProductText") ||
+        node.getAttr("directModuleId") ||
+        hasSlotBinding
+      );
+    };
+
+    const hasCatalogProductDescendants = (node) => {
+      if (!node || typeof node.findOne !== "function") return false;
+      try {
+        return !!node.findOne((child) => child && child !== node && isCatalogProductNode(child));
+      } catch (_err) {
+        return false;
+      }
+    };
+
+    const isCatalogManagedProductGroup = (node) => {
+      if (!node || typeof node.getAttr !== "function") return false;
+      return !!(
+        node.getAttr("isUserGroup") &&
+        (
+          node.getAttr("isAutoSlotGroup") ||
+          node.getAttr("isDirectCustomModuleGroup") ||
+          hasCatalogProductDescendants(node)
+        )
+      );
+    };
+
+    const isCatalogHelperNode = (node) => {
+      if (!node || typeof node.getAttr !== "function") return false;
+      return !!(
+        node.getAttr("isPageBg") ||
+        node.getAttr("isFxHelper") ||
+        node.getAttr("isPriceHitArea") ||
+        node.getAttr("isBgBlur") ||
+        node.getAttr("isSelectionRect") ||
+        node.getAttr("isCropOverlay") ||
+        node.getAttr("isCropGuide")
+      );
+    };
+
+    const isLikelyNonProductObstacleNode = (node) => {
+      if (!node || typeof node.getAttr !== "function") return false;
+      if (typeof node.isVisible === "function" && !node.isVisible()) return false;
+      if (isCatalogHelperNode(node)) return false;
+      if (isCatalogManagedProductGroup(node) || isCatalogProductNode(node)) return false;
+
+      if (
+        node.getAttr("name") === "banner" ||
+        node.getAttr("isShape") ||
+        node.getAttr("isPreset") ||
+        node.getAttr("isUserText") ||
+        node.getAttr("isSidebarText") ||
+        node.getAttr("isUserImage") ||
+        node.getAttr("isSidebarImage")
+      ) {
+        return true;
+      }
+
+      if (node.getAttr("isUserGroup")) return true;
+
+      const className = String(node.getClassName?.() || "");
+      return [
+        "Text",
+        "Image",
+        "Group",
+        "Rect",
+        "Circle",
+        "Ellipse",
+        "RegularPolygon",
+        "Star",
+        "Ring",
+        "Line",
+        "Arrow",
+        "Path",
+        "Label"
+      ].includes(className);
+    };
+
+    const collectNonProductObstacleRects = (page, options = {}) => {
+      if (!page?.layer || typeof page.layer.getChildren !== "function") return [];
+      const stageW = Math.max(1, toNumber(page.stage?.width?.() || window.W || 0, 1));
+      const stageH = Math.max(1, toNumber(page.stage?.height?.() || window.H || 0, 1));
+      const paddingPx = Math.max(0, toNumber(options.paddingPx, CATALOG_LAYOUT_OBSTACLE_PADDING_PX));
+      const childrenCollection = page.layer.getChildren();
+      const layerChildren = typeof childrenCollection?.toArray === "function"
+        ? childrenCollection.toArray()
+        : Array.from(childrenCollection || []);
+
+      return layerChildren
+        .filter((node) => {
+          if (!isLikelyNonProductObstacleNode(node)) return false;
+          if (node.getParent && node.getParent() !== page.layer) return false;
+          return true;
+        })
+        .map((node) => normalizeRect(
+          typeof node.getClientRect === "function"
+            ? node.getClientRect({ relativeTo: page.layer })
+            : null
+        ))
+        .map((rect) => expandRect(rect, paddingPx, paddingPx, stageW, stageH))
+        .filter(Boolean);
+    };
+
+    return {
+      defaultPaddingPx: CATALOG_LAYOUT_OBSTACLE_PADDING_PX,
+      normalizeRect,
+      expandRect,
+      rectIntersects,
+      collectNonProductObstacleRects
+    };
+  }
+
+  const catalogLayoutCollisionGuard = window[CATALOG_LAYOUT_COLLISION_GUARD_KEY]
+    || (window[CATALOG_LAYOUT_COLLISION_GUARD_KEY] = createCatalogLayoutCollisionGuard());
+
   function isProductModuleNode(node) {
     if (!node || !node.getAttr) return false;
     return !!(
@@ -1665,6 +1849,14 @@
     return sortModulesForLayout(modules);
   }
 
+  function getCatalogPageProductModuleRects(page) {
+    return buildModulesFromPage(page)
+      .map((module) => catalogLayoutCollisionGuard.normalizeRect(module?.rect))
+      .filter(Boolean);
+  }
+
+  window.getCatalogPageProductModuleRects = getCatalogPageProductModuleRects;
+
   function getNodesRect(nodes, layer) {
     if (!Array.isArray(nodes) || !nodes.length) return null;
     let minX = Infinity;
@@ -1681,6 +1873,57 @@
     });
     if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
     return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+  }
+
+  function refreshModuleRects(modules, layer) {
+    return (Array.isArray(modules) ? modules : []).map((module) => {
+      if (!module) return null;
+      const rect = getNodesRect(module.nodes, layer) || catalogLayoutCollisionGuard.normalizeRect(module.rect);
+      if (rect) module.rect = rect;
+      return rect || null;
+    });
+  }
+
+  function captureModuleLayoutState(modules, layer) {
+    refreshModuleRects(modules, layer);
+    return (Array.isArray(modules) ? modules : []).map((module, index) => ({
+      key: String(module?.key || `module:${index}`),
+      module,
+      rect: catalogLayoutCollisionGuard.normalizeRect(module?.rect) || { x: 0, y: 0, width: 1, height: 1 },
+      nodes: Array.isArray(module?.nodes)
+        ? module.nodes.map((node) => ({
+            node,
+            x: typeof node?.x === "function" ? Number(node.x()) || 0 : 0,
+            y: typeof node?.y === "function" ? Number(node.y()) || 0 : 0,
+            scaleX: typeof node?.scaleX === "function" ? Number(node.scaleX()) || 1 : 1,
+            scaleY: typeof node?.scaleY === "function" ? Number(node.scaleY()) || 1 : 1
+          }))
+        : []
+    }));
+  }
+
+  function restoreModuleLayoutState(snapshot, layer) {
+    (Array.isArray(snapshot) ? snapshot : []).forEach((entry) => {
+      entry?.nodes?.forEach((nodeState) => {
+        const node = nodeState?.node;
+        if (!node) return;
+        if (typeof node.x === "function") node.x(nodeState.x);
+        if (typeof node.y === "function") node.y(nodeState.y);
+        if (typeof node.scaleX === "function") node.scaleX(nodeState.scaleX);
+        if (typeof node.scaleY === "function") node.scaleY(nodeState.scaleY);
+      });
+      const rect = getNodesRect(entry?.module?.nodes, layer) || entry?.rect || null;
+      if (entry?.module && rect) entry.module.rect = rect;
+    });
+  }
+
+  function buildModuleBaseRectMap(snapshot) {
+    const rectMap = new Map();
+    (Array.isArray(snapshot) ? snapshot : []).forEach((entry) => {
+      const rect = catalogLayoutCollisionGuard.normalizeRect(entry?.rect);
+      if (rect) rectMap.set(String(entry?.key || ""), rect);
+    });
+    return rectMap;
   }
 
   function scaleModule(module, factor, layer) {
@@ -1745,6 +1988,242 @@
       rects = measureRowModules(row, layer);
     }
     return rects;
+  }
+
+  function getLayoutCompressionFactors(productCount) {
+    const steps = [
+      1,
+      0.97,
+      0.94,
+      0.91,
+      0.88,
+      0.85,
+      0.82,
+      0.79,
+      0.76,
+      0.73,
+      0.7,
+      0.67,
+      0.64,
+      0.61,
+      0.58,
+      0.55,
+      0.52,
+      0.49,
+      0.46,
+      0.43,
+      0.4,
+      0.37,
+      0.34,
+      0.31,
+      0.28,
+      0.25,
+      0.22,
+      0.19,
+      0.16,
+      0.13,
+      0.1,
+      0.08
+    ];
+    return steps.filter((value) => value >= (productCount >= 9 ? 0.08 : (productCount >= 6 ? 0.1 : 0.16)));
+  }
+
+  function buildCompressedLayoutOptions(options, factor) {
+    const safeFactor = Math.max(0.08, Math.min(1, Number(factor) || 1));
+    if (safeFactor >= 0.999) {
+      return {
+        ...options,
+        globalScaleFactor: Math.max(0.06, getNumber(options?.globalScaleFactor, 1))
+      };
+    }
+
+    const shouldLockManualMargins = String(options?.marginMode || "auto") === "manual";
+    const spacingFactor = 0.52 + (safeFactor * 0.48);
+    const marginFactor = 0.44 + (safeFactor * 0.56);
+    return {
+      ...options,
+      gapX: Math.max(0, getNumber(options?.gapX, 0) * spacingFactor),
+      gapY: Math.max(0, getNumber(options?.gapY, 0) * spacingFactor),
+      marginX: shouldLockManualMargins
+        ? Math.max(0, getNumber(options?.marginX, 0))
+        : Math.max(6, getNumber(options?.marginX, 0) * marginFactor),
+      marginY: shouldLockManualMargins
+        ? Math.max(0, getNumber(options?.marginY, 0))
+        : Math.max(6, getNumber(options?.marginY, 0) * marginFactor),
+      globalScaleFactor: Math.max(0.06, getNumber(options?.globalScaleFactor, 1) * safeFactor)
+    };
+  }
+
+  function getSimulatedRowMetrics(row, moduleScales, baseRectMap, maxWidth, maxHeight, gapX) {
+    const safeGapX = Math.max(0, Number(gapX) || 0);
+    const safeMaxWidth = Math.max(1, Number(maxWidth) || 1);
+    const safeMaxHeight = Math.max(1, Number(maxHeight) || 1);
+    const simulated = (Array.isArray(row) ? row : []).map((module, index) => {
+      const baseRect = baseRectMap.get(String(module?.key || "")) || catalogLayoutCollisionGuard.normalizeRect(module?.rect) || { x: 0, y: 0, width: 1, height: 1 };
+      const baseScale = Math.max(0.04, Number(moduleScales?.[index]) || 1);
+      return {
+        width: Math.max(1, baseRect.width * baseScale),
+        height: Math.max(1, baseRect.height * baseScale),
+        scale: baseScale
+      };
+    });
+
+    for (let pass = 0; pass < 5; pass += 1) {
+      const contentWidth = simulated.reduce((acc, rect) => acc + Math.max(1, rect.width), 0);
+      const rowHeight = simulated.reduce((acc, rect) => Math.max(acc, Math.max(1, rect.height)), 0);
+      const widthFactor = simulated.length > 0
+        ? (safeMaxWidth - Math.max(0, simulated.length - 1) * safeGapX) / Math.max(1, contentWidth)
+        : 1;
+      const heightFactor = safeMaxHeight / Math.max(1, rowHeight);
+      const fitFactor = Math.min(1, widthFactor, heightFactor);
+      if (fitFactor >= 0.999) break;
+      const nextFactor = Math.max(0.04, fitFactor);
+      simulated.forEach((rect) => {
+        rect.width = Math.max(1, rect.width * nextFactor);
+        rect.height = Math.max(1, rect.height * nextFactor);
+        rect.scale = Math.max(0.04, rect.scale * nextFactor);
+      });
+    }
+
+    const rowWidth = simulated.reduce((acc, rect) => acc + Math.max(1, rect.width), 0) + Math.max(0, simulated.length - 1) * safeGapX;
+    const rowHeight = simulated.reduce((acc, rect) => Math.max(acc, Math.max(1, rect.height)), 0);
+    return {
+      rects: simulated,
+      rowWidth,
+      rowHeight
+    };
+  }
+
+  function simulateLayoutPlacement(context, plan, options, baseRectMap) {
+    if (!plan || !Array.isArray(plan.rowData) || !plan.rowData.length) {
+      return { error: "Nie udalo sie przygotowac ukladu do rozmieszczenia produktow." };
+    }
+
+    const pageWidth = Number(context?.pageWidth || context?.page?.stage?.width?.() || 0);
+    const pageHeight = Number(context?.pageHeight || context?.page?.stage?.height?.() || 0);
+    const obstacleRects = Array.isArray(plan.obstacleRects) ? plan.obstacleRects.slice() : [];
+    const blockedLayoutRects = obstacleRects.slice();
+    const placements = [];
+    const rightLimit = Math.max(plan.effectiveMarginX || 0, pageWidth - (plan.effectiveMarginX || 0));
+    const bottomLimit = Math.max(plan.workspaceTop || plan.effectiveMarginY || 0, plan.workspaceBottom || (pageHeight - (plan.effectiveMarginY || 0)));
+    const placedModulePadX = Math.max(10, Math.round(getNumber(options?.gapX, 0) * 0.35));
+    const placedModulePadY = Math.max(12, Math.round(getNumber(options?.gapY, 0) * 0.45));
+
+    let currentY = Number(plan.startY) || 0;
+    for (const entry of plan.rowData) {
+      const plannedRowHeight = entry.row.reduce((acc, item, index) => {
+        const baseRect = baseRectMap.get(String(item?.key || "")) || catalogLayoutCollisionGuard.normalizeRect(item?.rect) || { width: 1, height: 1 };
+        return Math.max(acc, Math.max(1, baseRect.height * Math.max(0.04, Number(entry.moduleScales?.[index]) || 1)));
+      }, 0);
+
+      const metrics = getSimulatedRowMetrics(
+        entry.row,
+        entry.moduleScales,
+        baseRectMap,
+        plan.usableWidth,
+        plannedRowHeight,
+        options.gapX
+      );
+      const rowAlign = Array.isArray(options.rowAlignModes) ? (options.rowAlignModes[entry.rowIndex] || options.align) : options.align;
+      const rowBand = blockedLayoutRects.length
+        ? findObstacleAwareRowSlot({
+            blockedRects: blockedLayoutRects,
+            desiredY: currentY,
+            rowHeight: metrics.rowHeight,
+            rowWidth: metrics.rowWidth,
+            minX: plan.effectiveMarginX,
+            maxX: plan.effectiveMarginX + plan.usableWidth,
+            minY: Math.max(plan.workspaceTop || plan.effectiveMarginY, currentY),
+            maxY: Math.max(plan.workspaceTop || plan.effectiveMarginY, (plan.workspaceBottom || (pageHeight - plan.effectiveMarginY)) - metrics.rowHeight),
+            rowAlign,
+            targetCenterX: plan.effectiveMarginX + (plan.usableWidth / 2)
+          })
+        : {
+            y: currentY,
+            segment: { x: plan.effectiveMarginX, width: plan.usableWidth }
+          };
+      if (!rowBand?.segment) {
+        return {
+          error: "Na stronie brakuje wolnego miejsca miedzy banerami i innymi obiektami. Layout zmniejszyl produkty, ale nadal nie znalazl bezpiecznego pasa."
+        };
+      }
+
+      currentY = rowBand.y;
+      let currentX = rowBand.segment.x;
+      if (rowAlign === "center") currentX += Math.max(0, (rowBand.segment.width - metrics.rowWidth) / 2);
+      if (rowAlign === "right") currentX += Math.max(0, rowBand.segment.width - metrics.rowWidth);
+
+      const placedRowRects = [];
+      let rowFailed = false;
+      for (let index = 0; index < entry.row.length; index += 1) {
+        const module = entry.row[index];
+        const simRect = metrics.rects[index] || { width: 1, height: 1, scale: 1 };
+        const targetY = currentY + Math.max(0, (metrics.rowHeight - simRect.height) / 2);
+        const finalRect = {
+          x: currentX,
+          y: targetY,
+          width: Math.max(1, simRect.width),
+          height: Math.max(1, simRect.height)
+        };
+        if ((finalRect.x + finalRect.width) > rightLimit + 0.5 || (finalRect.y + finalRect.height) > bottomLimit + 0.5) {
+          rowFailed = true;
+          break;
+        }
+        placements.push({
+          module,
+          x: finalRect.x,
+          y: finalRect.y,
+          scale: Math.max(0.04, simRect.scale),
+          rect: finalRect
+        });
+        const reservedRect = catalogLayoutCollisionGuard.expandRect(
+          finalRect,
+          placedModulePadX,
+          placedModulePadY,
+          pageWidth,
+          pageHeight
+        );
+        if (reservedRect) placedRowRects.push(reservedRect);
+        currentX += finalRect.width + getNumber(options?.gapX, 0);
+      }
+
+      if (rowFailed) {
+        return {
+          error: "Produkty nie zmiescily sie w wyliczonym pasie roboczym po przeliczeniu szerokosci."
+        };
+      }
+
+      if (placedRowRects.length) blockedLayoutRects.push(...placedRowRects);
+      currentY += metrics.rowHeight + getNumber(options?.gapY, 0);
+    }
+
+    return {
+      ok: true,
+      placements
+    };
+  }
+
+  function applySimulatedLayout(context, modules, placements, snapshot) {
+    restoreModuleLayoutState(snapshot, context.page.layer);
+    (Array.isArray(placements) ? placements : []).forEach((placement) => {
+      if (!placement?.module) return;
+      const liveRect = getNodesRect(placement.module.nodes, context.page.layer);
+      if (liveRect) placement.module.rect = liveRect;
+      scaleModule(placement.module, Math.max(0.04, Number(placement.scale) || 1), context.page.layer);
+      moveModule(placement.module, Number(placement.x) || 0, Number(placement.y) || 0, context.page.layer);
+    });
+
+    refreshModuleRects(modules, context.page.layer);
+    context.page.selectedNodes = modules.flatMap((module) => module.nodes);
+    context.page.transformer?.nodes?.(context.page.selectedNodes);
+    context.page.layer?.batchDraw?.();
+    context.page.transformerLayer?.batchDraw?.();
+    try {
+      window.__skipDirectModuleStabilityPassOnce = true;
+    } catch (_err) {}
+    try {
+      window.dispatchEvent(new CustomEvent("canvasModified", { detail: context.page.stage }));
+    } catch (_err) {}
   }
 
   function getRecommendedRows(count) {
@@ -1892,6 +2371,80 @@
     return Math.max(floor, Math.min(preferred, smartSize));
   }
 
+  function choosePrimaryVerticalWorkspaceBand(obstacleRects, bounds) {
+    const top = Math.max(0, Number(bounds?.top) || 0);
+    const bottom = Math.max(top, Number(bounds?.bottom) || top);
+    const left = Math.min(Number(bounds?.left) || 0, Number(bounds?.right) || 0);
+    const right = Math.max(Number(bounds?.left) || 0, Number(bounds?.right) || 0);
+    const usableWidth = Math.max(1, right - left);
+    const preferredCenterY = Number.isFinite(Number(bounds?.preferredCenterY))
+      ? Number(bounds.preferredCenterY)
+      : (top + ((bottom - top) / 2));
+
+    const blockingIntervals = (Array.isArray(obstacleRects) ? obstacleRects : [])
+      .map((rect) => catalogLayoutCollisionGuard.normalizeRect(rect))
+      .filter(Boolean)
+      .map((rect) => {
+        const overlapLeft = Math.max(left, rect.x);
+        const overlapRight = Math.min(right, rect.x + rect.width);
+        const overlapWidth = Math.max(0, overlapRight - overlapLeft);
+        const coverage = overlapWidth / usableWidth;
+        return {
+          start: Math.max(top, rect.y),
+          end: Math.min(bottom, rect.y + rect.height),
+          coverage
+        };
+      })
+      .filter((interval) => interval.coverage >= 0.72 && interval.end > interval.start + 2);
+
+    if (!blockingIntervals.length) {
+      return {
+        top,
+        bottom,
+        height: Math.max(1, bottom - top)
+      };
+    }
+
+    const merged = mergeObstacleIntervals(blockingIntervals);
+    const freeBands = [];
+    let cursor = top;
+    merged.forEach((interval) => {
+      if (interval.start > cursor + 1) {
+        freeBands.push({
+          top: cursor,
+          bottom: interval.start,
+          height: interval.start - cursor
+        });
+      }
+      cursor = Math.max(cursor, interval.end);
+    });
+    if (cursor < bottom - 1) {
+      freeBands.push({
+        top: cursor,
+        bottom,
+        height: bottom - cursor
+      });
+    }
+
+    if (!freeBands.length) {
+      return {
+        top,
+        bottom,
+        height: Math.max(1, bottom - top)
+      };
+    }
+
+    return freeBands
+      .slice()
+      .sort((a, b) => {
+        const heightDelta = (b.height || 0) - (a.height || 0);
+        if (Math.abs(heightDelta) > 0.5) return heightDelta;
+        const centerA = a.top + (a.height / 2);
+        const centerB = b.top + (b.height / 2);
+        return Math.abs(centerA - preferredCenterY) - Math.abs(centerB - preferredCenterY);
+      })[0];
+  }
+
   function buildLayoutPlan(context, rowsConfig, options) {
     const modules = getOrderedModules(context.modules, options.orderStrategy || "preserve");
     const rows = [];
@@ -1913,10 +2466,27 @@
       ? getAutoOuterPadding(context.pageHeight, requestedMarginY, 0.03, 14)
       : requestedMarginY;
 
+    const obstacleRects = catalogLayoutCollisionGuard.collectNonProductObstacleRects(context.page, {
+      paddingPx: catalogLayoutCollisionGuard.defaultPaddingPx
+    });
+    const workspaceBand = choosePrimaryVerticalWorkspaceBand(obstacleRects, {
+      left: effectiveMarginX,
+      right: Math.max(effectiveMarginX, context.pageWidth - effectiveMarginX),
+      top: effectiveMarginY,
+      bottom: Math.max(effectiveMarginY, context.pageHeight - effectiveMarginY),
+      preferredCenterY: context.pageHeight / 2
+    });
+
     const usableWidth = Math.max(80, context.pageWidth - (effectiveMarginX * 2));
-    const usableHeight = Math.max(80, context.pageHeight - (effectiveMarginY * 2));
+    const workspaceTop = Math.max(effectiveMarginY, Number(workspaceBand?.top) || effectiveMarginY);
+    const workspaceBottom = Math.max(workspaceTop, Number(workspaceBand?.bottom) || (context.pageHeight - effectiveMarginY));
+    const usableHeight = Math.max(32, workspaceBottom - workspaceTop);
     const totalGapHeight = Math.max(0, rows.length - 1) * options.gapY;
-    const targetRowHeight = Math.max(44, (usableHeight - totalGapHeight) / Math.max(1, rows.length));
+    const denseRowFloor = context.modules.length >= 10
+      ? 14
+      : (context.modules.length >= 7 ? 18 : (context.modules.length >= 5 ? 24 : 32));
+    const targetRowHeight = Math.max(denseRowFloor, (usableHeight - totalGapHeight) / Math.max(1, rows.length));
+    const globalScaleFactor = Math.max(0.04, Math.min(2.2, getNumber(options.globalScaleFactor, 1)));
     const rowData = rows.map((rowEntry, rowIndex) => {
       const row = rowEntry.items;
       const rowStartIndex = rowEntry.startIndex;
@@ -1938,9 +2508,9 @@
       const biasedRowHeight = row.reduce((acc, _item, index) => Math.max(acc, rowMaxHeight * moduleScaleBiases[index]), 0);
       const heightFitScale = targetRowHeight / Math.max(1, biasedRowHeight);
       const fitScale = Math.min(widthFitScale, heightFitScale);
-      const baseRowScale = options.scaleMode === "fit" ? Math.max(0.12, Math.min(4, fitScale)) : 1;
+      const baseRowScale = options.scaleMode === "fit" ? Math.max(0.04, Math.min(4, fitScale)) : 1;
       const rowScaleBias = Math.max(0.18, Math.min(1.5, getNumber(options.rowScaleBiases?.[rowIndex], getNumber(options.scaleBias, 1))));
-      const rowScale = baseRowScale * rowScaleBias;
+      const rowScale = baseRowScale * rowScaleBias * globalScaleFactor;
       const moduleScales = row.map((_item, index) => normalizedScales[index] * moduleScaleBiases[index] * rowScale);
       const rawWidth = row.reduce((acc, item, index) => acc + (item.rect.width * moduleScales[index]), 0) + Math.max(0, row.length - 1) * options.gapX;
       const rawHeight = row.reduce((acc, item, index) => Math.max(acc, item.rect.height * moduleScales[index]), 0);
@@ -1965,8 +2535,8 @@
     if (totalHeight > usableHeight && options.scaleMode === "fit") {
       const verticalFactor = usableHeight / Math.max(1, totalHeight);
       rowData.forEach((entry) => {
-        entry.moduleScales = entry.moduleScales.map((scale) => Math.max(0.2, scale * verticalFactor));
-        entry.rowScale = Math.max(0.2, entry.rowScale * verticalFactor);
+        entry.moduleScales = entry.moduleScales.map((scale) => Math.max(0.04, scale * verticalFactor));
+        entry.rowScale = Math.max(0.04, entry.rowScale * verticalFactor);
         entry.rawWidth = entry.row.reduce((acc, item, index) => acc + (item.rect.width * entry.moduleScales[index]), 0) + Math.max(0, entry.row.length - 1) * options.gapX;
         entry.rawHeight = entry.row.reduce((acc, item, index) => Math.max(acc, item.rect.height * entry.moduleScales[index]), 0);
       });
@@ -1977,16 +2547,14 @@
       return { error: "Produkty nie mieszcza sie na wysokosc strony. Zmniejsz odstepy albo rozloz je na wiecej rzedow." };
     }
 
-    let startY = effectiveMarginY;
-    if (options.marginMode === "auto") {
-      const freeVerticalSpace = Math.max(0, usableHeight - totalHeight);
-      if (options.verticalMode === "bottom") {
-        startY = effectiveMarginY + freeVerticalSpace;
-      } else if (options.verticalMode === "top") {
-        startY = effectiveMarginY;
-      } else {
-        startY = effectiveMarginY + (freeVerticalSpace / 2);
-      }
+    let startY = workspaceTop;
+    const freeVerticalSpace = Math.max(0, usableHeight - totalHeight);
+    if (options.verticalMode === "bottom") {
+      startY = workspaceTop + freeVerticalSpace;
+    } else if (options.verticalMode === "top") {
+      startY = workspaceTop;
+    } else {
+      startY = workspaceTop + (freeVerticalSpace / 2);
     }
 
     return {
@@ -1994,91 +2562,172 @@
       rowData,
       effectiveMarginX,
       effectiveMarginY,
+      obstacleRects,
       usableWidth,
+      usableHeight,
+      workspaceTop,
+      workspaceBottom,
       startY
     };
   }
 
-  function layoutModules(context, rowsConfig, options) {
-    const plan = buildLayoutPlan(context, rowsConfig, options);
-    if (plan.error) return plan;
+  function mergeObstacleIntervals(intervals) {
+    if (!Array.isArray(intervals) || !intervals.length) return [];
+    const sorted = intervals
+      .map((interval) => ({
+        start: Number(interval?.start),
+        end: Number(interval?.end)
+      }))
+      .filter((interval) => Number.isFinite(interval.start) && Number.isFinite(interval.end) && interval.end > interval.start)
+      .sort((a, b) => a.start - b.start);
 
-    const { modules, rowData, effectiveMarginX, usableWidth, startY } = plan;
-    const pageWidth = Number(context?.pageWidth || context?.page?.stage?.width?.() || 0);
-    const pageHeight = Number(context?.pageHeight || context?.page?.stage?.height?.() || 0);
-    const rightLimit = Math.max(effectiveMarginX, pageWidth - effectiveMarginX);
-    const bottomLimit = Math.max(0, pageHeight);
+    if (!sorted.length) return [];
+    const merged = [sorted[0]];
+    for (let i = 1; i < sorted.length; i += 1) {
+      const current = sorted[i];
+      const previous = merged[merged.length - 1];
+      if (current.start <= previous.end + 0.5) {
+        previous.end = Math.max(previous.end, current.end);
+      } else {
+        merged.push({ ...current });
+      }
+    }
+    return merged;
+  }
 
-    let currentY = startY;
-    rowData.forEach((entry) => {
-      const plannedRowHeight = entry.row.reduce((acc, item, index) => Math.max(acc, item.rect.height * entry.moduleScales[index]), 0);
-      entry.row.forEach((module, index) => {
-        const moduleScale = entry.moduleScales[index] || 1;
-        if (Math.abs(moduleScale - 1) > 0.001) {
-          scaleModule(module, moduleScale, context.page.layer);
-        }
-      });
+  function buildFreeSegmentsForRowBand(blockedRects, bandY, bandHeight, minX, maxX) {
+    const safeMinX = Math.min(minX, maxX);
+    const safeMaxX = Math.max(minX, maxX);
+    const top = Number(bandY) || 0;
+    const bottom = top + Math.max(1, Number(bandHeight) || 1);
+    const intervals = (Array.isArray(blockedRects) ? blockedRects : [])
+      .map((rect) => catalogLayoutCollisionGuard.normalizeRect(rect))
+      .filter(Boolean)
+      .filter((rect) => rect.y < bottom && (rect.y + rect.height) > top)
+      .map((rect) => ({
+        start: Math.max(safeMinX, rect.x),
+        end: Math.min(safeMaxX, rect.x + rect.width)
+      }))
+      .filter((interval) => interval.end - interval.start > 0.5);
 
-      const measuredRects = fitRowModulesToBounds(
-        entry.row,
-        context.page.layer,
-        usableWidth,
-        plannedRowHeight,
-        options.gapX
-      );
-      const rowWidth = measuredRects.reduce((acc, rect) => acc + Math.max(1, Number(rect?.width) || 1), 0) + Math.max(0, entry.row.length - 1) * options.gapX;
-      const rowHeight = measuredRects.reduce((acc, rect) => Math.max(acc, Math.max(1, Number(rect?.height) || 1)), 0);
-
-      let currentX = effectiveMarginX;
-      const rowAlign = Array.isArray(options.rowAlignModes) ? (options.rowAlignModes[entry.rowIndex] || options.align) : options.align;
-      if (rowAlign === "center") currentX += Math.max(0, (usableWidth - rowWidth) / 2);
-      if (rowAlign === "right") currentX += Math.max(0, usableWidth - rowWidth);
-
-      entry.row.forEach((module, index) => {
-        const moduleRect = getNodesRect(module.nodes, context.page.layer);
-        if (moduleRect) module.rect = moduleRect;
-        const targetY = currentY + Math.max(0, (rowHeight - module.rect.height) / 2);
-        moveModule(module, currentX, targetY, context.page.layer);
-
-        const finalRect = getNodesRect(module.nodes, context.page.layer);
-        if (finalRect) {
-          module.rect = finalRect;
-          const overflowRight = (finalRect.x + finalRect.width) - rightLimit;
-          const overflowBottom = (finalRect.y + finalRect.height) - bottomLimit;
-          if (overflowRight > 0 || overflowBottom > 0) {
-            const widthFactor = overflowRight > 0
-              ? Math.max(0.12, (Math.max(1, rightLimit - finalRect.x)) / Math.max(1, finalRect.width))
-              : 1;
-            const heightFactor = overflowBottom > 0
-              ? Math.max(0.12, (Math.max(1, bottomLimit - finalRect.y)) / Math.max(1, finalRect.height))
-              : 1;
-            const fitFactor = Math.min(1, widthFactor, heightFactor);
-            if (fitFactor < 0.999) {
-              scaleModule(module, fitFactor, context.page.layer);
-              moveModule(module, currentX, targetY, context.page.layer);
-              const correctedRect = getNodesRect(module.nodes, context.page.layer);
-              if (correctedRect) module.rect = correctedRect;
-            }
-          }
-        }
-
-        currentX += Math.max(1, Number(module.rect?.width) || 1) + options.gapX;
-      });
-
-      currentY += rowHeight + options.gapY;
+    const merged = mergeObstacleIntervals(intervals);
+    const segments = [];
+    let cursor = safeMinX;
+    merged.forEach((interval) => {
+      if (interval.start > cursor + 0.5) {
+        segments.push({ x: cursor, width: interval.start - cursor });
+      }
+      cursor = Math.max(cursor, interval.end);
     });
+    if (cursor < safeMaxX - 0.5) {
+      segments.push({ x: cursor, width: safeMaxX - cursor });
+    }
+    return segments.filter((segment) => segment.width > 0.5);
+  }
 
-    context.page.selectedNodes = modules.flatMap((module) => module.nodes);
-    context.page.transformer?.nodes?.(context.page.selectedNodes);
-    context.page.layer?.batchDraw?.();
-    context.page.transformerLayer?.batchDraw?.();
-    try {
-      window.__skipDirectModuleStabilityPassOnce = true;
-    } catch (_err) {}
-    try {
-      window.dispatchEvent(new CustomEvent("canvasModified", { detail: context.page.stage }));
-    } catch (_err) {}
-    return { ok: true };
+  function chooseObstacleAwareRowSegment(segments, requiredWidth, rowAlign, targetCenterX) {
+    const fitting = (Array.isArray(segments) ? segments : [])
+      .filter((segment) => Number(segment?.width) >= (Number(requiredWidth) || 0) - 0.5);
+    if (!fitting.length) return null;
+    if (rowAlign === "left") return fitting[0];
+    if (rowAlign === "right") return fitting[fitting.length - 1];
+    const safeTargetCenterX = Number.isFinite(Number(targetCenterX)) ? Number(targetCenterX) : 0;
+    return fitting
+      .slice()
+      .sort((a, b) => {
+        const centerA = a.x + (a.width / 2);
+        const centerB = b.x + (b.width / 2);
+        const deltaA = Math.abs(centerA - safeTargetCenterX);
+        const deltaB = Math.abs(centerB - safeTargetCenterX);
+        if (Math.abs(deltaA - deltaB) > 0.5) return deltaA - deltaB;
+        return b.width - a.width;
+      })[0];
+  }
+
+  function findObstacleAwareRowSlot({
+    blockedRects,
+    desiredY,
+    rowHeight,
+    rowWidth,
+    minX,
+    maxX,
+    minY,
+    maxY,
+    rowAlign,
+    targetCenterX
+  }) {
+    const safeRowHeight = Math.max(1, Number(rowHeight) || 1);
+    const safeRowWidth = Math.max(1, Number(rowWidth) || 1);
+    const safeMinY = Math.max(0, Number(minY) || 0);
+    const safeMaxY = Math.max(safeMinY, Number(maxY) || safeMinY);
+    const preferredY = Math.max(safeMinY, Math.min(safeMaxY, Number(desiredY) || safeMinY));
+    const searchStep = Math.max(6, Math.min(18, Math.round(safeRowHeight * 0.18)));
+    const maxDistance = Math.max(preferredY - safeMinY, safeMaxY - preferredY);
+    const checked = new Set();
+
+    const tryCandidate = (candidateY) => {
+      const roundedKey = `${Math.round(candidateY * 100) / 100}`;
+      if (checked.has(roundedKey)) return null;
+      checked.add(roundedKey);
+      const segments = buildFreeSegmentsForRowBand(blockedRects, candidateY, safeRowHeight, minX, maxX);
+      const segment = chooseObstacleAwareRowSegment(segments, safeRowWidth, rowAlign, targetCenterX);
+      return segment ? { y: candidateY, segment } : null;
+    };
+
+    const directMatch = tryCandidate(preferredY);
+    if (directMatch) return directMatch;
+
+    for (let distance = searchStep; distance <= maxDistance + searchStep; distance += searchStep) {
+      const lower = tryCandidate(Math.max(safeMinY, preferredY - distance));
+      if (lower) return lower;
+      const upper = tryCandidate(Math.min(safeMaxY, preferredY + distance));
+      if (upper) return upper;
+    }
+
+    return null;
+  }
+
+  function layoutModules(context, rowsConfig, options) {
+    const modules = getOrderedModules(context.modules, options.orderStrategy || "preserve");
+    const snapshot = captureModuleLayoutState(modules, context.page.layer);
+    const baseRectMap = buildModuleBaseRectMap(snapshot);
+    const attemptFactors = getLayoutCompressionFactors(modules.length);
+    let successfulAttempt = null;
+    let lastError = "";
+
+    for (const factor of attemptFactors) {
+      const attemptOptions = buildCompressedLayoutOptions(options, factor);
+      const plan = buildLayoutPlan({ ...context, modules }, rowsConfig, attemptOptions);
+      if (plan.error) {
+        lastError = plan.error;
+        continue;
+      }
+      const simulation = simulateLayoutPlacement({ ...context, modules }, plan, attemptOptions, baseRectMap);
+      if (simulation.error) {
+        lastError = simulation.error;
+        continue;
+      }
+      successfulAttempt = {
+        factor,
+        plan,
+        options: attemptOptions,
+        placements: simulation.placements
+      };
+      break;
+    }
+
+    if (!successfulAttempt) {
+      restoreModuleLayoutState(snapshot, context.page.layer);
+      return {
+        error: lastError || "Nie udalo sie dopasowac wszystkich produktow do wolnego obszaru roboczego."
+      };
+    }
+
+    applySimulatedLayout({ ...context, modules }, modules, successfulAttempt.placements, snapshot);
+    return {
+      ok: true,
+      compressionFactor: successfulAttempt.factor
+    };
   }
 
   function writeRowsToInputs(rows) {
@@ -3292,10 +3941,14 @@
     return presets;
   }
 
-  function buildRandomPresets(context, rounds = 1) {
+  function buildRandomPresets(context, rounds = 1, options = {}) {
     const presets = [];
     const seen = new Set();
-    const maxPresets = context.modules.length <= 2 ? 2600 : (context.modules.length <= 4 ? 3600 : 3200);
+    const maxPresets = Math.max(
+      120,
+      Number(options.maxPresets || 0)
+      || (context.modules.length <= 2 ? 2600 : (context.modules.length <= 4 ? 3600 : 3200))
+    );
 
     for (let round = 0; round < Math.max(1, rounds); round += 1) {
       const rowsVariants = getRandomRowVariants(context.modules.length);
@@ -3580,9 +4233,23 @@
     return presets;
   }
 
-  function findAiPreset(context) {
-    const randomRounds = context.modules.length <= 4 ? 10 : 6;
-    const candidates = buildAiSeedPresets(context).concat(buildRandomPresets(context, randomRounds));
+  function findAiPreset(context, options = {}) {
+    const randomRounds = Math.max(
+      1,
+      Math.floor(
+        Number(options.randomRounds || 0)
+        || (context.modules.length <= 4 ? 10 : 6)
+      )
+    );
+    const pickMode = String(options.pickMode || "weighted").trim().toLowerCase();
+    const maxRandomPresets = Math.max(
+      120,
+      Number(options.maxRandomPresets || 0)
+      || (context.modules.length <= 2 ? 2600 : (context.modules.length <= 4 ? 3600 : 3200))
+    );
+    const candidates = buildAiSeedPresets(context).concat(
+      buildRandomPresets(context, randomRounds, { maxPresets: maxRandomPresets })
+    );
     const scored = [];
 
     candidates.forEach((preset) => {
@@ -3613,12 +4280,20 @@
       if (withoutRecentFamily.length) pool = withoutRecentFamily;
     }
 
+    if (pickMode === "best") {
+      return (pool[0] || scored[0] || null)?.preset || null;
+    }
+
     return pickWeightedRandomPreset(pool);
   }
 
   async function runAiMagicLayout(context, options = {}) {
     if (!context || !context.page) return;
-    const bestPreset = findAiPreset(context);
+    const bestPreset = findAiPreset(context, {
+      pickMode: options.pickMode,
+      randomRounds: options.randomRounds,
+      maxRandomPresets: options.maxRandomPresets
+    });
     if (!bestPreset) {
       return { error: "AI nie znalazlo jeszcze dobrego ukladu dla tej strony. Sprobuj losowego ukladu albo zmniejsz odstepy." };
     }
@@ -3662,6 +4337,8 @@
     if (!context || !context.page) return;
     const result = await runAiMagicLayout(context, {
       styleMode: getSelectedStyleMode(),
+      randomRounds: context.modules.length <= 4 ? 4 : 3,
+      maxRandomPresets: context.modules.length <= 4 ? 1400 : 1050,
       writeUi: true,
       closeModal: true,
       showError: true,
@@ -3673,35 +4350,95 @@
   }
 
   async function applyQuickAiMagicLayoutForPage(page, opts = {}) {
+    const shouldNotify = opts.showToast !== false;
     try {
       await ensureMagicLayoutCustomStylesReady();
     } catch (_err) {}
     const context = buildMagicLayoutContext(page);
     if (context?.error) {
-      if (typeof window.showAppToast === "function") {
+      if (shouldNotify && typeof window.showAppToast === "function") {
         window.showAppToast(context.error, "error");
-      } else {
+      } else if (shouldNotify) {
         alert(context.error);
       }
       return false;
     }
     const result = await runAiMagicLayout(context, {
       styleMode: String(opts.styleMode || getPreferredMagicLayoutStyleMode(page) || "style:default").trim(),
+      pickMode: opts.pickMode,
+      randomRounds: opts.randomRounds,
+      maxRandomPresets: opts.maxRandomPresets,
       writeUi: false,
       closeModal: false,
       showError: false,
-      effect: true
+      effect: opts.effect !== false
     });
     if (result?.error) {
-      if (typeof window.showAppToast === "function") {
+      if (shouldNotify && typeof window.showAppToast === "function") {
         window.showAppToast(result.error, "error");
-      } else {
+      } else if (shouldNotify) {
         alert(result.error);
       }
       return false;
     }
-    if (typeof window.showAppToast === "function") {
+    if (shouldNotify && typeof window.showAppToast === "function") {
       window.showAppToast("AI zmienilo uklad strony na bazie wybranego stylu.", "success");
+    }
+    return true;
+  }
+
+  async function applyRecommendedMagicLayoutForPage(page, opts = {}) {
+    const shouldNotify = opts.showToast !== false;
+    try {
+      await ensureMagicLayoutCustomStylesReady();
+    } catch (_err) {}
+    const context = buildMagicLayoutContext(page);
+    if (context?.error) {
+      if (shouldNotify && typeof window.showAppToast === "function") {
+        window.showAppToast(context.error, "error");
+      } else if (shouldNotify) {
+        alert(context.error);
+      }
+      return false;
+    }
+
+    const styleMode = String(opts.styleMode || getPreferredMagicLayoutStyleMode(page) || "style:default").trim() || "style:default";
+    const rows = Array.isArray(opts.rows) && opts.rows.length
+      ? opts.rows.map((value) => Math.max(0, Math.floor(getNumber(value, 0)))).filter((value) => value > 0)
+      : getRecommendedRows(context.modules.length);
+    const layoutOptions = {
+      gapX: Math.max(0, getNumber(opts.gapX, 28)),
+      gapY: Math.max(0, getNumber(opts.gapY, 34)),
+      marginX: Math.max(0, getNumber(opts.marginX, 42)),
+      marginY: Math.max(0, getNumber(opts.marginY, 42)),
+      marginMode: opts.marginMode || "auto",
+      align: opts.align || "center",
+      scaleMode: opts.scaleMode || "fit",
+      styleMode,
+      orderStrategy: opts.orderStrategy || "preserve",
+      verticalMode: opts.verticalMode || "center"
+    };
+
+    if (styleMode.startsWith("style:")) {
+      rememberFixedStyleMode(styleMode);
+    }
+
+    await applyModuleStylesToPage(context, layoutOptions.styleMode || "keep");
+    const result = layoutModules(context, rows, layoutOptions);
+    if (result?.error) {
+      if (shouldNotify && typeof window.showAppToast === "function") {
+        window.showAppToast(result.error, "error");
+      } else if (shouldNotify) {
+        alert(result.error);
+      }
+      return false;
+    }
+
+    if (opts.effect !== false) {
+      triggerMagicPageEffect(context, "manual");
+    }
+    if (shouldNotify && typeof window.showAppToast === "function") {
+      window.showAppToast("Strona została uporządkowana przez Magic Layout.", "success");
     }
     return true;
   }
@@ -3800,5 +4537,6 @@
   }
 
   window.openMagicLayoutForPage = openMagicLayoutForPage;
+  window.applyRecommendedMagicLayoutForPage = applyRecommendedMagicLayoutForPage;
   window.applyQuickAiMagicLayoutForPage = applyQuickAiMagicLayoutForPage;
 })();

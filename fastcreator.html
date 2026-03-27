@@ -1,0 +1,451 @@
+<div id="fastCreatorModal" class="fastcreator-modal" aria-hidden="true">
+  <section class="fastcreator-step-modal is-active" data-fast-screen="name">
+    <div class="fastcreator-modal__backdrop" data-fastcreator-close="true"></div>
+
+    <div class="fastcreator-modal__dialog fastcreator-modal__dialog--name" role="dialog" aria-modal="true" aria-labelledby="fastCreatorNameTitle">
+      <button id="fastCreatorClose" class="fastcreator-close" type="button" aria-label="Zamknij kreator">
+        <i class="fas fa-times"></i>
+      </button>
+
+      <div class="fastcreator-shell">
+        <div class="fastcreator-shell__head fastcreator-shell__head--compact">
+          <div class="fastcreator-kicker">Szybki kreator katalogu</div>
+          <h2 id="fastCreatorNameTitle" class="fastcreator-title">Wybierz nazwę projektu</h2>
+          <p class="fastcreator-copy">To jest pierwszy modal. Tutaj wpisujesz tylko nazwę projektu.</p>
+        </div>
+
+        <div class="fastcreator-panel fastcreator-panel--name">
+          <label class="fastcreator-field" for="fastCreatorNameInput">
+            <span>Nazwa projektu</span>
+            <input id="fastCreatorNameInput" type="text" maxlength="120" placeholder="np. Oferta Wielkanoc 2026" autocomplete="off">
+          </label>
+
+          <div id="fastCreatorNameError" class="fastcreator-inline-error" hidden>
+            Wpisz nazwę projektu, aby przejść dalej.
+          </div>
+        </div>
+
+        <div class="fastcreator-actions fastcreator-actions--name">
+          <button id="fastCreatorCancelBtn" class="fastcreator-btn fastcreator-btn--ghost" type="button">Anuluj</button>
+          <button id="fastCreatorBlankWorkspaceBtn" class="fastcreator-btn fastcreator-btn--ghost" type="button">Otwórz kreator bez nazwy</button>
+          <button id="fastCreatorNextBtn" class="fastcreator-btn fastcreator-btn--accent fastcreator-btn--push" type="button">Dalej</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="fastcreator-step-modal" data-fast-screen="excel">
+    <div class="fastcreator-modal__backdrop" data-fastcreator-close="true"></div>
+
+    <div class="fastcreator-modal__dialog fastcreator-modal__dialog--excel" role="dialog" aria-modal="true" aria-labelledby="fastCreatorExcelTitle">
+      <button id="fastCreatorCloseSecondaryBtn" class="fastcreator-close" type="button" aria-label="Zamknij kreator">
+        <i class="fas fa-times"></i>
+      </button>
+
+      <div class="fastcreator-shell">
+        <div class="fastcreator-shell__head">
+          <div class="fastcreator-kicker">Szybki kreator katalogu</div>
+          <h2 id="fastCreatorExcelTitle" class="fastcreator-title">Import danych Excel</h2>
+          <p class="fastcreator-copy">To jest drugi modal. Tutaj importujesz tylko dane z Excela.</p>
+        </div>
+
+        <div class="fastcreator-summary">
+          <div class="fastcreator-summary__label">Nazwa projektu</div>
+          <div id="fastCreatorProjectNamePreview" class="fastcreator-summary__value">Projekt bez nazwy</div>
+        </div>
+
+        <div class="fastcreator-panel fastcreator-panel--excel">
+          <div class="fastcreator-toolbar">
+            <div class="fastcreator-toolbar__copy">
+              <div class="fastcreator-toolbar__title">Import danych (Excel)</div>
+              <div class="fastcreator-toolbar__sub">
+                Wybierz plik `.xlsx`, `.xls` lub `.csv`. Kreator uruchomi dokładnie ten sam import, którego używa główny edytor.
+              </div>
+            </div>
+
+            <div class="fastcreator-toolbar__actions">
+              <input id="fastCreatorExcelInput" type="file" accept=".xlsx,.xls,.csv" hidden>
+              <button id="fastCreatorPickExcelBtn" class="fastcreator-btn fastcreator-btn--ghost" type="button">
+                <i class="fas fa-file-excel"></i> Wybierz Excel
+              </button>
+            </div>
+          </div>
+
+          <div id="fastCreatorExcelStats" class="fastcreator-stats" hidden>
+            <div class="fastcreator-stats__item">
+              <div class="fastcreator-stats__label">Zaimportowane produkty</div>
+              <div id="fastCreatorImportedProductsCount" class="fastcreator-stats__value">0</div>
+            </div>
+            <div class="fastcreator-stats__item">
+              <div class="fastcreator-stats__label">Strony projektu</div>
+              <div id="fastCreatorImportedPagesCount" class="fastcreator-stats__value">0</div>
+            </div>
+          </div>
+
+          <div id="fastCreatorExcelCard" class="fastcreator-filecard is-empty">
+            <div class="fastcreator-filecard__icon">
+              <i class="fas fa-file-import"></i>
+            </div>
+            <div class="fastcreator-filecard__copy">
+              <div id="fastCreatorExcelFileName" class="fastcreator-filecard__title">Nie wybrano pliku</div>
+              <div id="fastCreatorExcelFileMeta" class="fastcreator-filecard__meta">Przygotowany importer obsługuje pliki Excel i CSV.</div>
+            </div>
+          </div>
+
+          <div id="fastCreatorExcelStatus" class="fastcreator-status" data-state="idle">
+            Wybierz plik, aby rozpocząć import danych.
+          </div>
+        </div>
+
+        <div class="fastcreator-actions">
+          <button id="fastCreatorBackBtn" class="fastcreator-btn fastcreator-btn--ghost" type="button">Wstecz</button>
+          <button id="fastCreatorExcelNextBtn" class="fastcreator-btn fastcreator-btn--accent" type="button" disabled>Dalej</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="fastcreator-step-modal" data-fast-screen="images">
+    <div class="fastcreator-modal__backdrop" data-fastcreator-close="true"></div>
+
+    <div class="fastcreator-modal__dialog fastcreator-modal__dialog--images" role="dialog" aria-modal="true" aria-labelledby="fastCreatorImagesTitle">
+      <button id="fastCreatorCloseImagesBtn" class="fastcreator-close" type="button" aria-label="Zamknij kreator">
+        <i class="fas fa-times"></i>
+      </button>
+
+      <div class="fastcreator-shell">
+        <div class="fastcreator-shell__head">
+          <div class="fastcreator-kicker">Szybki kreator katalogu</div>
+          <h2 id="fastCreatorImagesTitle" class="fastcreator-title">Import zdjęć</h2>
+          <p class="fastcreator-copy">To jest trzeci modal. Tutaj importujesz tylko zdjęcia.</p>
+        </div>
+
+        <div class="fastcreator-summary">
+          <div class="fastcreator-summary__label">Nazwa projektu</div>
+          <div id="fastCreatorImagesProjectNamePreview" class="fastcreator-summary__value">Projekt bez nazwy</div>
+          <div id="fastCreatorImagesProjectMeta" class="fastcreator-summary__meta">Brak danych o imporcie Excela.</div>
+        </div>
+
+        <div class="fastcreator-panel fastcreator-panel--images">
+          <div class="fastcreator-toolbar">
+            <div class="fastcreator-toolbar__copy">
+              <div class="fastcreator-toolbar__title">Import zdjęć produktów</div>
+              <div class="fastcreator-toolbar__sub">
+                Wybierz wiele plików graficznych. System spróbuje dopasować je po indeksach produktów.
+              </div>
+            </div>
+
+            <div class="fastcreator-toolbar__actions">
+              <input id="fastCreatorImagesInput" type="file" accept="image/*" multiple hidden>
+              <button id="fastCreatorPickImagesBtn" class="fastcreator-btn fastcreator-btn--ghost" type="button">
+                <i class="fas fa-images"></i> Wybierz zdjęcia
+              </button>
+              <button id="fastCreatorImportImagesBtn" class="fastcreator-btn fastcreator-btn--accent" type="button">
+                <i class="fas fa-bolt"></i> Importuj zdjęcia
+              </button>
+            </div>
+          </div>
+
+          <div id="fastCreatorImagesStats" class="fastcreator-stats" hidden>
+            <div class="fastcreator-stats__item">
+              <div class="fastcreator-stats__label">Wybrane pliki</div>
+              <div id="fastCreatorSelectedImagesCount" class="fastcreator-stats__value">0</div>
+            </div>
+            <div class="fastcreator-stats__item">
+              <div class="fastcreator-stats__label">Zaimportowane zdjęcia</div>
+              <div id="fastCreatorImportedImagesCount" class="fastcreator-stats__value">0</div>
+            </div>
+          </div>
+
+          <div id="fastCreatorImagesCard" class="fastcreator-filecard is-empty">
+            <div class="fastcreator-filecard__icon">
+              <i class="fas fa-camera"></i>
+            </div>
+            <div class="fastcreator-filecard__copy">
+              <div id="fastCreatorImagesFileName" class="fastcreator-filecard__title">Nie wybrano zdjęć</div>
+              <div id="fastCreatorImagesFileMeta" class="fastcreator-filecard__meta">Możesz wskazać wiele plików jednocześnie.</div>
+            </div>
+          </div>
+
+          <div id="fastCreatorImagesStatus" class="fastcreator-status" data-state="idle">
+            Wybierz zdjęcia, aby rozpocząć import.
+          </div>
+        </div>
+
+        <div class="fastcreator-actions">
+          <button id="fastCreatorImagesBackBtn" class="fastcreator-btn fastcreator-btn--ghost" type="button">Wstecz</button>
+          <button id="fastCreatorImagesNextBtn" class="fastcreator-btn fastcreator-btn--accent" type="button">Dalej</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="fastcreator-step-modal" data-fast-screen="style">
+    <div class="fastcreator-modal__backdrop" data-fastcreator-close="true"></div>
+
+    <div class="fastcreator-modal__dialog fastcreator-modal__dialog--style" role="dialog" aria-modal="true" aria-labelledby="fastCreatorStyleTitle">
+      <button id="fastCreatorCloseStyleBtn" class="fastcreator-close" type="button" aria-label="Zamknij kreator">
+        <i class="fas fa-times"></i>
+      </button>
+
+      <div class="fastcreator-shell">
+        <div class="fastcreator-shell__head">
+          <div class="fastcreator-kicker">Szybki kreator katalogu</div>
+          <h2 id="fastCreatorStyleTitle" class="fastcreator-title">Wybór stylu</h2>
+          <p class="fastcreator-copy">To jest czwarty modal. Tutaj wybierasz styl modułu i widzisz podgląd 1:1.</p>
+        </div>
+
+        <div class="fastcreator-summary">
+          <div class="fastcreator-summary__label">Nazwa projektu</div>
+          <div id="fastCreatorStyleProjectNamePreview" class="fastcreator-summary__value">Projekt bez nazwy</div>
+          <div id="fastCreatorStyleProjectMeta" class="fastcreator-summary__meta">Brak danych o stylu.</div>
+        </div>
+
+        <div class="fastcreator-panel fastcreator-panel--style-stage fastcreator-panel--dual-stage">
+          <div class="fastcreator-style-selector">
+            <button id="fastCreatorStylePrevBtn" class="fastcreator-style-nav" type="button" aria-label="Poprzedni styl">
+              <i class="fas fa-chevron-left"></i>
+            </button>
+
+            <div class="fastcreator-style-selector__meta">
+              <div class="fastcreator-toolbar__title">Wybrany styl modułu</div>
+              <div id="fastCreatorStyleCurrentName" class="fastcreator-style-selector__name">Styl</div>
+              <div id="fastCreatorStyleCurrentIndex" class="fastcreator-style-selector__index">1 / 1</div>
+            </div>
+
+            <button id="fastCreatorStyleNextBtn" class="fastcreator-style-nav" type="button" aria-label="Następny styl">
+              <i class="fas fa-chevron-right"></i>
+            </button>
+          </div>
+
+          <div id="fastCreatorStyleOptions" class="fastcreator-style-options" hidden></div>
+
+          <div id="fastCreatorStylePreviewScope" class="fastcreator-style-preview-scope">
+            <div data-fastcreator-preview-id="customPreviewCard" class="fastcreator-style-preview-card">
+              <div data-fastcreator-preview-id="customPreviewImagesTrack" class="fastcreator-style-track">
+                <img data-fastcreator-preview-id="customPreviewImage" alt="Podgląd produktu" class="fastcreator-style-image">
+              </div>
+              <div data-fastcreator-preview-id="customPreviewDivider" class="fastcreator-style-divider"></div>
+              <div data-fastcreator-preview-id="customPreviewName" class="fastcreator-style-name"></div>
+              <div data-fastcreator-preview-id="customPreviewIndex" class="fastcreator-style-index"></div>
+              <div data-fastcreator-preview-id="customPreviewPackageInfo" class="fastcreator-style-package"></div>
+              <div data-fastcreator-preview-id="customPreviewFlag" class="fastcreator-style-flag">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+              <div data-fastcreator-preview-id="customPreviewPriceCircle" class="fastcreator-style-price-circle">
+                <div data-fastcreator-preview-id="customPreviewPriceRow" class="fastcreator-style-price-row">
+                  <span data-fastcreator-preview-id="customPreviewPriceCurrency" class="fastcreator-style-price-currency">£</span>
+                  <div data-fastcreator-preview-id="customPreviewPriceMain" class="fastcreator-style-price-main">0</div>
+                  <div class="fastcreator-style-price-stack">
+                    <span data-fastcreator-preview-id="customPreviewPriceDec" class="fastcreator-style-price-dec">00</span>
+                    <span data-fastcreator-preview-id="customPreviewPriceUnit" class="fastcreator-style-price-unit">£ / SZT.</span>
+                  </div>
+                </div>
+              </div>
+              <div data-fastcreator-preview-id="customPreviewBarcodeWrap" class="fastcreator-style-barcode-wrap">
+                <svg data-fastcreator-preview-id="customPreviewBarcode" class="fastcreator-style-barcode"></svg>
+              </div>
+            </div>
+          </div>
+
+          <div id="fastCreatorStyleStatus" class="fastcreator-status" data-state="idle">
+            Wybierz styl strzałkami, aby zobaczyć podgląd modułu.
+          </div>
+        </div>
+
+        <div class="fastcreator-actions">
+          <button id="fastCreatorStyleBackBtn" class="fastcreator-btn fastcreator-btn--ghost" type="button">Wstecz</button>
+          <button id="fastCreatorStyleOptionsNextBtn" class="fastcreator-btn fastcreator-btn--accent" type="button">Dalej</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="fastcreator-step-modal" data-fast-screen="options">
+    <div class="fastcreator-modal__backdrop" data-fastcreator-close="true"></div>
+
+    <div class="fastcreator-modal__dialog fastcreator-modal__dialog--style fastcreator-modal__dialog--options" role="dialog" aria-modal="true" aria-labelledby="fastCreatorOptionsTitle">
+      <button id="fastCreatorCloseOptionsBtn" class="fastcreator-close" type="button" aria-label="Zamknij kreator">
+        <i class="fas fa-times"></i>
+      </button>
+
+      <div class="fastcreator-shell">
+        <div class="fastcreator-shell__head">
+          <div class="fastcreator-kicker">Szybki kreator katalogu</div>
+          <h2 id="fastCreatorOptionsTitle" class="fastcreator-title">Opcje wybranego stylu</h2>
+          <p class="fastcreator-copy">Po lewej ustawiasz widoczność elementów, a po prawej od razu widzisz podgląd wybranego stylu.</p>
+        </div>
+
+        <div class="fastcreator-summary">
+          <div class="fastcreator-summary__label">Nazwa projektu</div>
+          <div id="fastCreatorOptionsProjectNamePreview" class="fastcreator-summary__value">Projekt bez nazwy</div>
+          <div id="fastCreatorOptionsProjectMeta" class="fastcreator-summary__meta">Brak danych o wybranym stylu.</div>
+        </div>
+
+        <div class="fastcreator-options-workbench">
+          <div class="fastcreator-options-stage">
+            <section class="fastcreator-options-card fastcreator-options-window" aria-labelledby="fastCreatorOptionsWindowTitle">
+              <div class="fastcreator-options-card__head">
+                <div id="fastCreatorOptionsWindowTitle" class="fastcreator-toolbar__title">Opcje modułu</div>
+                <div class="fastcreator-toolbar__sub">Wybrany styl: <span id="fastCreatorOptionsStyleName">Styl</span></div>
+              </div>
+
+              <label class="fastcreator-option-toggle" for="fastCreatorShowPriceToggle">
+                <span class="fastcreator-option-toggle__copy">
+                  <span class="fastcreator-option-toggle__title">Pokazuj cenę</span>
+                  <span class="fastcreator-option-toggle__desc">Odznacz, aby ukryć cenę w podglądzie i w gotowym katalogu.</span>
+                </span>
+                <input id="fastCreatorShowPriceToggle" class="fastcreator-option-toggle__input" type="checkbox" checked>
+                <span class="fastcreator-option-toggle__switch" aria-hidden="true"></span>
+              </label>
+
+              <label class="fastcreator-option-toggle" for="fastCreatorShowBarcodeToggle">
+                <span class="fastcreator-option-toggle__copy">
+                  <span class="fastcreator-option-toggle__title">Pokazuj kod kreskowy</span>
+                  <span class="fastcreator-option-toggle__desc">Odznacz, aby ukryć kod kreskowy we wszystkich produktach z tego importu.</span>
+                </span>
+                <input id="fastCreatorShowBarcodeToggle" class="fastcreator-option-toggle__input" type="checkbox">
+                <span class="fastcreator-option-toggle__switch" aria-hidden="true"></span>
+              </label>
+            </section>
+
+            <section class="fastcreator-options-preview-card fastcreator-options-window" aria-labelledby="fastCreatorOptionsPreviewTitle">
+              <div class="fastcreator-style-selector fastcreator-style-selector--static">
+                <div class="fastcreator-style-selector__meta fastcreator-style-selector__meta--centered">
+                  <div id="fastCreatorOptionsPreviewTitle" class="fastcreator-toolbar__title">Podgląd wybranego stylu</div>
+                  <div id="fastCreatorOptionsCurrentName" class="fastcreator-style-selector__name">Styl</div>
+                  <div id="fastCreatorOptionsCurrentIndex" class="fastcreator-style-selector__index">1 / 1</div>
+                </div>
+              </div>
+
+              <div id="fastCreatorOptionsPreviewScope" class="fastcreator-style-preview-scope">
+                <div data-fastcreator-preview-id="customPreviewCard" class="fastcreator-style-preview-card">
+                  <div data-fastcreator-preview-id="customPreviewImagesTrack" class="fastcreator-style-track">
+                    <img data-fastcreator-preview-id="customPreviewImage" alt="Podgląd produktu" class="fastcreator-style-image">
+                  </div>
+                  <div data-fastcreator-preview-id="customPreviewDivider" class="fastcreator-style-divider"></div>
+                  <div data-fastcreator-preview-id="customPreviewName" class="fastcreator-style-name"></div>
+                  <div data-fastcreator-preview-id="customPreviewIndex" class="fastcreator-style-index"></div>
+                  <div data-fastcreator-preview-id="customPreviewPackageInfo" class="fastcreator-style-package"></div>
+                  <div data-fastcreator-preview-id="customPreviewFlag" class="fastcreator-style-flag">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+                  <div data-fastcreator-preview-id="customPreviewPriceCircle" class="fastcreator-style-price-circle">
+                    <div data-fastcreator-preview-id="customPreviewPriceRow" class="fastcreator-style-price-row">
+                      <span data-fastcreator-preview-id="customPreviewPriceCurrency" class="fastcreator-style-price-currency">£</span>
+                      <div data-fastcreator-preview-id="customPreviewPriceMain" class="fastcreator-style-price-main">0</div>
+                      <div class="fastcreator-style-price-stack">
+                        <span data-fastcreator-preview-id="customPreviewPriceDec" class="fastcreator-style-price-dec">00</span>
+                        <span data-fastcreator-preview-id="customPreviewPriceUnit" class="fastcreator-style-price-unit">£ / SZT.</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div data-fastcreator-preview-id="customPreviewBarcodeWrap" class="fastcreator-style-barcode-wrap">
+                    <svg data-fastcreator-preview-id="customPreviewBarcode" class="fastcreator-style-barcode"></svg>
+                  </div>
+                </div>
+              </div>
+
+              <div id="fastCreatorOptionsStatus" class="fastcreator-status" data-state="idle">
+                Ustaw opcje po lewej stronie, aby zobaczyć finalny podgląd modułu.
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <div class="fastcreator-actions">
+          <button id="fastCreatorOptionsBackBtn" class="fastcreator-btn fastcreator-btn--ghost" type="button">Wstecz</button>
+          <button id="fastCreatorApplyStyleBtn" class="fastcreator-btn fastcreator-btn--accent" type="button">Dalej</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="fastcreator-step-modal" data-fast-screen="finalize">
+    <div class="fastcreator-modal__backdrop" data-fastcreator-close="true"></div>
+
+    <div class="fastcreator-modal__dialog fastcreator-modal__dialog--style" role="dialog" aria-modal="true" aria-labelledby="fastCreatorFinalizeTitle">
+      <button id="fastCreatorCloseFinalizeBtn" class="fastcreator-close" type="button" aria-label="Zamknij kreator">
+        <i class="fas fa-times"></i>
+      </button>
+
+      <div class="fastcreator-shell">
+        <div class="fastcreator-shell__head">
+          <div class="fastcreator-kicker">Szybki kreator katalogu</div>
+          <h2 id="fastCreatorFinalizeTitle" class="fastcreator-title">Utwórz katalog</h2>
+          <p id="fastCreatorFinalizeCopy" class="fastcreator-copy">Na tym etapie przejdziesz do okna Drag and Drop z produktami, dokładnie jak w styl-wlasny.js.</p>
+        </div>
+
+        <div class="fastcreator-summary">
+          <div class="fastcreator-summary__label">Nazwa projektu</div>
+          <div id="fastCreatorFinalizeProjectNamePreview" class="fastcreator-summary__value">Projekt bez nazwy</div>
+          <div id="fastCreatorFinalizeProjectMeta" class="fastcreator-summary__meta">Brak danych o wybranym stylu.</div>
+        </div>
+
+        <div class="fastcreator-panel">
+          <section id="fastCreatorFinalizeReport" class="fastcreator-final-report" hidden aria-live="polite">
+            <div id="fastCreatorFinalizeOverview" class="fastcreator-final-report__overview"></div>
+
+            <div class="fastcreator-final-report__body">
+              <div class="fastcreator-final-report__sidebar">
+                <div class="fastcreator-final-report__sectionhead">
+                  <div class="fastcreator-summary__label">Plan stron</div>
+                  <div class="fastcreator-final-report__caption">Kliknij stronę, aby zobaczyć pełną listę indeksów.</div>
+                </div>
+                <div id="fastCreatorFinalizePageList" class="fastcreator-final-pages" role="tablist" aria-label="Plan stron katalogu"></div>
+              </div>
+
+              <div class="fastcreator-final-report__detail">
+                <div class="fastcreator-final-report__sectionhead">
+                  <div class="fastcreator-summary__label">Szczegóły strony</div>
+                  <div class="fastcreator-final-report__caption">Raport produktów przypisanych do wybranej strony.</div>
+                </div>
+                <div id="fastCreatorFinalizePageDetail" class="fastcreator-final-detail"></div>
+              </div>
+            </div>
+          </section>
+
+          <div id="fastCreatorFinalizeStatus" class="fastcreator-status" data-state="idle">
+            Kliknij "Utwórz katalog", aby przejść do okna Drag and Drop z produktami.
+          </div>
+          <div class="fastcreator-inline-actions">
+            <button id="fastCreatorFinalizeInlineBackBtn" class="fastcreator-btn fastcreator-btn--ghost" type="button">Wstecz</button>
+            <button id="fastCreatorFinalizeInlineApplyBtn" class="fastcreator-btn fastcreator-btn--accent" type="button">Utwórz katalog</button>
+          </div>
+        </div>
+
+        <div class="fastcreator-actions fastcreator-actions--finalize">
+          <button id="fastCreatorFinalizeBackBtn" class="fastcreator-btn fastcreator-btn--ghost" type="button">Wstecz</button>
+          <button id="fastCreatorFinalizeApplyBtn" class="fastcreator-btn fastcreator-btn--accent" type="button">Utwórz katalog</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div id="fastCreatorImportWarning" class="fastcreator-alert" hidden>
+    <div class="fastcreator-alert__backdrop" data-fastcreator-warning-close="true"></div>
+    <div class="fastcreator-alert__dialog" role="alertdialog" aria-modal="true" aria-labelledby="fastCreatorImportWarningTitle">
+      <button id="fastCreatorImportWarningCloseBtn" class="fastcreator-close" type="button" aria-label="Zamknij komunikat">
+        <i class="fas fa-times"></i>
+      </button>
+
+      <div class="fastcreator-shell fastcreator-shell--alert">
+        <div class="fastcreator-shell__head fastcreator-shell__head--compact">
+          <div class="fastcreator-kicker">Informacja o imporcie</div>
+          <h2 id="fastCreatorImportWarningTitle" class="fastcreator-title fastcreator-title--alert">Brak przypisania stron</h2>
+          <p id="fastCreatorImportWarningMessage" class="fastcreator-copy">
+            Brak przypisania produktów do stron. Spowoduje to wydłużony proces układu katalogu.
+          </p>
+        </div>
+
+        <div class="fastcreator-actions fastcreator-actions--alert">
+          <button id="fastCreatorImportWarningDismissBtn" class="fastcreator-btn fastcreator-btn--accent" type="button">Zamknij</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
